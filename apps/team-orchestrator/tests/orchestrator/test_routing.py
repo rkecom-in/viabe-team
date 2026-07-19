@@ -78,3 +78,57 @@ def test_orchestrator_terminal_node_sets_terminated_flag() -> None:
     assert orchestrator_terminal_node(AgentGraphState()) == {
         "terminated_without_spawn": True
     }
+
+
+# --- §7D — route_decided's reasoning_ref joins back to the turn's reasoning_turn row --------
+
+
+def test_route_spawn_emits_reasoning_ref_for_the_same_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The spawn-path route_decided row must carry a reasoning_ref pointing at THIS turn's
+    reasoning_turn row — the SAME (run_id, step_name) shape langchain_callback.py emits — so the
+    two rows join."""
+    import orchestrator.routing as routing_mod
+    from uuid import uuid4
+
+    captured: dict = {}
+    monkeypatch.setattr(routing_mod, "emit_tm_audit", lambda **kw: captured.update(kw))
+
+    run_id = uuid4()
+    state = AgentGraphState(
+        messages=[
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "spawn_sales_recovery", "args": {}, "id": "1"}],
+            )
+        ],
+        run_id=run_id,
+    )
+
+    assert route_after_orchestrator(state) == "spawn"
+    assert captured["reasoning_ref"] == {
+        "run_id": str(run_id),
+        "step_name": "orchestrator_agent_turn",
+    }
+
+
+def test_route_terminal_emits_reasoning_ref_for_the_same_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The no-spawn terminal route ALSO records a reasoning_ref — a terminated-without-spawn turn
+    still had a reasoning turn worth joining to."""
+    import orchestrator.routing as routing_mod
+    from uuid import uuid4
+
+    captured: dict = {}
+    monkeypatch.setattr(routing_mod, "emit_tm_audit", lambda **kw: captured.update(kw))
+
+    run_id = uuid4()
+    state = AgentGraphState(messages=[AIMessage(content="", tool_calls=[])], run_id=run_id)
+
+    assert route_after_orchestrator(state) == "terminal"
+    assert captured["reasoning_ref"] == {
+        "run_id": str(run_id),
+        "step_name": "orchestrator_agent_turn",
+    }

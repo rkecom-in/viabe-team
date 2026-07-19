@@ -38,7 +38,16 @@ logger = logging.getLogger(__name__)
 
 # VT-125 limits. Tighter than VT-35 sales_recovery limits — orchestrator-
 # agent is the routing brain, not a domain reasoner; bounded per-invocation.
-ORCHESTRATOR_TOOL_CALL_HARD_LIMIT = 5
+# VT-617: raised 5 -> 10. Under the CL-443 conversational-primary reframe the
+# brain (dispatch_brain / route:none) is the PRIMARY surface and legitimately
+# does inline multi-tool work in ONE turn — e.g. a multi-field onboarding
+# message needs read_onboarding_state + record_answer x3 + next_required_question
+# (6 calls). At 5 the run truncated mid-save, the owner saw a "hiccup saving"
+# snag, and it then repeated (the multi_field stuck-loop the VT-611 gate flagged).
+# Runaway is still bounded by the token (10k), wall-clock (120s), cost (₹5), and
+# depth (3) guards below — tool-call COUNT was the redundantly-tight axis for the
+# reframed role, not a real cost lever.
+ORCHESTRATOR_TOOL_CALL_HARD_LIMIT = 10
 ORCHESTRATOR_TOKEN_HARD_LIMIT = 10_000
 ORCHESTRATOR_WALL_CLOCK_HARD_LIMIT_S = 120.0
 ORCHESTRATOR_COST_HARD_LIMIT_PAISE = 500  # ₹5

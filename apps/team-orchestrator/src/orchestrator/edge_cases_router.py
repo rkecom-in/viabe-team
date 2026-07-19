@@ -38,12 +38,23 @@ def _send_edge_ack(tenant_id: UUID | str, recipient_phone: str | None, text: str
 
 
 def route_edge_case(
-    *, tenant_id: UUID | str, event: Any, classify_fn: Any | None = None
+    *,
+    tenant_id: UUID | str,
+    event: Any,
+    classify_fn: Any | None = None,
+    intent_sink: dict[str, Any] | None = None,
 ) -> "DispatchResult | Literal['owner_initiated'] | None":
     """Classify the owner message; route the PR-1 edge-cases (exclusion / status_query) to
     their fast handlers and return a DispatchResult. Return None to fall through to the
     agent (any other intent, incl. the PR-2 adhoc/template intents). ``classify_fn`` is
-    injectable for tests (no live Anthropic)."""
+    injectable for tests (no live Anthropic).
+
+    VT-461: the SAME classification this router already runs is surfaced to the
+    Team-Manager brain when the turn falls through to the agent. Pass ``intent_sink``
+    (a mutable dict); on a successful classify it is populated with the typed envelope
+    (``classification`` / ``confidence`` / ``suggested_action``) so dispatch can inject a
+    ``## Manager intent signal`` prior WITHOUT a second Haiku call. A classify failure
+    leaves the sink untouched (the brain reasons from the message alone)."""
     from orchestrator.agent.dispatch import DispatchResult  # lazy: avoid import cycle
 
     body = getattr(event, "body", "") or ""
@@ -64,6 +75,14 @@ def route_edge_case(
         _out = classify_fn(body)
         classification = getattr(_out, "classification", None)
         confidence = float(getattr(_out, "confidence", 0.0) or 0.0)
+        # VT-461: surface the classification to the brain (handle-directly-vs-delegate
+        # prior). Only the typed fields — never the raw body — cross into the sink.
+        if intent_sink is not None and classification is not None:
+            intent_sink["classification"] = classification
+            intent_sink["confidence"] = confidence
+            intent_sink["suggested_action"] = str(
+                getattr(_out, "suggested_action", "") or ""
+            )
     except Exception:
         # A classify failure (bad model JSON / envelope validation) must NOT crash
         # dispatch or trigger a workflow retry — fall through to the agent (the prior
@@ -96,12 +115,44 @@ def route_edge_case(
         from orchestrator.owner_inputs.status_query import answer_status_query
 
         text = answer_status_query(tenant_id, body)
+        if text is None:
+            # VT-600 — the classifier said status_query but the deterministic parse
+            # found no lookup it owns (e.g. "did you get my store address?"): fall
+            # through to the brain instead of the old portal deflection. The
+            # classification still rides intent_sink as the brain's prior.
+            logger.info(
+                "route_edge_case: status_query parse=unknown — falling through to the agent"
+            )
+            return None
         _send_edge_ack(tenant_id, sender_phone, text)
         return DispatchResult(
             final_status="completed", terminal_path="terminal", reason="edge_case:status_query"
         )
 
     if classification == "template_error_followup":
+        # VT-667 fix-4 (MONEY-PATH) — a "this message is wrong" report arriving while an OPEN
+        # campaign_send approval is pending is almost never a delivered-template failure (that draft
+        # has NOT been sent yet); it is a CORRECTION of the pending draft. Route it to the campaign
+        # REVISION (supersede the stale draft + re-dispatch SR with the combined brief) instead of
+        # the Fazal-review deflection that ignores the owner's ask (the observed ignored_speech_act).
+        # Gated on enforce mode (the SR loop) + the open-approval STATE (revise_pending_campaign
+        # self-checks it): a genuine template-error with NO open campaign approval keeps the existing
+        # path byte-for-byte, and legacy/shadow behaviour is unchanged.
+        from orchestrator.manager.loop_mode import is_enforce
+
+        message_sid = getattr(event, "twilio_message_sid", None)
+        if is_enforce() and message_sid:
+            from orchestrator.manager.triage_seam import revise_pending_campaign
+
+            revision_ack = revise_pending_campaign(tenant_id, body, message_sid)
+            if revision_ack is not None:
+                _send_edge_ack(tenant_id, sender_phone, revision_ack)
+                return DispatchResult(
+                    final_status="completed",
+                    terminal_path="terminal",
+                    reason="edge_case:campaign_revision",
+                )
+
         from orchestrator.owner_inputs.template_error import handle_template_error
 
         te_result = handle_template_error(tenant_id, body)

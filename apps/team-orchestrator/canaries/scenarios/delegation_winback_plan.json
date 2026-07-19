@@ -1,0 +1,42 @@
+{
+  "name": "delegation_winback_plan",
+  "domain": "sr_autonomy_rails",
+  "critical": false,
+  "setup_args": [
+    "--onboarded",
+    "--seed-lapsed-customers",
+    "8"
+  ],
+  "expected_fail": false,
+  "notes": "Sales-Recovery delegation: a seeded lapsed cohort + a win-back plan ask should DELEGATE to the Sales-Recovery specialist and surface an in-chat plan summary + approval prompt (VT-594). Setup: `setup --onboarded --seed-lapsed-customers 8 --name convo-harness-<id>` then `script <tenant> delegation_winback_plan.json`. Step 1 accepts EITHER honest outcome: (a) a real plan summary + approval prompt (cohort non-empty — the primary expectation given the seed), OR (b) an honest insufficient-data reply if the cohort is empty for this run (with the CL-2026-07-10 deterministic 45d lapsed window + seeded consent, the cohort is non-empty, so (a) is the expected outcome — no percentile non-determinism anymore). Both are asserted here only for 'not a D1 non-answer' and 'not the raw status_query count line' — the ORCHESTRATOR SESSION reading the full json-report/judge transcript makes the final quality call on which outcome occurred and whether it's acceptable. Step 2 confirms the pure customer-count ask still fast-paths to the raw number regardless of what step 1 produced.",
+  "steps": [
+    {
+      "message": "make me a plan to win back my lapsed customers this month",
+      "assert_no_silent": true,
+      "assert_contains": [
+        "drafted"
+      ],
+      "assert_route": {
+        "expect_sr_delegation": true,
+        "tenant_wide": true
+      },
+      "assert_side_effects": {
+        "expect_campaign": true,
+        "expect_approval_decision": "pending",
+        "tenant_wide": true
+      },
+      "note": "Expect delegation to Sales-Recovery: an in-chat plan summary + approval prompt, OR an honest empty/insufficient-cohort reply — never a D1 non-answer, never silence. Manual review (json-report transcript) verdicts which outcome actually happened. [2026-07-04: assert loosened plan->drafted — the live summary says 'drafted a campaign', behavior correct, assert was too literal.] [VT-633: interim ack allowed; draft asserted against the settled transcript + tenant-wide DB truth.]"
+    },
+    {
+      "message": "how many customers do I have?",
+      "assert_no_silent": true,
+      "assert_contains": [
+        "8"
+      ],
+      "assert_route": {
+        "expect_sr_delegation": false
+      },
+      "note": "Pure count ask still fast-paths via status_query regardless of the win-back plan outcome above."
+    }
+  ]
+}

@@ -1,0 +1,33 @@
+{
+  "name": "repeat_question_guard",
+  "domain": "onboarding",
+  "critical": true,
+  "setup_args": [
+    "--owner-inputs",
+    "true",
+    "--journey"
+  ],
+  "expected_fail": false,
+  "notes": "The owner answers a question; the next turns must never re-ask the same substance (record-and-move-on). Setup: fresh onboarding tenant, journey ACTIVE with a pre-seeded queue — `setup --owner-inputs true --journey` (VT-582 calibration fix: a bare `setup` with no --journey creates no onboarding_journey row at all, so the journey never intercepts and this scenario can't probe the walker's record-and-move-on behavior). 'Hi' re-presents the pending confirm without recording it (bare-greeting guard); the multi-field answer records against whichever field is current; step 3 checks nothing already-given gets re-asked.",
+  "steps": [
+    {
+      "message": "Hi",
+      "assert_no_silent": true
+    },
+    {
+      "message": "We are Probe Traders, a hardware shop in Pune",
+      "assert_no_silent": true,
+      "note": "Multi-field answer: name + type + city in one message."
+    },
+    {
+      "message": "ok what next",
+      "assert_no_silent": true,
+      "assert_not_contains": [
+        "what kind of business",
+        "which city",
+        "what does Probe Traders do"
+      ],
+      "note": "NO re-asking any of the three facts just given."
+    }
+  ]
+}

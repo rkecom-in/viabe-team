@@ -42,11 +42,6 @@ from .campaign_plan_emitted import (
     CampaignPlanEmittedOutput,
     CampaignPlanVariant,
 )
-from .day39_evaluator import (
-    Day39EvaluatorEnvelope,
-    Day39EvaluatorInput,
-    Day39EvaluatorOutput,
-)
 from .dsr_processed import (
     DsrProcessedEnvelope,
     DsrProcessedInput,
@@ -95,10 +90,9 @@ from .opt_out_processed import (
     OptOutProcessedInput,
     OptOutProcessedOutput,
 )
-from .refund_decision import (
-    RefundDecisionEnvelope,
-    RefundDecisionInput,
-    RefundDecisionOutput,
+from .run_control_intervention import (
+    RunControlInterventionEnvelope,
+    RunControlInterventionInput,
 )
 from .self_evaluate_gate import (
     SelfEvaluateGateEnvelope,
@@ -136,8 +130,6 @@ STEP_KIND_REGISTRY: dict[str, type[StepEnvelope]] = {
     "campaign_plan_emitted": CampaignPlanEmittedEnvelope,
     "message_dispatch": MessageDispatchEnvelope,
     "attribution_match": AttributionMatchEnvelope,
-    "day39_evaluator": Day39EvaluatorEnvelope,
-    "refund_decision": RefundDecisionEnvelope,
     "opt_out_processed": OptOutProcessedEnvelope,
     "dsr_processed": DsrProcessedEnvelope,
     "error": ErrorEnvelope,
@@ -147,6 +139,7 @@ STEP_KIND_REGISTRY: dict[str, type[StepEnvelope]] = {
     "l0_query": L0QueryEnvelope,
     "compose_output": ComposeOutputEnvelope,
     "aborted_hard_limit": AbortedHardLimitEnvelope,
+    "run_control_intervention": RunControlInterventionEnvelope,
 }
 
 
@@ -229,8 +222,6 @@ __all__ = [
     "CampaignPlanEmittedEnvelope",
     "MessageDispatchEnvelope",
     "AttributionMatchEnvelope",
-    "Day39EvaluatorEnvelope",
-    "RefundDecisionEnvelope",
     "OptOutProcessedEnvelope",
     "DsrProcessedEnvelope",
     "ErrorEnvelope",
@@ -240,6 +231,7 @@ __all__ = [
     "L0QueryEnvelope",
     "ComposeOutputEnvelope",
     "AbortedHardLimitEnvelope",
+    "RunControlInterventionEnvelope",
     # Input/Output sub-models
     "WebhookReceivedInput",
     "WebhookClassifiedInput",
@@ -260,10 +252,6 @@ __all__ = [
     "MessageDispatchOutput",
     "AttributionMatchInput",
     "AttributionMatchOutput",
-    "Day39EvaluatorInput",
-    "Day39EvaluatorOutput",
-    "RefundDecisionInput",
-    "RefundDecisionOutput",
     "OptOutProcessedInput",
     "OptOutProcessedOutput",
     "DsrProcessedInput",
@@ -283,4 +271,5 @@ __all__ = [
     "AbortedHardLimitInput",
     "AbortedHardLimitOutput",
     "HardLimitAxis",
+    "RunControlInterventionInput",
 ]

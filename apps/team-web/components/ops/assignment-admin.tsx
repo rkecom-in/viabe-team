@@ -13,6 +13,14 @@
 import { useState, useTransition } from 'react'
 
 import { useOverlay } from '@/components/ops/overlay-context'
+import {
+  OpsTable,
+  OpsEmpty,
+  OpsChip,
+  OpsMono,
+  opsCellClass,
+  opsButtonClass,
+} from '@/components/ops/ops-ui'
 import { assignAction, unassignAction } from '@/app/(app)/team/ops/assignment/actions'
 import type {
   AssignableOperator,
@@ -67,44 +75,45 @@ export function AssignmentAdmin({
     })
   }
 
-  if (rows.length === 0) return <p data-ops-empty>No businesses.</p>
+  if (rows.length === 0) return <OpsEmpty data-ops-empty>No businesses.</OpsEmpty>
 
   return (
-    <table data-ops-assignment>
-      <thead>
-        <tr>
-          <th>Business</th>
-          <th>Assigned VTRs</th>
-          <th>Assign</th>
-          <th></th>
-        </tr>
-      </thead>
-      <tbody>
-        {rows.map((b) => (
-          <tr key={b.tenant_id}>
-            <td>{b.business_name ?? shortId(b.tenant_id)}</td>
-            <td>
-              {b.assignments.length === 0 ? (
-                <span data-ops-unassigned>unassigned</span>
-              ) : (
-                <ul>
-                  {b.assignments.map((a) => (
-                    <li key={a.assignment_id}>
-                      {shortId(a.operator_id)}{' '}
-                      <button
-                        type="button"
-                        disabled={pending}
-                        onClick={() => doUnassign(b.tenant_id, a.assignment_id, a.operator_id)}
-                      >
-                        Unassign
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </td>
-            <td>
+    <OpsTable
+      tableProps={{ 'data-ops-assignment': '' }}
+      headers={['Business', 'Assigned VTRs', 'Assign', '']}
+    >
+      {rows.map((b) => (
+        <tr key={b.tenant_id} className="hover:bg-gray-50">
+          <td className={`${opsCellClass} font-medium text-gray-900`}>
+            {b.business_name ?? shortId(b.tenant_id)}
+          </td>
+          <td className={opsCellClass}>
+            {b.assignments.length === 0 ? (
+              <span data-ops-unassigned className="text-xs italic text-gray-400">
+                unassigned
+              </span>
+            ) : (
+              <ul className="flex flex-col gap-1.5">
+                {b.assignments.map((a) => (
+                  <li key={a.assignment_id} className="flex items-center gap-2">
+                    <OpsMono>{shortId(a.operator_id)}</OpsMono>
+                    <button
+                      type="button"
+                      className={opsButtonClass('ghost')}
+                      disabled={pending}
+                      onClick={() => doUnassign(b.tenant_id, a.assignment_id, a.operator_id)}
+                    >
+                      Unassign
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </td>
+          <td className={opsCellClass}>
+            <div className="flex flex-wrap items-center gap-1.5">
               <select
+                className="rounded-md border border-gray-300 bg-white px-2 py-1 text-xs text-gray-700 focus:border-gray-400 focus:outline-none"
                 value={picks[b.tenant_id] ?? ''}
                 onChange={(e) => setPicks((p) => ({ ...p, [b.tenant_id]: e.target.value }))}
               >
@@ -115,38 +124,57 @@ export function AssignmentAdmin({
                   </option>
                 ))}
               </select>
-              <button type="button" disabled={pending} onClick={() => doAssign(b.tenant_id)}>
-                Assign
-              </button>
-              {msg[b.tenant_id] && <span data-ops-msg> {msg[b.tenant_id]}</span>}
-            </td>
-            <td>
               <button
                 type="button"
-                onClick={() =>
-                  overlay.open({
-                    key: `assign-${b.tenant_id}`,
-                    title: `Assignments — ${b.business_name ?? shortId(b.tenant_id)}`,
-                    content: (
-                      <div data-ops-assignment-detail>
-                        <p>Business: {b.business_name ?? b.tenant_id}</p>
-                        <ul>
+                className={opsButtonClass('primary')}
+                disabled={pending}
+                onClick={() => doAssign(b.tenant_id)}
+              >
+                Assign
+              </button>
+              {msg[b.tenant_id] && (
+                <span data-ops-msg className="text-xs text-gray-500">
+                  {msg[b.tenant_id]}
+                </span>
+              )}
+            </div>
+          </td>
+          <td className={`${opsCellClass} text-right`}>
+            <button
+              type="button"
+              className={opsButtonClass()}
+              onClick={() =>
+                overlay.open({
+                  key: `assign-${b.tenant_id}`,
+                  title: `Assignments — ${b.business_name ?? shortId(b.tenant_id)}`,
+                  content: (
+                    <div data-ops-assignment-detail className="space-y-3 text-sm text-gray-700">
+                      <p>
+                        <span className="text-gray-500">Business: </span>
+                        <span className="text-gray-900">{b.business_name ?? b.tenant_id}</span>
+                      </p>
+                      {b.assignments.length === 0 ? (
+                        <p className="text-gray-500">No active assignments.</p>
+                      ) : (
+                        <ul className="space-y-1.5">
                           {b.assignments.map((a) => (
-                            <li key={a.assignment_id}>VTR {a.operator_id}</li>
+                            <li key={a.assignment_id} className="flex items-center gap-2">
+                              <OpsChip tone="blue">VTR</OpsChip>
+                              <OpsMono>{a.operator_id}</OpsMono>
+                            </li>
                           ))}
                         </ul>
-                        {b.assignments.length === 0 && <p>No active assignments.</p>}
-                      </div>
-                    ),
-                  })
-                }
-              >
-                Open
-              </button>
-            </td>
-          </tr>
-        ))}
-      </tbody>
-    </table>
+                      )}
+                    </div>
+                  ),
+                })
+              }
+            >
+              Open
+            </button>
+          </td>
+        </tr>
+      ))}
+    </OpsTable>
   )
 }

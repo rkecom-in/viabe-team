@@ -11,6 +11,7 @@ in doubt, route to the brain.
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 
@@ -21,7 +22,6 @@ from orchestrator.keyword_match import boundary_patterns, nfc as _nfc
 from orchestrator.state import SubscriberState
 from orchestrator.types import (
     PreFilterResult,
-    Reject,
     RouteToBrain,
     RouteToDirectHandler,
     WebhookEvent,
@@ -52,12 +52,97 @@ _OPT_OUT_PATTERNS = _boundary_patterns("opt_out_keywords.yaml")
 # the whole trimmed body, the inverse of opt-out. Routes to data_inputs_enable_handler.
 _ENABLE_KEYWORDS = {_nfc(kw.casefold()) for kw in _load_keywords("data_inputs_enable_keywords.yaml")}
 
-# DSR: boundary-safe containment (see _boundary_patterns).
-_DSR_PATTERNS = _boundary_patterns("dsr_keywords.yaml")
+# DSR (VT-585 — intent, not substring): dsr_keywords.yaml is now sectioned. A bare data noun no
+# longer fires on its own ("connect my data" / "मेरा डेटा कनेक्ट करो" must NOT be read as a deletion
+# request); the matcher (`_dsr_match`) requires either a standalone phrase OR a deletion verb AND a
+# data noun together. All three sections compile through the SAME boundary-safe containment helper as
+# opt-out, so the consent surfaces can't drift. See the yaml header for the intent-not-substring rule.
+def _dsr_section(section: str) -> list[str]:
+    data = yaml.safe_load((_CONFIG_DIR / "dsr_keywords.yaml").read_text())
+    return [str(keyword) for keyword in (data.get(section) or [])]
 
-# Status ping: narrow regex — matches ONLY a whole-message trivial query.
+
+_DSR_STANDALONE_PATTERNS = boundary_patterns(_dsr_section("standalone"))
+_DSR_DELETE_VERB_PATTERNS = boundary_patterns(_dsr_section("delete_verbs"))
+_DSR_DATA_NOUN_PATTERNS = boundary_patterns(_dsr_section("data_nouns"))
+
+
+def _dsr_match(nfc_body: str) -> str | None:
+    """VT-585: DSR fires on an ERASURE INTENT, not a bare data mention. ``nfc_body`` is the
+    already-NFC form. Returns a matched-pattern label (for the dsr_handler payload) or None. Two
+    independent fire paths, both boundary-safe containment (NFC, EN + Devanagari + Hinglish):
+
+      1. an UNAMBIGUOUS standalone phrase (gdpr / erasure / right to be forgotten / forget me /
+         data deletion / "मुझे हटा|डिलीट|मिटा" = delete-me), OR
+      2. a DELETION VERB **and** a DATA/INFO noun BOTH present, in any order — "delete my data",
+         "data delete karo", "मेरा डेटा हटाओ", "मेरा data delete karo".
+
+    A bare "my data" / "मेरा डेटा" with NO deletion verb ("connect my data", "yes connect my data",
+    "मेरा डेटा कनेक्ट करो") deliberately does NOT fire — that was the VT-585 defect (a store-wiring
+    owner falsely told their data-DELETION request was acknowledged). Failure direction stays
+    DPDP-conservative: an exotic phrasing the keywords miss falls through to the brain, not silence."""
+    for pattern in _DSR_STANDALONE_PATTERNS:
+        if pattern.search(nfc_body):
+            return pattern.pattern
+    verb = next((p for p in _DSR_DELETE_VERB_PATTERNS if p.search(nfc_body)), None)
+    if verb is not None:
+        noun = next((p for p in _DSR_DATA_NOUN_PATTERNS if p.search(nfc_body)), None)
+        if noun is not None:
+            return f"{verb.pattern} & {noun.pattern}"
+    return None
+
+# VT-384 (Gap-5 PR-3) — L3 autonomy keyword sets (config/l3_keywords.yaml), LOCKSTEP with the
+# CL-438 Meta-approved team_autonomy_offer body. BOTH rules are ordered strictly AFTER the
+# authoritative opt-out + DSR rules (the CL-438 floor — see RULE_ORDER below). The `kill` set is
+# boundary-safe CONTAINMENT (the opt-out style) of AUTONOMY-SPECIFIC kill phrases; the `enable` set
+# is EXACT whole-body match (the data-inputs ENABLE style). Bare STOP stays the authoritative
+# opt-out path (opt_out_keywords.yaml) and wins first — it is NOT duplicated in the kill set.
+def _load_l3_keyword_section(section: str) -> list[str]:
+    data = yaml.safe_load((_CONFIG_DIR / "l3_keywords.yaml").read_text())
+    return [str(keyword) for keyword in (data.get(section) or [])]
+
+
+_L3_KILL_PATTERNS = boundary_patterns(_load_l3_keyword_section("kill"))
+_L3_ENABLE_KEYWORDS = {_nfc(kw.casefold()) for kw in _load_l3_keyword_section("enable")}
+
+# VT-384 condition C-b — the RULE-ORDER PIN (structural, not just behavioral). This is the
+# AUTHORITATIVE source-of-truth ordering of the inbound-body rules in :func:`pre_filter`, kept in
+# the SAME order they execute. The acceptance suite asserts ``opt_out`` and ``dsr`` both precede
+# ``l3_kill`` and ``l3_enable`` here (CL-438 floor: the authoritative DPDP matchers run first), so a
+# future rule insertion that silently reorders the gate fails the pin test instead of shipping a
+# compliance regression. Any change to the rule sequence in pre_filter MUST update this list in
+# lockstep (the pin test reads THIS list, then the rules read in the same sequence).
+INBOUND_BODY_RULE_ORDER: tuple[str, ...] = (
+    "opt_out",     # Rule a  — authoritative DPDP opt-out (FIRST; CL-438 floor)
+    "data_inputs_enable",  # Rule a2 — VT-303 owner_inputs consent grant
+    "dsr",         # Rule b  — authoritative DPDP data-subject request
+    "l3_kill",     # Rule b2 — VT-384 autonomy kill (AFTER opt-out + DSR)
+    "l3_enable",   # Rule b3 — VT-384 autonomy ENABLE (AFTER opt-out + DSR)
+    "status_ping", # Rule f
+    "integration_intent",  # Rule g
+    "brain",       # Rule h — fallthrough
+)
+# Alias the C-b acceptance suite's declarative-list pin reads by index (test_vt384_pre_filter_
+# rule_order.test_declarative_rule_list_order_if_present) — the strongest form of the order pin.
+_RULE_ORDER = INBOUND_BODY_RULE_ORDER
+
+# Status ping: narrow regex — matches ONLY a whole-message status QUERY.
+#
+# VT-464 D2: bare greetings (hi/hello/hey/namaste) were REMOVED from this set.
+# A standalone greeting must fall THROUGH to the brain (Rule h) so the rebuilt
+# Team-Manager greets + onboards the owner as a business manager — the prior
+# regex swallowed "Hi"/"Hello"/"Hey" into status_ping_handler before the brain
+# ever ran, bypassing the "Hi → business-manager, not customer-service" fix.
+# Only genuine STATUS-intent phrases ("any update", "what's the status",
+# "kya hua", "कैसा चल रहा है") route to status_ping_handler. This is
+# DPDP-adjacent routing: it does NOT touch opt-out / DSR / consent rules.
 _STATUS_PING = re.compile(
-    r"^\s*(hi|hello|hey|any update|any updates|कैसा चल रहा है)\s*[?!.]*\s*$",
+    r"^\s*("
+    r"any update|any updates|"
+    r"(what'?s|whats)\s+(the\s+)?status|status\s+update|"
+    r"kya\s+hua|kya\s+update|"
+    r"कैसा चल रहा है"
+    r")\s*[?!.]*\s*$",
     re.IGNORECASE,
 )
 
@@ -81,20 +166,174 @@ _INTEGRATION_INTENT_RE = re.compile(
 )
 
 
+def _converse_status_queries() -> bool:
+    """VT-583 (CL-2026-07-03-conversing-surfaces): route a status QUERY to the Team-Manager brain (which
+    has query tools + the always-on conversation window) instead of the canned status_ping_handler +
+    fixed SQL strings. Default ON — an explicit ``0``/``false``/``no`` restores the deterministic
+    handler (the fail-soft fallback). Read FRESH per call so an env flip takes effect without a restart.
+    This is DPDP-neutral ROUTING: it does NOT touch opt-out / DSR / consent rules (those still run and
+    win first); a status query from an un-consented tenant is still gated by the runner consent gate."""
+    return os.environ.get("CONVERSE_STATUS_QUERIES", "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
 def _normalize(body: str) -> str:
     """Collapse whitespace, case-fold, NFC-normalize for exact keyword comparison (the enable
     gate). VT-329: NFC so a decomposed Devanagari body matches the canonical keyword form."""
     return _nfc(" ".join(body.split()).casefold())
 
 
+# R5 / CD6 (CL-2026-07-12-global-stop-is-optout-reconsent-to-resume) — a GLOBAL send-stop
+# ("bas ab message mat bhejo" = stop sending everyone) is a tenant OPT-OUT; a PER-CUSTOMER stop
+# ("Rajesh ko mat bhejo" / "us customer ko mat bhejo") is NOT — it suppresses that ONE recipient
+# (Fazal CD6), never a tenant opt-out. English/Devanagari opt-out words (STOP / band karo / roko /
+# बंद करो / UNSUBSCRIBE) are ALREADY caught by _OPT_OUT_PATTERNS; this matcher ADDS only the Hinglish
+# "<scope> mat/nahi/dont <send>" global stops those miss. It fires ONLY when the carve-out proves
+# there is no customer reference:
+#   (1) a send-negation CORE — a send verb IMMEDIATELY adjacent to a negation (positional, never
+#       bag-of-words, so "wait mat karo" is NOT read as a send-negation),
+#   (2) at least one GLOBAL SCOPE token — a message-noun or an everyone-word (a bare "mat bhejo" reply
+#       to an approval carries none, so it stays a per-CAMPAIGN reject, never a tenant opt-out), AND
+#   (3) NO phone digit-run AND every token in the bounded allow-set — any unstripped token (a potential
+#       customer name) FAILS (3) and falls through, so the matcher never STEALS a per-customer turn.
+# The stop side strictly TIGHTENS (more phrasings opt out — fail-safe). ZERO LLM (Pillar-1 subtree).
+_GS_NEGATION = {"no", "not", "dont", "never", "mat", "nahi", "nahin", "नहीं", "ना", "न", "मत"}
+_GS_SEND_VERB = {
+    "send", "sending", "bhejo", "bhejna", "bhej", "bhejde", "bhejdo", "bhejdena",
+    "भेजो", "भेज", "भेजना",
+}
+# Message-nouns double as GLOBAL SCOPE — "message"/"campaign"/… with no named recipient means "all".
+_GS_MSG_NOUN = {
+    "message", "messages", "messaging", "msg", "msgs", "text", "texts", "texting",
+    "campaign", "campaigns", "notification", "notifications", "whatsapp", "sms",
+    "मैसेज", "मेसेज", "संदेश",
+}
+# Everyone-words — the explicit global-scope form ("sabko mat bhejo").
+_GS_SCOPE = {"sab", "sabko", "sabhi", "sabke", "everyone", "everybody", "all", "anybody", "anyone", "सब", "सबको"}
+# Filler/particle tokens a global stop can carry WITHOUT naming a customer (referential words like
+# "us"/"is"/"ye"/"customer" are deliberately ABSENT — they mark a per-customer turn and must fall through).
+_GS_FILLER = {
+    "bas", "ab", "ko", "na", "please", "pls", "aur", "ya", "toh", "to", "yaar", "bhai", "ji",
+    "kar", "karo", "karna", "kardo", "dena", "do", "de", "बस", "अब", "को",
+}
+_GS_ALLOWED = _GS_NEGATION | _GS_SEND_VERB | _GS_MSG_NOUN | _GS_SCOPE | _GS_FILLER
+_GS_PHONE_DIGITS_RE = re.compile(r"\d{4,}")
+
+
+def matches_global_stop(body: str) -> bool:
+    """R5 / CD6 — True iff ``body`` is a GLOBAL send-stop (tenant opt-out) vs a per-customer stop. See
+    the token-set comment above. NFC + whitespace/punct split (VT-329-safe; no Devanagari-dead ``\\b``).
+    Conservative by construction: a question, a bare send-negation with no global scope, a phone/name,
+    or any unstripped token -> False (falls through to the per-customer / brain path)."""
+    norm = _nfc((body or "").strip().casefold()).replace("'", "").replace("’", "")
+    if "?" in norm:
+        return False
+    if _GS_PHONE_DIGITS_RE.search(norm):
+        return False  # a phone/order number means a specific target — never a global stop
+    token_list = [t for t in re.split(r"[\s,.!?;:।/\\-]+", norm) if t]
+    if not token_list:
+        return False
+    tokens = set(token_list)
+    # (1) send-negation core — a send verb IMMEDIATELY adjacent to a negation.
+    core = any(
+        t in _GS_SEND_VERB
+        and (
+            (i > 0 and token_list[i - 1] in _GS_NEGATION)
+            or (i + 1 < len(token_list) and token_list[i + 1] in _GS_NEGATION)
+        )
+        for i, t in enumerate(token_list)
+    )
+    if not core:
+        return False
+    # (2) global scope — a message-noun or an everyone-word (bare "mat bhejo" has neither).
+    if not (tokens & _GS_MSG_NOUN or tokens & _GS_SCOPE):
+        return False
+    # (3) carve-out — every token accounted for (no residual customer name/identifier).
+    return tokens <= _GS_ALLOWED
+
+
 def matches_opt_out_or_dsr(body: str) -> bool:
     """True if ``body`` CONTAINS an opt-out or DSR keyword (VT-329: boundary-safe containment, NFC,
-    EN+Devanagari+Hinglish). The VT-85 refund-offer reply gate calls this to YIELD to opt-out / DSR
-    routing — those ALWAYS win over a refund-decision interpretation (DPDP): a refund_offered tenant
-    who says "delete my data and refund me" / "बंद करो" / "band karo" must reach the dsr/opt-out
-    handler, not auto-refund."""
+    EN+Devanagari+Hinglish), OR is a CD6 GLOBAL send-stop (``matches_global_stop`` — "bas ab message
+    mat bhejo"). Phase-aware reply gates call this so opt-out / DSR routing ALWAYS wins over any other
+    interpretation (DPDP): a tenant who says "delete my data" / "बंद करो" / "band karo" / a global
+    send-stop must reach the dsr/opt-out handler regardless of phase."""
     nfc = _nfc(body)
-    return any(p.search(nfc) for p in _OPT_OUT_PATTERNS) or any(p.search(nfc) for p in _DSR_PATTERNS)
+    return (
+        any(p.search(nfc) for p in _OPT_OUT_PATTERNS)
+        or _dsr_match(nfc) is not None
+        or matches_global_stop(body)
+    )
+
+
+def matches_kill_keyword(body: str) -> bool:
+    """True if ``body`` CONTAINS an L3 autonomy-kill phrase (config/l3_keywords.yaml `kill` set;
+    NFC, boundary-safe containment — the same matcher pre_filter rule b2 runs). The runner
+    owner-inbound demote leg calls this to EXCLUDE a kill keyword: a kill must FREEZE via
+    autonomy_kill_handler (cancel holds/batches outright), not merely DEMOTE-and-regress. Bare
+    opt-out keywords are deliberately absent from the kill set (they route to opt_out_handler
+    first), so this never overlaps matches_opt_out_or_dsr."""
+    nfc = _nfc(body)
+    return any(p.search(nfc) for p in _L3_KILL_PATTERNS)
+
+
+# VT-583 (CL-2026-07-03-fluid-consent-and-control): consent-reply INTENT — DETERMINISTIC floor, ZERO
+# LLM (this file is the Pillar-1 deterministic subtree). The consent boundary itself forbids a brain
+# transmit for an un-consented tenant, so — unlike the paced-flow / shopify converse classifiers — the
+# consent reply is read by keyword floor ONLY. It is CONSERVATIVE (both-signals or neither → None →
+# re-ask): a consent GRANT must never ride on a guess. The exact-match "ACTIVATE TEAM" enable floor
+# (Rule a2) is UNCHANGED and still wins first; this only lets a plain "yes"/"haan"/"start" reply to the
+# consent ASK route to that SAME audited enable path (resolved in runner.webhook_pipeline_run).
+_CONSENT_AFFIRM = {
+    "yes", "y", "yeah", "yep", "yup", "ok", "okay", "okey", "sure", "start", "activate", "enable",
+    "go", "proceed", "haan", "ha", "haa", "theek", "thik", "sahi", "chalo", "karo", "kardo", "shuru",
+    "हाँ", "हां", "ठीक", "करो", "चलो", "शुरू", "जी",
+}
+_CONSENT_DECLINE = {
+    "no", "nope", "nah", "naa", "later", "cancel", "skip", "nahi", "nahin", "abhi", "baad",
+    "नहीं", "नही", "बाद", "अभी",
+}
+
+
+def classify_consent_intent(body: str) -> str | None:
+    """Deterministic consent-reply intent: "affirm" | "decline" | None. NFC + whitespace/punct split
+    (VT-329-safe, no Devanagari-dead ``\\b``). Conservative: a question, both signals, or neither → None
+    (the caller re-asks — a consent grant never rides on ambiguity). ZERO LLM (Pillar-1 subtree)."""
+    norm = _nfc((body or "").strip().casefold()).replace("'", "").replace("’", "")
+    if "?" in norm:
+        return None  # a question is not a decision
+    tokens = {t for t in re.split(r"[\s,.!?;:।/\\-]+", norm) if t}
+    has_affirm = bool(tokens & _CONSENT_AFFIRM)
+    has_decline = (
+        bool(tokens & _CONSENT_DECLINE)
+        or "not now" in norm
+        or "not yet" in norm
+        or "no thanks" in norm
+    )
+    if has_affirm and not has_decline:
+        return "affirm"
+    if has_decline and not has_affirm:
+        return "decline"
+    return None
+
+
+# R5 / CD6 — the opted-out RESUME cue set (runner.webhook_pipeline_run opted-out resume leg). Deliberately
+# BOUNDED (do NOT widen — CL-2026-07-12): the enumerated restart verbs + the template's promised "reply
+# START". A plain consent-affirm ("yes"/"haan") is intentionally NOT here — that stays the existing
+# _consent_affirm_after_ask / ACTIVATE-TEAM path; this net only makes an EXPLICIT restart real.
+_RESTART_CUES = {"start", "restart", "resume", "reactivate", "shuru", "chalu", "शुरू", "चालू"}
+
+
+def matches_restart_cue(body: str) -> bool:
+    """R5 / CD6 — True iff ``body`` is an opted-out tenant's explicit RESUME cue (the bounded
+    ``_RESTART_CUES`` set: START / restart / resume / reactivate / shuru / chalu). NFC + whitespace/
+    punct split (VT-329-safe). A question -> False. The CALLER gates on ``tenants.opt_out=true`` AND
+    excludes opt-out/DSR (a repeat STOP must stay opted-out), so this only fires an explicit restart —
+    it never widens consent on its own. ZERO LLM (Pillar-1 subtree)."""
+    norm = _nfc((body or "").strip().casefold()).replace("'", "").replace("’", "")
+    if "?" in norm:
+        return False
+    tokens = {t for t in re.split(r"[\s,.!?;:।/\\-]+", norm) if t}
+    return bool(tokens & _RESTART_CUES)
 
 
 @DBOS.step()
@@ -115,13 +354,22 @@ def pre_filter(event: WebhookEvent, state: SubscriberState) -> PreFilterResult:
     if event.message_type == "status_callback":
         state = event.status_callback_state
         if state == "failed":
+            # 'failed' keeps the owner error-notification path; template_error_handler ALSO
+            # reconciles the customer-send delivery ledger (VT-564) as a fail-soft first step.
             return RouteToDirectHandler(
                 handler_name="template_error_handler",
                 payload={"twilio_message_sid": event.twilio_message_sid},
             )
-        if state in ("delivered", "read"):
-            return Reject(reason=f"status callback '{state}' — observability only (VT-122)")
-        # 'undelivered' or missing — conservative: let the brain decide.
+        if state in ("delivered", "read", "undelivered"):
+            # VT-564 — reconcile the customer-send delivery ledger. 'undelivered' is a delivery
+            # FAILURE (stamps the ledger + fires the reviewer outbound_failure alert);
+            # 'delivered'/'read' record positive evidence (no alert). A no-op when the sid is not a
+            # customer send (owner notifications reconcile in the runner, VT-524).
+            return RouteToDirectHandler(
+                handler_name="customer_send_delivery_handler",
+                payload={"twilio_message_sid": event.twilio_message_sid},
+            )
+        # missing/unknown state — conservative: let the brain decide.
         return RouteToBrain(reason=f"status callback state '{state}' — needs review")
 
     # --- Inbound message body checks ---
@@ -136,6 +384,14 @@ def pre_filter(event: WebhookEvent, state: SubscriberState) -> PreFilterResult:
             return RouteToDirectHandler(
                 handler_name="opt_out_handler", payload={"matched": pattern.pattern}
             )
+    # Rule a (CD6 leg) — a Hinglish GLOBAL send-stop the keyword list misses ("bas ab message mat
+    # bhejo"). Same authoritative opt_out_handler, same FIRST-wins ordering (still Rule a in the
+    # RULE_ORDER pin). Per-customer stops ("Rajesh ko mat bhejo") DON'T match (matches_global_stop's
+    # carve-out) — they fall through to the brain/edge-router exclusion path, never a tenant opt-out.
+    if matches_global_stop(event.body):
+        return RouteToDirectHandler(
+            handler_name="opt_out_handler", payload={"matched": "global_stop_cd6"}
+        )
 
     # Rule a2 — VT-303 data-inputs ENABLE keyword (exact, case-insensitive, NFC).
     # The consent-grant phrase. Routed here (a direct handler, no LLM) so an
@@ -146,15 +402,47 @@ def pre_filter(event: WebhookEvent, state: SubscriberState) -> PreFilterResult:
             handler_name="data_inputs_enable_handler", payload={"matched": normalized}
         )
 
-    # Rule b — DSR keyword (VT-329: boundary-safe containment, NFC, EN + Devanagari + Hinglish).
-    for pattern in _DSR_PATTERNS:
+    # Rule b — DSR keyword (VT-329 boundary-safe containment, NFC, EN + Devanagari + Hinglish;
+    # VT-585 intent-not-substring: a deletion VERB + data noun, or an unambiguous standalone phrase
+    # — a bare "my data" / "मेरा डेटा" no longer fires. See _dsr_match. Ordered exactly as before:
+    # AFTER opt-out (Rule a), BEFORE the L3 rules (the CL-438 floor + the RULE_ORDER pin).
+    dsr_matched = _dsr_match(nfc_body)
+    if dsr_matched is not None:
+        return RouteToDirectHandler(
+            handler_name="dsr_handler", payload={"matched": dsr_matched}
+        )
+
+    # Rule b2 — VT-384 L3 autonomy KILL keyword (boundary-safe containment, NFC, EN + Devanagari
+    # + Hinglish). Ordered AFTER opt-out + DSR (the CL-438 floor + RULE_ORDER pin): a phrase that
+    # is ALSO an opt-out ("STOP") never reaches here — it was already routed to opt_out_handler.
+    # An autonomy-specific kill ("stop automatic sending") freezes L3 via the substrate kill path
+    # (autonomy_kill_handler -> record_regression_event('owner_keyword'), which cancels in-flight
+    # holds/batches same-txn) WITHOUT a full DPDP opt-out.
+    for pattern in _L3_KILL_PATTERNS:
         if pattern.search(nfc_body):
             return RouteToDirectHandler(
-                handler_name="dsr_handler", payload={"matched": pattern.pattern}
+                handler_name="autonomy_kill_handler", payload={"matched": pattern.pattern}
             )
 
-    # Rule f — status ping (narrow whole-message regex).
+    # Rule b3 — VT-384 L3 autonomy ENABLE keyword (exact whole-body match, case-insensitive, NFC).
+    # The deliberate opt-in verb the team_autonomy_offer promises ("Reply ENABLE"). Ordered AFTER
+    # opt-out + DSR (CL-438 floor): an owner who somehow sends both an opt-out and ENABLE yields to
+    # the opt-out. Routes to autonomy_enable_handler, which resolves the open autonomy_upgrade
+    # approval + grants L3 (grant_l3 re-validates the streak in-txn — a stale grant no-ops).
+    if normalized in _L3_ENABLE_KEYWORDS:
+        return RouteToDirectHandler(
+            handler_name="autonomy_enable_handler", payload={"matched": normalized}
+        )
+
+    # Rule f — status ping (narrow whole-message regex). VT-583: a status QUERY now CONVERSES — route it
+    # to the brain (query tools + conversation window) so the owner gets a real, current answer, not a
+    # canned template. The deterministic status_ping_handler stays wired as the fail-soft fallback when
+    # CONVERSE_STATUS_QUERIES is turned off. Ordered exactly as before (AFTER opt-out/DSR/consent/L3).
     if _STATUS_PING.match(event.body):
+        if _converse_status_queries():
+            return RouteToBrain(
+                reason="status_query — owner asks about their own state; converse via the brain"
+            )
         return RouteToDirectHandler(handler_name="status_ping_handler")
 
     # Rule g — integration intent (VT-206 Q4). Precise regex bias toward

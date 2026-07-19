@@ -127,12 +127,12 @@ def seed_conn(dsn):
         yield conn
 
 
-def _seed_tenant(conn, name: str, plan: str = "standard") -> str:
+def _seed_tenant(conn, name: str, plan: str = "standard", ownership_verified: bool = True) -> str:
     return str(
         conn.execute(
-            "INSERT INTO tenants (business_name, plan_tier, phase) "
-            "VALUES (%s, %s, 'onboarding') RETURNING id",
-            (name, plan),
+            "INSERT INTO tenants (business_name, plan_tier, phase, ownership_verified) "
+            "VALUES (%s, %s, 'onboarding', %s) RETURNING id",
+            (name, plan, ownership_verified),
         ).fetchone()[0]
     )
 
@@ -192,7 +192,7 @@ def tenants(dsn):
     """Two synthetic tenants with distinct business names (module-scoped)."""
     with psycopg.connect(dsn, autocommit=True) as conn:
         a = _seed_tenant(conn, "Alpha Audio", plan="founding")
-        b = _seed_tenant(conn, "Bravo Books", plan="standard")
+        b = _seed_tenant(conn, "Bravo Books", plan="standard", ownership_verified=False)
     return a, b
 
 

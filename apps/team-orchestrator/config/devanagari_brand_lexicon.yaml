@@ -1,0 +1,47 @@
+# Devanagari brand/platform lexicon — VT-377 Gap-6 Devanagari bridge (CC, 2026-06-12).
+#
+# CLOSED, change-tracked set of the platform/brand proper nouns a Viabe plan may
+# legitimately name, mapping each Devanagari transliteration (and common spelling
+# variants) to its canonical LATIN form. The schema validator's Devanagari arm uses
+# this to catch the realistic attack — a FABRICATED brand written in Devanagari
+# (e.g. a competitor or invented platform the LLM/VTR slipped into `text_hi`) whose
+# Latin form is NOT grounded in the EN-only fact bundle.
+#
+# How it is used (see business_plan/schema.py):
+#   - A Devanagari token-run that IS a key here  -> its Latin `grounds` value must be
+#     backed by a bundle literal, else it's an ungrounded-proper-noun violation.
+#   - A Devanagari token-run that is NOT a key here -> legitimate Hindi prose, left
+#     untouched (no case in Devanagari => arbitrary proper nouns can't be detected;
+#     that residual is documented in the validator docstring — the bridge, not a wall).
+#
+# ADDITIONS ARE CHANGE-TRACKED CONFIG: extend `brands` (never hardcode in source).
+# Keys are Devanagari spellings (one per known variant); `grounds` is the single
+# canonical Latin token the bundle is expected to contain. Keep `grounds` to ONE
+# word that matches how the fact bundle names the platform (the validator folds case
+# and does substring grounding, so "Google" grounds "google business profile" too).
+
+version: 1
+
+brands:
+  # Swiggy
+  - deva: स्विगी
+    grounds: Swiggy
+  # Zomato (+ the no-nukta variant owners commonly type)
+  - deva: ज़ोमैटो
+    grounds: Zomato
+  - deva: जोमैटो
+    grounds: Zomato
+  # Google / Google Business Profile (GBP)
+  - deva: गूगल
+    grounds: Google
+  # WhatsApp (+ the common वॉट्सऐप variant)
+  - deva: व्हाट्सएप
+    grounds: WhatsApp
+  - deva: वॉट्सऐप
+    grounds: WhatsApp
+  # Instagram
+  - deva: इंस्टाग्राम
+    grounds: Instagram
+  # Facebook
+  - deva: फेसबुक
+    grounds: Facebook

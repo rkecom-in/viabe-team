@@ -14,6 +14,7 @@ from uuid import UUID
 
 from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.graph import END, START, StateGraph
+import psycopg
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
@@ -87,11 +88,17 @@ def _setup_checkpoint_rls(pool: ConnectionPool) -> None:
         for table in _CHECKPOINT_TABLES:
             conn.execute(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY")
             conn.execute(f"DROP POLICY IF EXISTS {table}_tenant_isolation ON {table}")
-            conn.execute(
-                f"CREATE POLICY {table}_tenant_isolation ON {table} "
-                "USING (thread_id::uuid IN ("
-                "SELECT id FROM pipeline_runs WHERE tenant_id = app_current_tenant()))"
-            )
+            try:
+                conn.execute(
+                    f"CREATE POLICY {table}_tenant_isolation ON {table} "
+                    "USING (thread_id::uuid IN ("
+                    "SELECT id FROM pipeline_runs WHERE tenant_id = app_current_tenant()))"
+                )
+            except psycopg.errors.DuplicateObject:
+                # Concurrent init race (two processes both passed the DROP): the policy EXISTS,
+                # which is the desired end state — the loser proceeds. Seen crashing parallel
+                # journey-runner processes 2026-07-18; DROP-then-CREATE is not atomic.
+                conn.rollback()
 
 
 def init_substrate(database_url: str) -> None:
@@ -104,10 +111,21 @@ def init_substrate(database_url: str) -> None:
     global _pool, _compiled, _saver
     if _compiled is not None:
         return
+    # VT-621: this ONE pool is shared between the LangGraph PostgresSaver checkpointer (holds
+    # connections for checkpoint I/O across every graph superstep) AND all tenant_connection reads
+    # (~8 per dispatch turn: l1/business/directive/lessons/intent/conversation/onboarding/inflight,
+    # + the VT-616 anti-repeat guard). max_size=4 starved it under checkpointer contention (a tenant
+    # read fail-softed to [] → context loss). But the Supabase Supavisor SESSION-mode pooler caps
+    # CLIENT connections at ~15 total (shared with DBOS + any test harness); max_size=10 blew that
+    # under concurrency (EMAXCONNSESSION). max_size=6 is the balance: real headroom over 4 for the
+    # checkpointer/tenant contention, yet safe under a ~15-client pooler even in prod. The verbatim-
+    # repeat backstop no longer depends on this — the VT-616 guard (common-prefix compare) catches
+    # repeats regardless of pool size. NOTE: if the pooler pool_size is raised (dev+prod console),
+    # this can grow; do NOT raise past the prod pooler's client cap minus DBOS's draw.
     _pool = ConnectionPool(
         database_url,
-        min_size=1,
-        max_size=4,
+        min_size=2,
+        max_size=6,
         kwargs={"autocommit": True, "row_factory": dict_row},
         reset=_reset_connection,
         open=True,

@@ -93,9 +93,9 @@ def _row(conn, tenant):
     ).fetchone()
 
 
-def test_skip_refunded_no_row():
+def test_skip_lapsed_no_row():
     with _conn() as conn:
-        t = _tenant(conn, phase="refunded")
+        t = _tenant(conn, phase="lapsed")
         render, store, send, _ = _fakes()
         res = run_monthly_report(str(t), "2026-04", conn=conn, owner_email="o@x.com",
                                  render=render, store=store, send=send)

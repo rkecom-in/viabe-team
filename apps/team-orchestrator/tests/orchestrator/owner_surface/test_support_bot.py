@@ -47,7 +47,8 @@ def test_alert_is_pii_safe(monkeypatch) -> None:
     """The Fazal alert carries last-4 + run_id only — never the raw phone."""
     captured: list[str] = []
     monkeypatch.setattr(
-        "orchestrator.billing.refund_executor._alert_fazal", lambda text: captured.append(text)
+        "orchestrator.alerts.clients.alert_fazal",
+        lambda text, **kw: captured.append(text),  # VT-502: tolerate tenant_id kwarg
     )
     sb._alert_fazal_safe(uuid4(), "+919876543210", "run-123")
     text = captured[0]
@@ -135,7 +136,8 @@ def test_replay_does_not_redupe_fazal_alert(monkeypatch, _dbpool) -> None:
     alerts: list[str] = []
     monkeypatch.setattr(sb, "_send_handoff_ack", lambda *a, **k: None)  # no real WhatsApp send
     monkeypatch.setattr(
-        "orchestrator.billing.refund_executor._alert_fazal", lambda text: alerts.append(text)
+        "orchestrator.alerts.clients.alert_fazal",
+        lambda text, **kw: alerts.append(text),  # VT-502: tolerate tenant_id kwarg
     )
     tid = uuid4()
     _seed_runs(_dbpool, tid, n=2)  # 2 unresolved in 24h → the escalate branch
@@ -154,7 +156,8 @@ def test_fatigue_flag_in_alert_at_threshold(monkeypatch, _dbpool) -> None:
     """VT-343 #4: 3+ escalations in 7 days → the Fazal alert text carries a FATIGUE line."""
     captured: list[str] = []
     monkeypatch.setattr(
-        "orchestrator.billing.refund_executor._alert_fazal", lambda text: captured.append(text)
+        "orchestrator.alerts.clients.alert_fazal",
+        lambda text, **kw: captured.append(text),  # VT-502: tolerate tenant_id kwarg
     )
     tid = uuid4()
     with _dbpool.connection() as conn:

@@ -129,6 +129,74 @@ def _patched_client(response: Any) -> Any:
     return fake
 
 
+def _joined_system_text(blocks: Any) -> str:
+    """The model-visible system text: the concatenated ``text`` of the block list
+    ``_render_sr_system_prompt`` returns (cache batch 2026-07-18 — the render is
+    [static cache_control block, volatile date block], no longer a plain string)."""
+    return "".join(b["text"] for b in blocks)
+
+
+def test_max_tokens_stop_continues_and_stitches_terminal_text(monkeypatch):
+    """VT-596 #2 — a stop_reason='max_tokens' turn is NOT terminal: the loop banks
+    the partial text, sends the continuation prompt, and stitches the parts for
+    the terminal parse. Proven live: Sonnet-5's draft length is variable; a
+    truncated JSON must not land on the invalid-output escalation when a
+    continuation completes it."""
+    from orchestrator.agent.sales_recovery import _CONTINUE_PROMPT
+
+    part1 = _fake_response(
+        text='{"status": "place', input_tokens=2000, output_tokens=4096,
+        stop_reason="max_tokens",
+    )
+    part2 = _fake_response(
+        text='holder"}', input_tokens=2100, output_tokens=20, stop_reason="end_turn"
+    )
+    fake = MagicMock()
+    fake.messages.create.side_effect = [part1, part2]
+
+    monkeypatch.setenv("VIABE_ENV", "test")
+    monkeypatch.setattr(
+        "orchestrator.agent.sales_recovery.Anthropic", lambda: fake
+    )
+    result = run_sales_recovery_agent(
+        SalesRecoveryContext(tenant_id="t1", run_id="r1", user_request="test request")
+    )
+
+    assert fake.messages.create.call_count == 2
+    # The 2nd call carries the banked partial assistant turn + the continue nudge.
+    second_messages = fake.messages.create.call_args_list[1].kwargs["messages"]
+    assert second_messages[-1] == {"role": "user", "content": _CONTINUE_PROMPT}
+    assert second_messages[-2]["role"] == "assistant"
+    # The stitched text parsed — the run is a clean placeholder terminal, NOT invalid.
+    assert result.status == "placeholder"
+    assert result.output == {"status": "placeholder"}
+
+
+def test_max_tokens_continuation_budget_exhausts_to_invalid_not_hang(monkeypatch):
+    """Exhausting _MAX_CONTINUATION_TURNS falls through to the normal terminal
+    handling: a still-unparseable stitch lands on status='invalid' (the CL-287
+    observable FailureRecord path), never an infinite continue loop."""
+    from orchestrator.agent.sales_recovery import _MAX_CONTINUATION_TURNS
+
+    truncated = _fake_response(
+        text='{"never": "closes', input_tokens=2000, output_tokens=4096,
+        stop_reason="max_tokens",
+    )
+    fake = MagicMock()
+    fake.messages.create.return_value = truncated  # every turn truncates
+
+    monkeypatch.setenv("VIABE_ENV", "test")
+    monkeypatch.setattr(
+        "orchestrator.agent.sales_recovery.Anthropic", lambda: fake
+    )
+    result = run_sales_recovery_agent(
+        SalesRecoveryContext(tenant_id="t1", run_id="r1", user_request="test request")
+    )
+
+    assert fake.messages.create.call_count == _MAX_CONTINUATION_TURNS + 1
+    assert result.status == "invalid"
+
+
 def test_run_sales_recovery_agent_placeholder_happy_path(monkeypatch):
     """Placeholder prompt → model returns the placeholder JSON →
     status='placeholder', output is the parsed dict, raw_messages
@@ -170,8 +238,9 @@ def test_run_sales_recovery_agent_placeholder_happy_path(monkeypatch):
 
 
 def test_run_sales_recovery_agent_uses_resolved_model_from_env(monkeypatch):
-    """VIABE_ENV='production' → Opus; default → Haiku. The model id is
-    read from config/models.yaml, never hardcoded in the runner."""
+    """VIABE_ENV='production' → Opus; default/dev/test → the CAPABLE tier (Sonnet,
+    VT-501 — NOT Haiku: SR-draft is complex grounded reasoning per VT-480). The
+    model id is read from config/models.yaml, never hardcoded in the runner."""
     response = _fake_response(text='{"status": "placeholder"}')
     fake_client = _patched_client(response)
     monkeypatch.setattr(
@@ -185,7 +254,12 @@ def test_run_sales_recovery_agent_uses_resolved_model_from_env(monkeypatch):
     fake_client.messages.create.reset_mock()
     monkeypatch.setenv("VIABE_ENV", "test")
     run_sales_recovery_agent(SalesRecoveryContext(tenant_id="t1", run_id="r1", user_request="test request"))
-    assert fake_client.messages.create.call_args.kwargs["model"] == "claude-haiku-4-5"
+    # VT-501: dev/test SR-draft now resolves to the capable model, never Haiku —
+    # complex grounded reasoning must not fall to the cheap slot (misclassification fix).
+    # VT-596: capable tier bumped sonnet-4-6 → sonnet-5 (Fazal general upgrade).
+    resolved = fake_client.messages.create.call_args.kwargs["model"]
+    assert resolved == "claude-sonnet-5"
+    assert resolved != "claude-haiku-4-5"
 
 
 def test_run_sales_recovery_agent_passes_brief_required_params(monkeypatch):
@@ -217,10 +291,16 @@ def test_run_sales_recovery_agent_passes_brief_required_params(monkeypatch):
     # decision; VT-33 (system prompt) does not pre-empt it.
     assert "thinking" not in call.kwargs
     assert call.kwargs["tools"] == []
-    # System prompt is the v1.0 sales_recovery file (VT-33). Spot-check
-    # identity, output-contract reference, and a Pillar 4 marker so a
-    # silent edit that drops a load-bearing section is caught.
-    prompt = call.kwargs["system"]
+    # System prompt is the v1.0 sales_recovery file (VT-33), sent as the cache
+    # batch 2026-07-18 BLOCK LIST: static cached body first, the date-rendered
+    # section last and un-marked. Pin the block shape AND spot-check identity,
+    # output-contract reference, and a Pillar 4 marker so a silent edit that
+    # drops a load-bearing section (or the cache_control marker) is caught.
+    system = call.kwargs["system"]
+    assert isinstance(system, list) and len(system) == 2
+    assert system[0]["cache_control"] == {"type": "ephemeral"}
+    assert "cache_control" not in system[1]  # the daily-varying block must not cache
+    prompt = _joined_system_text(system)
     assert "Sales Recovery Agent" in prompt
     assert "CampaignPlan" in prompt
     assert "out_of_scope" in prompt
@@ -432,6 +512,45 @@ def test_run_sales_recovery_agent_variant_discriminator_invalid_emits_failure(
     assert "variant discriminator" in failure.message
 
 
+def test_schema_rejection_corrective_retry_recovers(monkeypatch):
+    """VT-596 #3 — the live pack's intermittent Sonnet-5 failure: a draft
+    rejected on proposed.evidence_refs must get ONE corrective retry naming
+    the failing field paths; a corrected second emission proceeds (never the
+    owner-facing escalation). The correction prompt carries loc+type only."""
+    import json
+    from uuid import uuid4
+
+    from orchestrator.agent.self_evaluate import FakeSelfEvaluator
+
+    bad = _fake_response(text=json.dumps({"status": "proposed"}))
+    good = _fake_response(text=json.dumps({"status": "out_of_scope",
+                                           "out_of_scope_reason": "test-corrected emission"}))
+    fake = MagicMock()
+    fake.messages.create.side_effect = [bad, good]
+    monkeypatch.setenv("VIABE_ENV", "test")
+    monkeypatch.setattr("orchestrator.agent.sales_recovery.Anthropic", lambda: fake)
+    monkeypatch.setattr("orchestrator.agent.sales_recovery.route_failure", MagicMock())
+
+    evaluator = FakeSelfEvaluator(verdicts=[])
+    result = run_sales_recovery_agent(
+        SalesRecoveryContext(
+            tenant_id=uuid4(), run_id=uuid4(), user_request="Recover dormant customers"
+        ),
+        evaluator=evaluator,
+    )
+
+    assert fake.messages.create.call_count == 2
+    second_messages = fake.messages.create.call_args_list[1].kwargs["messages"]
+    correction = second_messages[-1]
+    assert correction["role"] == "user"
+    assert "failed schema validation" in correction["content"]
+    assert "proposed." in correction["content"]  # names the field paths
+    # The corrected emission parsed — the run is NOT 'invalid' (the out_of_scope
+    # variant proceeds down the gate path; whatever terminal it reaches, the
+    # schema-rejection escalation is gone).
+    assert result.status != "invalid"
+
+
 def test_run_sales_recovery_agent_schema_rejection_emits_failure(monkeypatch):
     """VT-4: model emits a JSON dict with a legal ``status`` discriminator
     but the post-coerce payload is rejected by ``parse_campaign_plan``
@@ -483,7 +602,11 @@ def test_run_sales_recovery_agent_schema_rejection_emits_failure(monkeypatch):
     # what the model emitted before the schema rejection.
     assert isinstance(result.output, dict)
     assert result.output.get("status") == "proposed"
-    assert router.call_count == 1
+    # VT-596 #3: the first rejection now triggers ONE corrective retry (the
+    # fake client re-emits the same bad payload), so TWO rejections are
+    # observable before the loop breaks invalid.
+    assert router.call_count == 2
+    assert fake_client.messages.create.call_count == 2
     failure = router.call_args.args[0]
     assert isinstance(failure, FailureRecord)
     assert failure.failure_type is FailureType.AGENT_INVALID_OUTPUT
@@ -491,13 +614,44 @@ def test_run_sales_recovery_agent_schema_rejection_emits_failure(monkeypatch):
     assert failure.run_id == run_id
     assert failure.metadata["source"] == "agent_schema_rejection"
     assert "schema rejection" in failure.message
+    # VT-496: structured field paths (loc + pydantic type) on the
+    # FailureRecord metadata — names the failing CampaignPlanProposed
+    # fields so the win-back parse failure is diagnosable on dev.
+    field_paths = failure.metadata["schema_field_paths"]
+    assert isinstance(field_paths, list)
+    # {"status": "proposed"} → every OTHER required variant field is absent.
+    assert "proposed.message_plan: missing" in field_paths
+    assert "proposed.target_cohort: missing" in field_paths
+    assert "proposed.expected_arrr: missing" in field_paths
+    assert "proposed.evidence_refs: missing" in field_paths
+    # VT-499: campaign_window is NO LONGER a missing field — the coercer
+    # server-injects an always-valid now->now+7d window on the proposed
+    # variant, so it is supplied even when the model emits nothing for it.
+    assert "proposed.campaign_window: missing" not in field_paths
+    # (b) NO PII / value leakage — only "<loc>: <type>" pairs. No pydantic
+    # ``input_value=`` / ``msg`` echo in either the paths or the message.
+    for path in field_paths:
+        assert path.startswith("proposed.")
+        assert path.endswith(": missing")
+        assert "input_value" not in path
+    assert "input_value" not in failure.message
+    # The reason is rebuilt from the same NON-PII paths (no str(exc) echo).
+    # campaign_window is VT-499 server-supplied, so message names a STILL-missing
+    # field rather than the (now-filled) window.
+    assert "proposed.message_plan: missing" in failure.message
 
 
 def test_run_sales_recovery_agent_cost_uses_compute_cost_paise(monkeypatch):
-    """The agent's cost_paise matches the cost.py table for the resolved model."""
+    """The agent's cost_paise matches the cost.py table for the resolved model.
+
+    Relative to ``_resolve_model`` (not a hardcoded model id) so it survives a
+    config/models.yaml tier change — e.g. VT-501 moved the dev/test slot off Haiku
+    onto the capable Sonnet."""
+    from orchestrator.agent.sales_recovery import _resolve_model
+
     response = _fake_response(text='{"status": "placeholder"}', input_tokens=1000, output_tokens=200)
     fake_client = _patched_client(response)
-    monkeypatch.setenv("VIABE_ENV", "test")  # Haiku
+    monkeypatch.setenv("VIABE_ENV", "test")  # dev/test slot (Sonnet 4.6, VT-501)
     monkeypatch.setattr(
         "orchestrator.agent.sales_recovery.Anthropic", lambda: fake_client
     )
@@ -507,9 +661,10 @@ def test_run_sales_recovery_agent_cost_uses_compute_cost_paise(monkeypatch):
     )
 
     expected = compute_cost_paise(
-        model="claude-haiku-4-5", input_tokens=1000, output_tokens=200
+        model=_resolve_model("sales_recovery"), input_tokens=1000, output_tokens=200
     )
     assert result.cost_paise == expected
+    assert result.cost_paise > 0
 
 
 # --- compute_cost_paise table sanity -----------------------------------------
@@ -926,6 +1081,417 @@ def test_construct_variant_payload_drops_populated_forbidden_and_emits(
     )
 
 
+# --- VT-493: SR system-prompt schema conformance (date + source_kind enum) ---
+#
+# The VT-490 re-drive surfaced two parse_campaign_plan failures on the grounded
+# proposed plan: (A1) the prompt hardcoded a stale 2026-05-22 campaign_window
+# the model echoed verbatim → CampaignWindow start>=now rejection; (A2) the
+# prompt never enumerated EvidenceSourceKind so the model invented off-enum
+# source_kind values. Both are fixed by rendering the template with the current
+# date + enumerating the 3 legal source_kind values.
+
+
+def test_sr_prompt_injects_current_date_not_stale_literal_and_enum_source_kinds():
+    """VT-493 A1+A2 — the ASSEMBLED prompt carries today's date (not the stale
+    2026-05-22 literal) with a >=today campaign_window instruction, fully renders
+    every template token, and enumerates the 3 legal EvidenceSourceKind values.
+    Deterministic in a fixed ``now``."""
+    from datetime import UTC, datetime
+
+    from orchestrator.agent.sales_recovery import _render_sr_system_prompt
+
+    fixed_now = datetime(2026, 7, 1, 14, 30, tzinfo=UTC)
+    rendered = _joined_system_text(_render_sr_system_prompt(now=fixed_now))
+
+    # A1 — the stale absolute window is gone and the template fully rendered.
+    assert "2026-05-22" not in rendered
+    assert "2026-05-29" not in rendered
+    assert "{{" not in rendered  # no unrendered tokens leaked into the prompt
+    # today's date is injected into the campaign_window instruction.
+    assert "2026-07-01" in rendered
+    # the proposed example's window starts TOMORROW 09:00 UTC (future-dated so a
+    # verbatim echo still satisfies CampaignWindow start>=now) + ends 7d later.
+    assert "2026-07-02T09:00:00+00:00" in rendered
+    assert "2026-07-09T09:00:00+00:00" in rendered
+
+    # A2 — all three legal EvidenceSourceKind values enumerated for the model.
+    for kind in ("tool_call", "l4_skill_corpus", "l2_episodic_memory"):
+        assert kind in rendered
+
+
+def test_sr_prompt_example_window_passes_campaign_window_validator():
+    """VT-493 A1 — the rendered proposed example's campaign_window must ITSELF
+    pass the CampaignWindow validator. A verbatim echo (the original failure
+    mode) must not re-trigger the backdated-start rejection."""
+    import re
+
+    from orchestrator.agent.sales_recovery import _render_sr_system_prompt
+    from orchestrator.agent.schemas.campaign_plan import CampaignWindow
+
+    rendered = _joined_system_text(_render_sr_system_prompt())
+    m = re.search(
+        r'"start":\s*"([^"]+)",\s*"end":\s*"([^"]+)"', rendered
+    )
+    assert m is not None, "campaign_window example not found in rendered prompt"
+    # Constructs without raising → start>=now and end>start hold.
+    window = CampaignWindow(start=m.group(1), end=m.group(2))  # type: ignore[arg-type]
+    assert window.end > window.start
+
+
+def test_sr_prompt_default_render_uses_real_now():
+    """VT-493 — the no-arg render uses the live server date (today appears,
+    the stale literal does not)."""
+    from datetime import UTC, datetime
+
+    from orchestrator.agent.sales_recovery import _render_sr_system_prompt
+
+    rendered = _joined_system_text(_render_sr_system_prompt())
+    assert datetime.now(UTC).date().isoformat() in rendered
+    assert "2026-05-22" not in rendered
+
+
+# --- Cache batch 2026-07-18: SR system prompt is a [static cached, volatile date] block list ---
+
+
+def test_sr_system_blocks_static_cached_first_dates_last_unmarked():
+    """Cache batch — ``_render_sr_system_prompt`` returns exactly two blocks: the
+    byte-stable body FIRST with ``cache_control: ephemeral``, the date-rendered
+    section LAST and deliberately NOT cache-marked (the daily date change must
+    never invalidate the cached prefix). The CACHE-SPLIT marker comment is
+    dropped — it must not leak into the model-visible text."""
+    from datetime import UTC, datetime
+
+    from orchestrator.agent.sales_recovery import _render_sr_system_prompt
+
+    blocks = _render_sr_system_prompt(now=datetime(2026, 7, 1, 14, 30, tzinfo=UTC))
+    assert isinstance(blocks, list) and len(blocks) == 2
+    static, volatile = blocks
+
+    # Static block: first, cache-marked, carries the stable body, ZERO date content.
+    assert static["type"] == "text"
+    assert static["cache_control"] == {"type": "ephemeral"}
+    assert "Sales Recovery Agent" in static["text"]
+    assert "2026-07-01" not in static["text"]
+    assert "{{" not in static["text"]
+
+    # Volatile block: last, NOT cache-marked, carries the fully-rendered date line
+    # + the proposed example's window.
+    assert volatile["type"] == "text"
+    assert "cache_control" not in volatile
+    assert "Today's date is `2026-07-01`" in volatile["text"]
+    assert "2026-07-02T09:00:00+00:00" in volatile["text"]
+    assert "{{" not in volatile["text"]
+
+    # The split marker never reaches the model on either side.
+    for b in blocks:
+        assert "CACHE-SPLIT" not in b["text"]
+        assert "<!--" not in b["text"]
+
+
+def test_sr_system_static_block_byte_identical_across_days():
+    """Cache batch — THE cache invariant: rendering on two different days yields a
+    byte-identical static block (the cached prefix survives the date roll); only
+    the trailing volatile block changes."""
+    from datetime import UTC, datetime
+
+    from orchestrator.agent.sales_recovery import _render_sr_system_prompt
+
+    day_a = _render_sr_system_prompt(now=datetime(2026, 7, 1, 8, 0, tzinfo=UTC))
+    day_b = _render_sr_system_prompt(now=datetime(2026, 9, 15, 23, 59, tzinfo=UTC))
+
+    assert day_a[0]["text"] == day_b[0]["text"]  # static prefix: byte-identical
+    assert day_a[1]["text"] != day_b[1]["text"]  # date block: differs per day
+
+
+# --- VT-499: campaign_window is system-owned (server-injected, not LLM) -------
+#
+# VT-493 maximally prompted the campaign_window (injected today's date, valid
+# example, named the validator) and the SR model (Haiku on dev) STILL emitted a
+# backdated / invalid / missing window 3/3 — VT-496 named it deterministically
+# (``proposed.campaign_window: value_error``). The window is a MECHANICAL value,
+# not business judgment, so _construct_variant_payload now OVERRIDES it server-
+# side on the PROPOSED variant with an always-valid now->now+7d span. The model
+# keeps owning the business fields; the validator is NOT weakened.
+
+
+def test_server_campaign_window_is_valid_now_to_now_plus_7d():
+    """VT-499 — the server-computed window is tz-aware, ~now, spans exactly 7d,
+    and constructs through the REAL CampaignWindow validator without raising."""
+    from datetime import UTC, datetime, timedelta
+
+    from orchestrator.agent.sales_recovery import _server_campaign_window
+    from orchestrator.agent.schemas.campaign_plan import CampaignWindow
+
+    now = datetime.now(UTC)
+    w = _server_campaign_window(now)
+    start = datetime.fromisoformat(w["start"])
+    end = datetime.fromisoformat(w["end"])
+
+    assert start.tzinfo is not None and end.tzinfo is not None
+    assert start >= now - timedelta(seconds=1)  # ~now (small forward buffer)
+    assert end - start == timedelta(days=7)
+    # Constructs without raising → _window_validity passes (start>=now, end>start).
+    window = CampaignWindow(start=w["start"], end=w["end"])  # type: ignore[arg-type]
+    assert window.end > window.start
+
+
+@pytest.mark.parametrize("bad_window", ["backdated", "missing", "naive_end_before_start"])
+def test_vt499_proposed_window_overridden_so_bad_model_window_now_parses(bad_window):
+    """VT-499 — a proposed raw dict whose model-emitted campaign_window is the
+    EXACT Haiku failure (backdated / missing / invalid) now PARSES, because
+    _construct_variant_payload replaces it with a server now->now+7d window.
+    The business fields the model owns are preserved unchanged."""
+    from datetime import UTC, datetime, timedelta
+
+    from orchestrator.agent.sales_recovery import _construct_variant_payload
+    from orchestrator.agent.schemas.campaign_plan import (
+        CampaignPlanProposed,
+        CampaignStatus,
+        CampaignWindow,
+        parse_campaign_plan,
+    )
+
+    raw = _proposed_raw_minimal()
+    if bad_window == "backdated":
+        # The VT-493/VT-496 failure: the stale 2026-05-22 literal echoed back.
+        bad = {"start": "2026-05-22T09:00:00+00:00", "end": "2026-05-29T09:00:00+00:00"}
+        raw["campaign_window"] = bad
+        # Sanity: this window is genuinely rejected by the validator on its own,
+        # so a green parse below can ONLY come from the server override.
+        with pytest.raises(ValueError):
+            CampaignWindow(start=bad["start"], end=bad["end"])  # type: ignore[arg-type]
+    elif bad_window == "missing":
+        raw.pop("campaign_window")
+    elif bad_window == "naive_end_before_start":
+        raw["campaign_window"] = {
+            "start": "2026-01-01T00:00:00",  # naive (no tz) AND end < start
+            "end": "2025-01-01T00:00:00",
+        }
+
+    ctx = _ctx_with_real_uuids()
+    now = datetime.now(UTC)
+    payload, _dropped_empty, _dropped_populated = _construct_variant_payload(
+        raw, context=ctx, generated_at=now
+    )
+
+    # Pre-VT-499 this raised proposed.campaign_window: value_error. Now it parses.
+    plan = parse_campaign_plan(payload)
+    assert isinstance(plan, CampaignPlanProposed)
+    assert plan.status is CampaignStatus.PROPOSED
+
+    start = plan.campaign_window.start
+    end = plan.campaign_window.end
+    assert start.tzinfo is not None and end.tzinfo is not None
+    assert start >= now - timedelta(seconds=1)  # ~now — NOT the backdated start
+    assert end - start == timedelta(days=7)
+
+    # Business fields stay exactly what the model emitted — only the window moved.
+    assert plan.target_cohort.cohort_label == "dormant-60d"
+    assert plan.expected_arrr.low_paise == 100_000
+    assert plan.expected_arrr.high_paise == 500_000
+    assert plan.message_plan.template_id == "dormant_recovery_v1"
+    assert plan.evidence_refs[0].claim_id == "E1"
+
+
+def test_vt499_non_proposed_variants_get_no_server_window():
+    """VT-499 — out_of_scope / insufficient_data carry no window; the override
+    is scoped to PROPOSED only and must NOT inject one onto the others."""
+    from datetime import UTC, datetime
+
+    from orchestrator.agent.sales_recovery import _construct_variant_payload
+    from orchestrator.agent.schemas.campaign_plan import parse_campaign_plan
+
+    ctx = _ctx_with_real_uuids()
+    now = datetime.now(UTC)
+    for raw in (_out_of_scope_raw_minimal(), _insufficient_data_raw_minimal()):
+        payload, _de, _dp = _construct_variant_payload(
+            raw, context=ctx, generated_at=now
+        )
+        assert "campaign_window" not in payload
+        # Still a valid plan of its variant (extra='forbid' would reject a window).
+        parse_campaign_plan(payload)
+
+
+def test_vt499_window_override_does_not_mask_other_field_errors():
+    """VT-499 — the override fills ONLY campaign_window. A genuinely-bad OTHER
+    field (expected_arrr.low > high) must STILL fail parse, and the surfaced
+    error is that field — NOT a campaign_window error. Proves the fix supplies a
+    valid window without weakening validation of anything else."""
+    from datetime import UTC, datetime
+
+    from pydantic import ValidationError
+
+    from orchestrator.agent.sales_recovery import _construct_variant_payload
+    from orchestrator.agent.schemas.campaign_plan import parse_campaign_plan
+
+    raw = _proposed_raw_minimal()
+    # Backdate the window too — so the ONLY thing keeping the window valid is the
+    # server override — AND corrupt expected_arrr (low > high → _ordered fails).
+    raw["campaign_window"] = {
+        "start": "2026-05-22T09:00:00+00:00",
+        "end": "2026-05-29T09:00:00+00:00",
+    }
+    raw["expected_arrr"]["low_paise"] = 999_999
+    raw["expected_arrr"]["high_paise"] = 1
+
+    ctx = _ctx_with_real_uuids()
+    payload, _de, _dp = _construct_variant_payload(
+        raw, context=ctx, generated_at=datetime.now(UTC)
+    )
+    with pytest.raises(ValidationError) as exc_info:
+        parse_campaign_plan(payload)
+
+    paths = {".".join(str(p) for p in e["loc"]) for e in exc_info.value.errors()}
+    assert any("expected_arrr" in p for p in paths), paths
+    assert not any("campaign_window" in p for p in paths), paths
+
+
+# --- VT-501: evidence_refs structure heal (the dominant remaining parse miss) --
+#
+# The SR model writes grounded prose-markers ([E\d+]) in selection_reason + basis
+# but mechanically fails the evidence_refs STRUCTURE — empty/short list
+# (proposed.evidence_refs: too_short) or claim_ids that don't match the markers
+# (proposed: value_error, the marker⇄ref consistency rule). _repair_evidence_refs
+# (called from _construct_variant_payload on the PROPOSED variant) heals the
+# structure FROM the model's own citations, without inventing grounding.
+
+
+def test_vt501_empty_evidence_refs_with_prose_markers_healed_and_parses():
+    """The dominant failure: prose cites [E1] in BOTH blocks but evidence_refs is
+    EMPTY (too_short). The repair synthesizes a backing ref FROM the cited marker,
+    so the plan parses — the validator passes legitimately, not bypassed."""
+    from datetime import UTC, datetime
+
+    from orchestrator.agent.sales_recovery import _construct_variant_payload
+    from orchestrator.agent.schemas.campaign_plan import (
+        CampaignPlanProposed,
+        EvidenceSourceKind,
+        parse_campaign_plan,
+    )
+
+    raw = _proposed_raw_minimal()
+    raw["evidence_refs"] = []  # the Haiku miss: grounded prose, empty refs
+
+    ctx = _ctx_with_real_uuids()
+    payload, _de, _dp = _construct_variant_payload(
+        raw, context=ctx, generated_at=datetime.now(UTC)
+    )
+
+    plan = parse_campaign_plan(payload)
+    assert isinstance(plan, CampaignPlanProposed)
+    # Exactly the cited marker (E1) is backed; honest bundle-sourced ref.
+    assert [r.claim_id for r in plan.evidence_refs] == ["E1"]
+    ref = plan.evidence_refs[0]
+    assert ref.source_kind is EvidenceSourceKind.L2_EPISODIC_MEMORY
+    assert ref.source_id == "context_bundle"
+    assert ref.note and "VT-501" in ref.note
+
+
+def test_vt501_mismatched_claim_id_healed_orphan_dropped():
+    """prose cites [E1] but evidence_refs declares a DIFFERENT claim_id (E2) —
+    both unbacked (E1) AND uncited (E2). The repair rebuilds the list to exactly
+    the cited markers: E1 synthesized, the orphan E2 dropped → parses."""
+    from datetime import UTC, datetime
+
+    from orchestrator.agent.sales_recovery import _construct_variant_payload
+    from orchestrator.agent.schemas.campaign_plan import (
+        CampaignPlanProposed,
+        parse_campaign_plan,
+    )
+
+    raw = _proposed_raw_minimal()
+    raw["evidence_refs"] = [
+        {"claim_id": "E2", "source_kind": "l4_skill_corpus", "source_id": "orphan-ref"}
+    ]
+
+    ctx = _ctx_with_real_uuids()
+    payload, _de, _dp = _construct_variant_payload(
+        raw, context=ctx, generated_at=datetime.now(UTC)
+    )
+
+    plan = parse_campaign_plan(payload)
+    assert isinstance(plan, CampaignPlanProposed)
+    assert [r.claim_id for r in plan.evidence_refs] == ["E1"]  # E2 orphan dropped
+
+
+def test_vt501_wellformed_model_refs_preserved_idempotent():
+    """A model that ALREADY emitted a well-formed, cited ref keeps it verbatim —
+    the repair supplies structure only where it is missing, never overwrites the
+    model's real grounding."""
+    from datetime import UTC, datetime
+
+    from orchestrator.agent.sales_recovery import _construct_variant_payload
+    from orchestrator.agent.schemas.campaign_plan import (
+        EvidenceSourceKind,
+        parse_campaign_plan,
+    )
+
+    raw = _proposed_raw_minimal()  # prose [E1] + a well-formed E1 l4 ref
+
+    ctx = _ctx_with_real_uuids()
+    payload, _de, _dp = _construct_variant_payload(
+        raw, context=ctx, generated_at=datetime.now(UTC)
+    )
+
+    plan = parse_campaign_plan(payload)
+    assert [r.claim_id for r in plan.evidence_refs] == ["E1"]
+    ref = plan.evidence_refs[0]
+    # The MODEL's ref is preserved — NOT replaced by the synthesized bundle ref.
+    assert ref.source_kind is EvidenceSourceKind.L4_SKILL_CORPUS
+    assert ref.source_id == "dormant-recovery-benchmark"
+
+
+def test_vt501_multiple_markers_each_backed():
+    """Markers spread across the two prose blocks ([E1] in selection_reason, [E2]
+    in basis) with empty refs → each cited marker gets a backing ref."""
+    from datetime import UTC, datetime
+
+    from orchestrator.agent.sales_recovery import _construct_variant_payload
+    from orchestrator.agent.schemas.campaign_plan import parse_campaign_plan
+
+    raw = _proposed_raw_minimal()
+    raw["target_cohort"]["selection_reason"] = "Inactive customers last 60d [E1]."
+    raw["expected_arrr"]["basis"] = "Historical recovery rate 20-40% per [E2]."
+    raw["evidence_refs"] = []
+
+    ctx = _ctx_with_real_uuids()
+    payload, _de, _dp = _construct_variant_payload(
+        raw, context=ctx, generated_at=datetime.now(UTC)
+    )
+
+    plan = parse_campaign_plan(payload)
+    assert sorted(r.claim_id for r in plan.evidence_refs) == ["E1", "E2"]
+
+
+def test_vt501_no_grounding_at_all_still_fails():
+    """The hard boundary: a proposed plan whose prose cites NO markers AND has
+    empty evidence_refs has NO grounding to heal from — the repair is a no-op and
+    parse_campaign_plan STILL REJECTS it (too_short). The repair supplies structure
+    from existing grounding; it never fabricates grounding to pass the validator."""
+    from datetime import UTC, datetime
+
+    from pydantic import ValidationError
+
+    from orchestrator.agent.sales_recovery import _construct_variant_payload
+    from orchestrator.agent.schemas.campaign_plan import parse_campaign_plan
+
+    raw = _proposed_raw_minimal()
+    raw["target_cohort"]["selection_reason"] = "Inactive customers last 60 days."
+    raw["expected_arrr"]["basis"] = "Recovery rate estimated 20-40 percent."
+    raw["evidence_refs"] = []
+
+    ctx = _ctx_with_real_uuids()
+    payload, _de, _dp = _construct_variant_payload(
+        raw, context=ctx, generated_at=datetime.now(UTC)
+    )
+    # No markers cited → evidence_refs left empty → validator rejects (not bypassed).
+    assert payload["evidence_refs"] == []
+    with pytest.raises(ValidationError) as exc_info:
+        parse_campaign_plan(payload)
+    paths = {".".join(str(p) for p in e["loc"]) for e in exc_info.value.errors()}
+    assert any("evidence_refs" in p for p in paths), paths
+
+
 # --- Canary: real API, env-gated, NEVER runs in CI ---------------------------
 
 
@@ -935,10 +1501,10 @@ def test_construct_variant_payload_drops_populated_forbidden_and_emits(
     reason="canary skipped — needs VIABE_RUN_AGENT_CANARY=1 + ANTHROPIC_API_KEY",
 )
 def test_canary_real_haiku_run_completes_with_parseable_json(monkeypatch):
-    """One real Messages-API call against claude-haiku-4-5 to prove the SDK
-    plumbing + v1.0 system prompt work end-to-end. Fazal runs this
-    manually once before merge. CI must NEVER reach here
-    (VIABE_RUN_AGENT_CANARY unset).
+    """One real Messages-API call against the dev/test SR model (Sonnet 4.6 since
+    VT-501; was Haiku) to prove the SDK plumbing + v1.0 system prompt work
+    end-to-end. Fazal runs this manually once before merge. CI must NEVER reach
+    here (VIABE_RUN_AGENT_CANARY unset).
 
     VT-33 updated this canary's success criteria. The v1.0 prompt
     instructs the agent to emit a CampaignPlan JSON — no longer the
@@ -946,7 +1512,7 @@ def test_canary_real_haiku_run_completes_with_parseable_json(monkeypatch):
     model produced parseable JSON the loop classified as 'completed'
     (or, validly, 'refused' if Haiku declined). Tokens accrued + the
     raw message trace landed."""
-    monkeypatch.setenv("VIABE_ENV", "test")  # forces Haiku
+    monkeypatch.setenv("VIABE_ENV", "test")  # dev/test slot (Sonnet 4.6, VT-501)
     result = run_sales_recovery_agent(
         SalesRecoveryContext(
             tenant_id="canary",
@@ -1192,3 +1758,344 @@ def test_cl288_real_opus_emit_shape_round_trips_through_parse(monkeypatch):
     # Identity-injection invariant — agent overwrites, not the model.
     assert str(plan.tenant_id) == context.tenant_id, diag
     assert str(plan.run_id) == context.run_id, diag
+
+
+# --- VT-498: message body is PLACEHOLDER-only — no literal customer PII --------
+#
+# The SR model is shown each dormant-cohort customer's real display_name (so it
+# can pick + name the target subset). The Haiku composing model (dev re-drive,
+# deterministic 3/3) copied that name straight into message_plan.personalization
+# ("Hi Anita, …") — customer PII baked into the persisted plan, while
+# target_cohort.selection_reason was correctly placeholdered. The fix: (1) the
+# prompt forbids literal PII + asks for a {{customer_name}} placeholder hydrated
+# at send; (2) _construct_variant_payload scrubs any literal cohort name the model
+# emits in the message body back to <customer_name> (the VT-499 server-owns-the-
+# field discipline). The real name is resolved per-recipient at SEND from the
+# customer record (sales_recovery_executor._allowed_param_values).
+
+
+def _ctx_with_cohort(*names: str, business: str = "Bogus Winback Kirana"):
+    """A SalesRecoveryContext whose dormant_cohort carries the given customer
+    display names — i.e. the names the model is shown in its prompt context."""
+    from uuid import uuid4
+
+    from orchestrator.agents.sales_recovery_executor import CustomerFactBundle
+
+    cohort = [
+        CustomerFactBundle(
+            customer_id=uuid4(),
+            display_name=n,
+            days_since_last_sale=61,
+            last_sale_amount_paise=10_000,
+            lifetime_spend_paise=50_000,
+            business_name=business,
+        )
+        for n in names
+    ]
+    return SalesRecoveryContext(
+        tenant_id=str(uuid4()),
+        run_id=str(uuid4()),
+        user_request="test request",
+        dormant_cohort=cohort,
+    )
+
+
+def test_vt498_prompt_instructs_placeholder_personalization_no_literal_pii():
+    """VT-498 — the rendered SR prompt forbids literal customer PII in the message
+    body and shows a corrected example using the {{customer_name}} placeholder
+    token (mirroring the selection_reason <customer_name> discipline), not a
+    literal name."""
+    from orchestrator.agent.sales_recovery import _render_sr_system_prompt
+
+    rendered = _joined_system_text(_render_sr_system_prompt())
+
+    # The placeholder token the model must emit is present (the SAME <customer_name>
+    # token target_cohort.selection_reason already carries — mirrored discipline)...
+    assert "<customer_name>" in rendered
+    # ...the corrected proposed example uses it in personalization...
+    assert "Hi <customer_name>, we miss you" in rendered
+    # ...and the old literal-name-shaped placeholder is gone.
+    assert "Hi {name}" not in rendered
+
+    # Explicit no-literal-PII guidance is present (prose + a Pillar-7 "Do not").
+    assert "never a literal name" in rendered
+    assert "PII-free" in rendered
+
+
+def test_vt498_construct_payload_scrubs_literal_cohort_name_from_message_plan():
+    """VT-498 — a proposed raw dict whose message_plan carries a LITERAL cohort
+    customer name (the exact dev-re-drive leak) is scrubbed to <customer_name> in
+    BOTH personalization and the template_params value before the plan parses +
+    persists. The business name (not a customer name) is left intact."""
+    from datetime import UTC, datetime
+
+    from orchestrator.agent.sales_recovery import _construct_variant_payload
+    from orchestrator.agent.schemas.campaign_plan import (
+        CampaignPlanProposed,
+        parse_campaign_plan,
+    )
+
+    raw = _proposed_raw_minimal()
+    raw["message_plan"]["personalization"] = (
+        "Hi Anita, we'd love to welcome you back to Bogus Winback Kirana."
+    )
+    raw["message_plan"]["template_params"] = {
+        "customer_name": "Anita",
+        "business_name": "Bogus Winback Kirana",
+    }
+
+    ctx = _ctx_with_cohort("Anita", business="Bogus Winback Kirana")
+    payload, _de, _dp = _construct_variant_payload(
+        raw, context=ctx, generated_at=datetime.now(UTC)
+    )
+
+    plan = parse_campaign_plan(payload)
+    assert isinstance(plan, CampaignPlanProposed)
+    # The literal customer name is gone from both leak fields → placeholder token.
+    assert "Anita" not in plan.message_plan.personalization
+    assert "<customer_name>" in plan.message_plan.personalization
+    assert plan.message_plan.template_params["customer_name"] == "<customer_name>"
+    # The business name is NOT customer PII — it is preserved.
+    assert plan.message_plan.template_params["business_name"] == "Bogus Winback Kirana"
+
+
+def test_vt498_construct_payload_leaves_placeholder_personalization_untouched():
+    """VT-498 — when the model obeys the prompt and emits the <customer_name>
+    placeholder, the scrub is a no-op (the placeholder is itself a redactor token,
+    not a registered cohort name): the message still personalizes at send, the plan
+    stays PII-free."""
+    from datetime import UTC, datetime
+
+    from orchestrator.agent.sales_recovery import _construct_variant_payload
+    from orchestrator.agent.schemas.campaign_plan import parse_campaign_plan
+
+    raw = _proposed_raw_minimal()
+    raw["message_plan"]["personalization"] = "Hi <customer_name>, we miss you."
+    raw["message_plan"]["template_params"] = {
+        "customer_name": "<customer_name>",
+        "discount": "10",
+    }
+
+    ctx = _ctx_with_cohort("Anita")
+    payload, _de, _dp = _construct_variant_payload(
+        raw, context=ctx, generated_at=datetime.now(UTC)
+    )
+
+    plan = parse_campaign_plan(payload)
+    assert plan.message_plan.personalization == "Hi <customer_name>, we miss you."
+    assert plan.message_plan.template_params["customer_name"] == "<customer_name>"
+
+
+def test_vt498_send_time_hydrator_fills_customer_name_from_record():
+    """VT-498 — the placeholder the PLAN carries is resolved at SEND from the
+    customer record: sales_recovery_executor._allowed_param_values (the per-
+    recipient win-back hydrator) maps the customer_name param to the customer's
+    own display_name, so the message still personalizes while the plan stays
+    PII-free. The hydrator's param KEYS are exactly the template signature."""
+    from uuid import uuid4
+
+    from orchestrator.agents import sales_recovery_executor as sre
+
+    bundle = sre.CustomerFactBundle(
+        customer_id=uuid4(),
+        display_name="Anita",
+        days_since_last_sale=61,
+        last_sale_amount_paise=10_000,
+        lifetime_spend_paise=50_000,
+        business_name="Bogus Winback Kirana",
+    )
+    allowed = sre._allowed_param_values(bundle)
+    assert allowed["customer_name"] == "Anita"          # hydrated from the record
+    assert allowed["business_name"] == "Bogus Winback Kirana"
+    # The plan's placeholder KEYS must be exactly the hydrator/template contract.
+    assert set(sre.WINBACK_TEMPLATE_PARAMS) == {"customer_name", "business_name"}
+
+
+# --- VT-651: target_cohort recipient list is SYSTEM-owned (Fazal: ALL eligible) ---
+#
+# The SR conversational LLM was TOLD to "pick the target subset" of the dormant
+# cohort, so sonnet-5 picked a different 3-5 of the 8 eligible each run ->
+# target_cohort.cohort_size varied run-to-run (a non-deterministic recipient set).
+# Fazal ruled the recipient list must be the DETERMINISTIC full eligible set; the LLM
+# drafts the MESSAGE + prose only. Mirroring the VT-499 server-authority discipline,
+# _construct_variant_payload now OVERRIDES target_cohort on the PROPOSED variant with
+# EVERY context.dormant_cohort member, preserving the model's cohort_label /
+# selection_reason PROSE and forcing no model-authored exclusions.
+
+
+def test_vt651_construct_payload_expands_subset_to_full_eligible_cohort():
+    """VT-651 — a proposed raw dict whose model-emitted target_cohort names only a
+    SUBSET (3 of 8 eligible) is EXPANDED server-side to the FULL dormant cohort:
+    customer_ids == all 8, cohort_size == 8 (deterministic), exclusion_list cleared.
+    The model's cohort_label + selection_reason PROSE is preserved (evidence-marker
+    consistency intact)."""
+    from datetime import UTC, datetime
+
+    from orchestrator.agent.sales_recovery import _construct_variant_payload
+    from orchestrator.agent.schemas.campaign_plan import (
+        CampaignPlanProposed,
+        parse_campaign_plan,
+    )
+
+    # 8-member eligible cohort (the full set the campaign must target).
+    ctx = _ctx_with_cohort("C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8")
+    eligible_ids = [str(m.customer_id) for m in ctx.dormant_cohort]
+    assert len(eligible_ids) == 8
+
+    raw = _proposed_raw_minimal()
+    # The model picks a NARROWED 3-of-8 subset + its own distinctive prose, and even
+    # authors an exclusion (which must be cleared — the set is already filtered).
+    raw["target_cohort"]["customer_ids"] = eligible_ids[:3]
+    raw["target_cohort"]["cohort_size"] = 3
+    raw["target_cohort"]["cohort_label"] = "top-3-lapsed-spenders"
+    raw["target_cohort"]["selection_reason"] = (
+        "Top 3 lapsed spenders, promo-eligible [E1]."
+    )
+    excluded = eligible_ids[7]
+    raw["exclusion_list"] = [excluded]
+    raw["exclusion_reasons"] = {excluded: "model decided to skip this one"}
+
+    now = datetime.now(UTC)
+    payload, _de, _dp = _construct_variant_payload(raw, context=ctx, generated_at=now)
+
+    plan = parse_campaign_plan(payload)
+    assert isinstance(plan, CampaignPlanProposed)
+    # Recipient list expanded to the FULL eligible set — deterministic.
+    assert sorted(str(cid) for cid in plan.target_cohort.customer_ids) == sorted(
+        eligible_ids
+    )
+    assert plan.target_cohort.cohort_size == 8
+    assert plan.target_cohort.cohort_size == len(ctx.dormant_cohort)
+    # Model-authored exclusions are cleared (the eligible set is already filtered).
+    assert plan.exclusion_list == []
+    assert plan.exclusion_reasons == {}
+    # VT-661: cohort_label is SERVER-grounded to the real lapsed window (not the
+    # model's free text), derived from LAPSED_WINDOW_DAYS (never a re-literal 45).
+    from orchestrator.db.wrappers import LAPSED_WINDOW_DAYS
+
+    assert plan.target_cohort.cohort_label == f"lapsed-{LAPSED_WINDOW_DAYS}d-plus"
+    # selection_reason TONE is preserved; it carries no day-window figure here, so
+    # grounding is a no-op and the [E1] marker survives (evidence-marker consistency).
+    assert plan.target_cohort.selection_reason == (
+        "Top 3 lapsed spenders, promo-eligible [E1]."
+    )
+
+
+def test_vt651_full_cohort_is_deterministic_across_repeated_construction():
+    """VT-651 — for a FIXED cohort the server-owned recipient list is identical
+    every call, regardless of which subset the model emits (the run-to-run variance
+    the bug caused). Two different model subsets over the SAME 8-member cohort both
+    resolve to the identical full 8-id recipient set."""
+    from datetime import UTC, datetime
+
+    from orchestrator.agent.sales_recovery import _construct_variant_payload
+    from orchestrator.agent.schemas.campaign_plan import parse_campaign_plan
+
+    ctx = _ctx_with_cohort("C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8")
+    eligible_ids = [str(m.customer_id) for m in ctx.dormant_cohort]
+    now = datetime.now(UTC)
+
+    def _recipients_for_model_subset(subset: list[str]) -> list[str]:
+        raw = _proposed_raw_minimal()
+        raw["target_cohort"]["customer_ids"] = subset
+        raw["target_cohort"]["cohort_size"] = len(subset)
+        payload, _de, _dp = _construct_variant_payload(
+            raw, context=ctx, generated_at=now
+        )
+        plan = parse_campaign_plan(payload)
+        return sorted(str(cid) for cid in plan.target_cohort.customer_ids)
+
+    run_a = _recipients_for_model_subset(eligible_ids[:3])   # model picks 3
+    run_b = _recipients_for_model_subset(eligible_ids[2:7])  # model picks a different 5
+    assert run_a == run_b == sorted(eligible_ids)
+
+
+def test_vt651_empty_cohort_does_not_fire_override_stays_fail_closed():
+    """VT-651 — with an EMPTY dormant_cohort the override does NOT fire: the model's
+    target_cohort is left exactly as emitted (no synthesized recipient). The proposed
+    branch should not be reached without a cohort in practice; ge=1 fail-closed is the
+    acceptable posture, never a fabricated id."""
+    from datetime import UTC, datetime
+
+    from orchestrator.agent.sales_recovery import _construct_variant_payload
+    from orchestrator.agent.schemas.campaign_plan import parse_campaign_plan
+
+    ctx = _ctx_with_real_uuids()  # dormant_cohort == []
+    assert ctx.dormant_cohort == []
+
+    raw = _proposed_raw_minimal()
+    model_ids = raw["target_cohort"]["customer_ids"]
+    assert len(model_ids) == 1  # the fixture's single model-picked id
+
+    payload, _de, _dp = _construct_variant_payload(
+        raw, context=ctx, generated_at=datetime.now(UTC)
+    )
+    plan = parse_campaign_plan(payload)
+    # Untouched — override guarded on a non-empty cohort.
+    assert [str(cid) for cid in plan.target_cohort.customer_ids] == model_ids
+    assert plan.target_cohort.cohort_size == 1
+    assert plan.target_cohort.cohort_label == "dormant-60d"
+
+
+# VT-661: the WINDOW figure in the owner-facing cohort prose is a SERVER-OWNED FACT.
+# The SR model authored an ungrounded window in cohort_label (e.g. "lapsed-120d-plus")
+# that CONTRADICTS the real 45d lapsed window (LAPSED_WINDOW_DAYS) it had just told the
+# owner — a Tier-1 fabrication (j01_shopify_winback, ~1/3 on dev). The label flows
+# verbatim into the owner recap (dispatch/manager). _server_target_cohort now sets
+# cohort_label DETERMINISTICALLY to a window-grounded label derived from
+# LAPSED_WINDOW_DAYS, and grounds any day-window figure the model wrote into
+# selection_reason — preserving [E\d+] evidence markers.
+
+
+def test_vt661_cohort_label_grounded_to_real_lapsed_window():
+    """VT-661 — cohort_label is server-owned + window-grounded. A model label with a
+    CONTRADICTORY window ("lapsed-120d-plus") is replaced with a deterministic label
+    derived from LAPSED_WINDOW_DAYS (never a re-literal 45); a window-consistent or an
+    ABSENT model label yields the SAME grounded label. A day-window figure in
+    selection_reason is ground to the real window with its [E1] marker intact."""
+    from datetime import UTC, datetime
+
+    from orchestrator.agent.sales_recovery import _construct_variant_payload
+    from orchestrator.agent.schemas.campaign_plan import parse_campaign_plan
+    from orchestrator.db.wrappers import LAPSED_WINDOW_DAYS
+
+    grounded = f"lapsed-{LAPSED_WINDOW_DAYS}d-plus"
+    ctx = _ctx_with_cohort("C1", "C2", "C3")
+    now = datetime.now(UTC)
+
+    def _label_reason_for(
+        model_label: str | None, model_reason: str
+    ) -> tuple[str, str]:
+        raw = _proposed_raw_minimal()
+        if model_label is None:
+            raw["target_cohort"].pop("cohort_label", None)
+        else:
+            raw["target_cohort"]["cohort_label"] = model_label
+        raw["target_cohort"]["selection_reason"] = model_reason
+        payload, _de, _dp = _construct_variant_payload(
+            raw, context=ctx, generated_at=now
+        )
+        plan = parse_campaign_plan(payload)
+        return plan.target_cohort.cohort_label, plan.target_cohort.selection_reason
+
+    # (1) A contradictory model window is REPLACED with the grounded label, and the
+    #     ungrounded window in the reason is ground too (marker preserved).
+    label, reason = _label_reason_for(
+        "lapsed-120d-plus", "Customers with no purchase in 120+ days [E1]."
+    )
+    assert label == grounded
+    assert "120" not in label
+    assert reason == f"Customers with no purchase in {LAPSED_WINDOW_DAYS}+ days [E1]."
+    assert "120" not in reason
+    assert "[E1]" in reason
+
+    # (2) A window-CONSISTENT model label still yields the SAME deterministic label.
+    label2, _ = _label_reason_for(f"lapsed-{LAPSED_WINDOW_DAYS}d", "All eligible [E1].")
+    assert label2 == grounded
+
+    # (3) An ABSENT model label yields the grounded label too (deterministic).
+    label3, _ = _label_reason_for(None, "All eligible [E1].")
+    assert label3 == grounded
+
+    # The grounded label is DERIVED from the constant — not a hard-coded 45.
+    assert str(LAPSED_WINDOW_DAYS) in grounded

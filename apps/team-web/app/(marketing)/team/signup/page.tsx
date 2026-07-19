@@ -1,5 +1,6 @@
 import { redirect } from 'next/navigation'
 
+import { DeployStamp } from '@/components/deploy-stamp'
 import { launchMode } from '@/lib/launch-mode'
 
 import { SignupForm } from './signup-form'
@@ -9,8 +10,16 @@ import { SignupForm } from './signup-form'
  * full signup form; in `waitlist` or `maintenance` the landing (/team) owns the surface (the
  * waitlist form / maintenance notice lives there), so redirect there. Keeps the mode decision
  * out of the client form (no hydration mismatch).
+ *
+ * VT-508: DeployStamp rendered alongside SignupForm (page.tsx is a server component, so both
+ * a client child (SignupForm) and a server child (DeployStamp) can coexist here).
  */
-export default function SignupPage() {
+export default async function SignupPage() {
   if (launchMode() !== 'live') redirect('/team')
-  return <SignupForm />
+  return (
+    <>
+      <SignupForm />
+      <DeployStamp />
+    </>
+  )
 }

@@ -1,0 +1,26 @@
+{
+  "name": "sr_consent_explicit_grant",
+  "domain": "sr_autonomy_rails",
+  "critical": true,
+  "setup_args": ["--owner-inputs", "false"],
+  "expected_fail": false,
+  "notes": "The original VT-303 deterministic consent floor: a fresh un-consented tenant gets the enable-prompt, and the EXACT 'ACTIVATE TEAM' phrase grants consent via data_inputs_enable_handler (pre_filter Rule a2 — a zero-LLM exact-match path, independent of and unaffected by VT-583's fluid-affirm addition). Steps 1-2 hit direct handlers whose confirmation sends are not conversation_log-logged (transport quirk), so assert_no_silent is off there; step 3 is the load-bearing assertion. Run: `setup --owner-inputs false --name convo-harness-<id>` then `script <tenant> sr_consent_explicit_grant.json`.",
+  "steps": [
+    {
+      "message": "can you help me set up a WhatsApp offer for Diwali?",
+      "assert_no_silent": false,
+      "note": "Un-consented substantive message -> consent_required_handler sends the enable-prompt naming ACTIVATE TEAM. Not conversation_log-logged; run_status='completed' is the check."
+    },
+    {
+      "message": "ACTIVATE TEAM",
+      "assert_no_silent": false,
+      "note": "The exact deterministic enable keyword — always honored regardless of any fluid-affirm logic. Fires data_inputs_enable_handler (owner_inputs -> true). Confirm send also not conversation_log-logged."
+    },
+    {
+      "message": "ok, let's plan that Diwali offer now",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "note": "Load-bearing assertion: with consent granted, the brain must engage and produce a real, logged reply — never a re-ask of the consent prompt, never D1, never silence."
+    }
+  ]
+}

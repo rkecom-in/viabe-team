@@ -30,8 +30,11 @@ describe('VT-290 — roles', () => {
 // raw-table reads + view-columns-only) and the role-split tests in ops-escalations / ops-monitoring.
 
 describe('VT-290 — assignment scoping (fail-closed)', () => {
-  function fakeClient(rows: { tenant_id: string }[]) {
-    return {
+  // VT-380 (B3): third arg is now a clientFactory (() => Client), not a Client instance.
+  // serverSecretClient() is resolved LAZILY — never called before the VTADMIN/empty-id
+  // early-returns, so a credless env never throws for VTAdmin callers.
+  function fakeFactory(rows: { tenant_id: string }[]) {
+    return () => ({
       from: () => ({
         select: () => ({
           eq: () => ({
@@ -39,23 +42,45 @@ describe('VT-290 — assignment scoping (fail-closed)', () => {
           }),
         }),
       }),
-    }
+    })
   }
 
   it('VTAdmin → null (unscoped, all tenants)', async () => {
-    const out = await resolveAssignedTenants('op1', OperatorRole.VTADMIN, fakeClient([]) as never)
+    const out = await resolveAssignedTenants('op1', OperatorRole.VTADMIN, fakeFactory([]))
     expect(out).toBeNull()
   })
 
   it('VTR → its active assigned tenants', async () => {
     const out = await resolveAssignedTenants(
-      'op1', OperatorRole.VTR, fakeClient([{ tenant_id: 'ta' }, { tenant_id: 'tb' }]) as never,
+      'op1', OperatorRole.VTR, fakeFactory([{ tenant_id: 'ta' }, { tenant_id: 'tb' }]),
     )
     expect(out).toEqual(['ta', 'tb'])
   })
 
   it('VTR with no operatorId → [] (fail-closed)', async () => {
-    const out = await resolveAssignedTenants('', OperatorRole.VTR, fakeClient([{ tenant_id: 'ta' }]) as never)
+    const out = await resolveAssignedTenants('', OperatorRole.VTR, fakeFactory([{ tenant_id: 'ta' }]))
+    expect(out).toEqual([])
+  })
+
+  it('VTAdmin + credless env (factory throws) → null WITHOUT calling factory (lazy)', async () => {
+    // The factory must NEVER be invoked for VTADMIN — the early-return fires before it.
+    let factoryCalled = false
+    const throwingFactory = () => {
+      factoryCalled = true
+      throw new Error('serverSecretClient: SUPABASE_URL and SUPABASE_SECRET_KEY must be set')
+    }
+    const out = await resolveAssignedTenants('op1', OperatorRole.VTADMIN, throwingFactory)
+    expect(out).toBeNull()
+    expect(factoryCalled).toBe(false)
+  })
+
+  it('VTR + credless env (factory throws) → [] (degrade, not throw)', async () => {
+    // When credentials are missing, resolveAssignedTenants degrades to fail-closed
+    // rather than propagating a hard 500.
+    const throwingFactory = () => {
+      throw new Error('serverSecretClient: SUPABASE_URL and SUPABASE_SECRET_KEY must be set')
+    }
+    const out = await resolveAssignedTenants('op1', OperatorRole.VTR, throwingFactory)
     expect(out).toEqual([])
   })
 

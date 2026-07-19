@@ -1,0 +1,36 @@
+{
+  "name": "efficient_planning_batch_campaign_constraints",
+  "domain": "manager",
+  "critical": false,
+  "setup_args": [
+    "--onboarded",
+    "--seed-lapsed-customers",
+    "8"
+  ],
+  "expected_fail": false,
+  "notes": "Efficient planning: ONE message carries three constraints for a win-back ask at once (a time window, a discount cap, and an exclusion rule). The manager must proceed using all three rather than interrogating them back one at a time across separate turns. Step 1 accepts EITHER honest outcome (a real drafted plan given the seeded cohort, OR an honest insufficient-data reply if the activation gate didn't clear this run — same dependency pattern as delegation_winback_plan.json); the assertion that matters here is the NON-re-ask of constraints already stated. Setup: `setup --onboarded --seed-lapsed-customers 8 --name convo-harness-<id>` then `script <tenant> efficient_planning_batch_campaign_constraints.json`.",
+  "steps": [
+    {
+      "message": "Set up a win-back campaign for anyone who hasn't ordered in 60 days, keep any discount under 15%, and skip anyone who's complained before",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_not_contains": [
+        "how many days since their last order",
+        "what discount would you like",
+        "what percentage discount",
+        "which customers have complained",
+        "how much of a discount"
+      ],
+      "assert_route": {
+        "expect_sr_delegation": true,
+        "tenant_wide": true
+      },
+      "assert_side_effects": {
+        "expect_campaign": true,
+        "expect_approval_decision": "pending",
+        "tenant_wide": true
+      },
+      "note": "Three constraints (window/discount-cap/exclusion) in ONE message. Expect the manager to proceed (delegate/plan or an honest data-gap reply) WITHOUT re-asking any of the three constraints individually — batch, don't interrogate."
+    }
+  ]
+}

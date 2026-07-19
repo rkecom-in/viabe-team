@@ -1,11 +1,15 @@
 /**
  * VT-211 — server-side data access for /team/onboard.
  *
- * Reads tenant_integration_state (migration 031) for the configured
- * Fazal tenant. Per Cowork correction 1 (review-verdict 2026-05-28
- * 11:05 IST): tenant resolution comes from a new env var
- * FAZAL_TENANT_ID (no FK between tenants and operator UUIDs in
- * Phase 1; that's Phase-2 multi-tenant operator work).
+ * Reads tenant_integration_state (migration 031) for a given tenant.
+ *
+ * VT-415 (owner-auth cutover): the tenant is now resolved SERVER-SIDE from
+ * the owner session (`requireOwnerSession()` → `tenantId`) and passed in as
+ * a parameter. We no longer read `FAZAL_TENANT_ID` here — that env shim was a
+ * Phase-1 single-tenant stand-in and reading it under an owner session would
+ * be a live cross-tenant data leak (every owner would hit Fazal's tenant).
+ * The caller MUST pass the session-derived tenantId; never a client field
+ * (IDOR — caught twice VT-293/294).
  */
 
 import { serverSecretClient } from '@/lib/supabase-client'
@@ -32,13 +36,16 @@ export interface OnboardState {
 
 export class TenantNotConfiguredError extends Error {
   constructor() {
-    super('FAZAL_TENANT_ID env not configured')
+    super('onboard state: no tenant on the owner session')
     this.name = 'TenantNotConfiguredError'
   }
 }
 
-export async function fetchFazalOnboardState(): Promise<OnboardState> {
-  const tenantId = process.env.FAZAL_TENANT_ID ?? ''
+/**
+ * VT-415: takes the session-derived tenantId (resolved server-side from
+ * `requireOwnerSession()`); never reads `FAZAL_TENANT_ID`, never a client field.
+ */
+export async function fetchOnboardState(tenantId: string): Promise<OnboardState> {
   if (!tenantId) throw new TenantNotConfiguredError()
   const client = serverSecretClient()
   const { data, error } = await client
@@ -46,7 +53,7 @@ export async function fetchFazalOnboardState(): Promise<OnboardState> {
     .select('tenant_id, phase, pending_owner_input, last_decision')
     .eq('tenant_id', tenantId)
     .maybeSingle()
-  if (error) throw new Error(`fetchFazalOnboardState: ${error.message}`)
+  if (error) throw new Error(`fetchOnboardState: ${error.message}`)
   if (!data) {
     // No row yet — seed defaults so the page can render a starting prompt.
     return {

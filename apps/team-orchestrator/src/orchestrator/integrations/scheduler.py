@@ -41,6 +41,16 @@ _SCHEDULER_CRON = "*/5 * * * *"
 _FAILURE_ESCALATION_THRESHOLD = 3
 
 
+def _paused(tenant_id: UUID) -> bool:
+    """VT-374 pause check (kind 'ingestion'). SKIP semantics: a paused tenant's due row
+    stays due (``next_scheduled_run`` untouched, no fail-count bump), so the 5-minute
+    scheduler naturally resumes the pull after /release — no blocking hold needed.
+    check_pause never raises (F9 two-tier)."""
+    from orchestrator.run_control import check_pause
+
+    return check_pause(tenant_id, "ingestion")
+
+
 def _parse_daily_cron(expr: str) -> tuple[int, int]:
     """Parse a Phase-1 ``"M H * * *"`` daily-at-time cron expression.
 
@@ -83,6 +93,80 @@ def _compute_next_run(pull_cadence: str, after: datetime) -> datetime:
     return target_today_ist - ist_offset
 
 
+def _ingest_pulled_rows(
+    tenant_id: UUID, connector_id: str, pulled: list, *, field_mapping: dict[str, str] | None = None
+) -> int:
+    """Map a connector's ``pull_full`` rows → ``CanonicalRow`` and land them via
+    ``ingest_customer_rows``. Returns the committed-customer count.
+
+    Connector-aware mapping (the pull shapes differ):
+      * ``google_sheet`` — rows are ``{column -> cell}`` dicts → ``sheet_row_to_canonical``.
+        ``field_mapping`` (VT-608 fix round CRITICAL 2) — the owner-CONFIRMED mapping persisted in
+        ``tenant_connector_status.field_mapping`` (migration 168) — is threaded through so a
+        RECURRING pull honours the SAME confirmed mapping the initial commit used, not just the
+        alias-guess fallback. ``None`` (no mapping confirmed, or a non-Sheets connector) keeps the
+        exact pre-existing alias-table behavior.
+      * ``shopify`` — ``pull_full`` returns CUSTOMER dicts (identity only; NO orders/
+        sales — the order-of-record substrate arrives via the webhook + ``backfill_orders``).
+        We land identity (phone/email/name); no sale is fabricated from a customer row.
+
+    tenant_id is the scheduler's server-derived argument (P3), never a row field.
+    A connector with no recognized pull shape lands nothing (returns 0) — never a
+    silent wrong-shape write.
+    """
+    from orchestrator.integrations.ingest import (
+        CanonicalRow,
+        ingest_customer_rows,
+        sheet_row_to_canonical,
+    )
+
+    rows: list[CanonicalRow] = []
+    if connector_id == "google_sheet":
+        rows = [
+            c
+            for r in pulled
+            if isinstance(r, dict)
+            and (c := sheet_row_to_canonical(r, mapping=field_mapping)) is not None
+        ]
+        acquired_via = "google_sheet"
+    elif connector_id == "shopify":
+        from orchestrator.integrations.connectors.shopify import _normalize_e164
+
+        for r in pulled:
+            if not isinstance(r, dict):
+                continue
+            phone = _normalize_e164(r.get("phone"))
+            email_raw = r.get("email")
+            email = (
+                str(email_raw).strip().lower()
+                if email_raw and str(email_raw).strip() else None
+            )
+            name = (
+                f"{r.get('first_name', '') or ''} {r.get('last_name', '') or ''}".strip()
+                or None
+            )
+            if phone or email or name:
+                rows.append(
+                    CanonicalRow(
+                        phone_e164=phone, email=email, display_name=name,
+                        sales=(), consent=None,  # identity-only; no sale from a customer row
+                    )
+                )
+        acquired_via = "shopify"
+    else:
+        # Unknown pull shape — do NOT guess a mapping (would risk wrong-shape writes).
+        logger.info(
+            "_ingest_pulled_rows: connector=%s has no pull mapper — rows not landed",
+            connector_id,
+        )
+        return 0
+
+    if not rows:
+        return 0
+    summary = ingest_customer_rows(tenant_id, rows, acquired_via=acquired_via)
+    return summary.committed
+
+
 def ingest_one_connector(tenant_id: UUID, connector_id: str) -> dict[str, object]:
     """Run one pull for (tenant, connector); update status.
 
@@ -109,7 +193,7 @@ def ingest_one_connector(tenant_id: UUID, connector_id: str) -> dict[str, object
     with pool.connection() as conn, conn.cursor() as cur:
         cur.execute(
             "SELECT pull_cadence, last_sync_at, consecutive_fails, "
-            "rows_ingested_today, last_ingested_date "
+            "rows_ingested_today, last_ingested_date, field_mapping "
             "FROM tenant_connector_status "
             "WHERE tenant_id = %s AND connector_id = %s",
             (str(tenant_id), connector_id),
@@ -127,13 +211,25 @@ def ingest_one_connector(tenant_id: UUID, connector_id: str) -> dict[str, object
         row = raw
     else:
         cols = ["pull_cadence", "last_sync_at", "consecutive_fails",
-                "rows_ingested_today", "last_ingested_date"]
+                "rows_ingested_today", "last_ingested_date", "field_mapping"]
         row = dict(zip(cols, raw, strict=True))
+
+    # VT-374 (ingestion, connector_pull) seam — defense-in-depth with the fan-out check
+    # (the rerun arm enters here directly): a paused tenant's pull is skipped with the
+    # status row untouched, so release resumes it on the next due tick.
+    if _paused(tenant_id):
+        logger.info(
+            "ingest_one_connector: tenant=%s connector=%s paused by run-control — skipped",
+            tenant_id,
+            connector_id,
+        )
+        return {"status": "paused"}
 
     spec = get_connector(connector_id)
     connector_cls = _connector_class_for(connector_id)
 
     rows_pulled = 0
+    rows_committed = 0
     error_message: str | None = None
     try:
         connector = connector_cls()
@@ -142,6 +238,13 @@ def ingest_one_connector(tenant_id: UUID, connector_id: str) -> dict[str, object
         # from datetime since; their adapters reconcile internally.
         pulled = connector.pull_full(tenant_id, since=row["last_sync_at"])
         rows_pulled = len(pulled) if pulled is not None else 0
+        # VT-417 PR-2: LAND the pulled rows instead of counting+discarding them.
+        # Map each connector-pull row → CanonicalRow (connector-aware) → real
+        # customers + sale ledger via ingest_customer_rows. tenant_id is the
+        # scheduler's server-derived argument (P3), never from a row.
+        rows_committed = _ingest_pulled_rows(
+            tenant_id, connector_id, pulled or [], field_mapping=row.get("field_mapping")
+        )
     except Exception as exc:  # noqa: BLE001 — scheduler must not crash
         error_message = repr(exc)[:200]
         logger.exception(
@@ -213,6 +316,7 @@ def ingest_one_connector(tenant_id: UUID, connector_id: str) -> dict[str, object
     return {
         "status": new_status,
         "rows_pulled": rows_pulled,
+        "rows_committed": rows_committed,
         "consecutive_fails": new_fails,
     }
 
@@ -261,6 +365,15 @@ def run_due_ingestions() -> int:
         else:
             tenant_id_s, connector_id = raw[0], raw[1]
         tenant_id = UUID(str(tenant_id_s))
+        # VT-374 — pause check before fan-out: a paused tenant is not dispatched at all
+        # (cheaper than dispatching a workflow that would skip itself).
+        if _paused(tenant_id):
+            logger.info(
+                "scheduler: tenant=%s connector=%s paused by run-control — dispatch skipped",
+                tenant_id,
+                connector_id,
+            )
+            continue
         try:
             DBOS.start_workflow(ingest_one_connector, tenant_id, connector_id)
             dispatched += 1

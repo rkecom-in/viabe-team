@@ -1,0 +1,44 @@
+{
+  "name": "sr_winback_plan_delegation",
+  "domain": "sr_autonomy_rails",
+  "critical": false,
+  "setup_args": [
+    "--onboarded",
+    "--seed-lapsed-customers",
+    "7"
+  ],
+  "expected_fail": false,
+  "notes": "Sales-Recovery delegation base case (VT-594/595 both Done): a seeded lapsed cohort + an explicit win-back plan ask should DELEGATE to the Sales-Recovery specialist and surface an in-chat plan summary + approval ask, never the D1 'I'm on it' non-answer, never silence. Run: `setup --onboarded --seed-lapsed-customers 7 --name convo-harness-<id>` then `script <tenant> sr_winback_plan_delegation.json`. Step 2 confirms the pure customer-count ask still fast-paths to the raw number regardless of what step 1 produced.",
+  "steps": [
+    {
+      "message": "business has been a bit slow lately — can you put together a win-back plan for the customers who haven't ordered in a while?",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_not_contains": [
+        "got it — i'm on it and i'll update you shortly",
+        "i'm on it and i'll update you"
+      ],
+      "assert_route": {
+        "expect_sr_delegation": true,
+        "tenant_wide": true
+      },
+      "assert_side_effects": {
+        "expect_campaign": true,
+        "expect_approval_decision": "pending",
+        "tenant_wide": true
+      },
+      "note": "Expect real delegation to Sales-Recovery: a substantive plan summary + approval ask grounded in the seeded cohort — never the generic D1 'on it' filler, never silence."
+    },
+    {
+      "message": "how many customers do I have on file?",
+      "assert_no_silent": true,
+      "assert_contains": [
+        "7"
+      ],
+      "assert_route": {
+        "expect_sr_delegation": false
+      },
+      "note": "Pure count ask fast-paths via status_query regardless of the win-back plan outcome above."
+    }
+  ]
+}

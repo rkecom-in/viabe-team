@@ -1,0 +1,24 @@
+{
+  "name": "onboarding_hostile_refuses_setup",
+  "domain": "onboarding",
+  "critical": false,
+  "setup_args": ["--onboarded", "--flow", "ready_asked"],
+  "expected_fail": false,
+  "notes": "Hostile refusal AT the paced post-profile readiness ask (distinct from onboarding_hostile.json's pre-profile trust/scam challenge) — the owner is rude and flatly refuses to connect any data. The manager must honor the decline (defer the flow) without coercive pressure and must still answer the follow-up honestly. Setup: `setup --onboarded --flow ready_asked` then `script <tenant> onboarding_hostile_refuses_setup.json`.",
+  "steps": [
+    {
+      "message": "no, I'm not doing any of this, stop asking me",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_not_contains": ["you must connect", "it's mandatory", "please connect now", "you have to link"],
+      "note": "Rude, explicit decline of the readiness ask. Expect the flow to defer gracefully (no coercion, no repeated pressure to connect)."
+    },
+    {
+      "message": "why do you even need my data anyway, this is annoying",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_not_contains": ["limited time", "act now", "hurry", "you must"],
+      "note": "Hostile follow-up question. Expect an honest, substantive answer about why data helps (not deflection, not a canned reassurance, not the D1 fallback, no pressure language)."
+    }
+  ]
+}

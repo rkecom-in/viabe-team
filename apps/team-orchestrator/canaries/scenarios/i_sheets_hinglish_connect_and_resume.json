@@ -1,0 +1,24 @@
+{
+  "name": "i_sheets_hinglish_connect_and_resume",
+  "domain": "integration",
+  "critical": false,
+  "setup_args": ["--onboarded"],
+  "expected_fail": false,
+  "notes": "Hinglish-voice variant of the same real mint + auth-wait-gate pair (sheets_oauth.start_sheets_oauth / sheets_resume.maybe_resume_sheets_onboarding) — proves the connect flow and the honest not-yet-connected floor both work off a natural Hinglish phrasing, not just English. Setup: `setup --onboarded` then `script <tenant> i_sheets_hinglish_connect_and_resume.json`.",
+  "steps": [
+    {
+      "message": "Bhaiya mera customer aur sales ka sara data Google Sheet mein hai. Kaise jodu isse Viabe se?",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_contains": ["http"],
+      "assert_not_contains": ["already connected", "connected successfully"],
+      "note": "Hinglish connect-ask — expect the same real authorize_url mint despite the non-English phrasing."
+    },
+    {
+      "message": "Haan, ho gaya, sheet connect kar diya maine",
+      "assert_no_silent": true,
+      "assert_contains": ["http"],
+      "note": "Hinglish 'done' tokens (haan/ho/gaya are all in shopify_onboarding._DONE) hit the deterministic auth-wait floor — the gate's honest not-yet-connected line fires in the OWNER's language (Hinglish here) AND carries the real re-auth link. [VT-625 2026-07-08: the assert pinned an exact 3-token Hindi phrase 'nahi dikh raha' onto a non-deterministic LLM Hinglish reply; the manager said the synonym 'nahi ho raha' + gave the real https link → false-fail. The durable invariant is the honest reply CARRIES the re-auth link, so assert 'http' (+ assert_no_silent), not a brittle phrase-match. Earlier 2026-07-07 note: assert had been the literal English 'don't see the connection', also a false-fail against a Hinglish reply. Step 1's missing-authorize_url-link gap is UNRELATED and remains a real, separate finding (VT-625 deterministic first-connect route).]"
+    }
+  ]
+}

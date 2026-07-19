@@ -2,9 +2,9 @@
 
 import { redirect } from 'next/navigation'
 
-import { requireFazal, UnauthorizedError } from '@/lib/auth/require-fazal'
+import { OwnerUnauthorizedError, requireOwnerSession } from '@/lib/auth/require-owner-session'
 import {
-  fetchFazalOnboardState,
+  fetchOnboardState,
   TenantNotConfiguredError,
 } from '@/lib/onboard/data-access'
 
@@ -19,25 +19,26 @@ const PHASE_LABELS: Record<string, string> = {
 }
 
 export default async function OnboardPage() {
+  // VT-415: gated on the OWNER session; tenant is resolved SERVER-SIDE from
+  // that session (never FAZAL_TENANT_ID, never a client field). An unauthed
+  // hit redirects to the OWNER login (not ops login).
+  let tenantId: string
   try {
-    await requireFazal()
+    ;({ tenantId } = await requireOwnerSession())
   } catch (err) {
-    if (err instanceof UnauthorizedError) redirect('/team/ops/login?next=/team/onboard')
+    if (err instanceof OwnerUnauthorizedError) redirect('/team/login?next=/team/onboard')
     throw err
   }
 
   let state
   try {
-    state = await fetchFazalOnboardState()
+    state = await fetchOnboardState(tenantId)
   } catch (err) {
     if (err instanceof TenantNotConfiguredError) {
       return (
         <main data-area="onboard-degraded">
           <h1>Onboarding unavailable</h1>
-          <p>
-            <code>FAZAL_TENANT_ID</code> is not configured. Ask Cowork to
-            populate the value from the <code>tenants</code> table.
-          </p>
+          <p>We couldn&apos;t resolve your business from your session. Sign in again.</p>
         </main>
       )
     }

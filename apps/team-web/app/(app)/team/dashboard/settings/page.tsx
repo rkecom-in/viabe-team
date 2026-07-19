@@ -1,11 +1,13 @@
+import { Card, CardTitle, LoadError, PageHeader } from '@/components/dashboard/ui'
 import { requireOwnerSession } from '@/lib/auth/require-owner-session'
 import { getDictionary, resolveLocale, t } from '@/lib/i18n'
 import { fetchSettings } from '@/lib/owner-dashboard-client'
 
 /**
- * Owner dashboard — Settings (VT-338). Read-only: business profile + plan/trial + the
- * DSR-init buttons (the ONLY write-exception — owner-initiated requests to /api/dsr/*, not
- * edits). tenantId is session-derived server-side (never a client field). No customer PII.
+ * Owner dashboard — Settings (VT-338 + VT-372 styling). Read-only: business profile +
+ * plan/trial + the DSR-init button (the ONLY write-exception — owner-initiated requests to
+ * /api/dsr/*, not edits). tenantId is session-derived server-side (never a client field). No
+ * customer PII.
  */
 export default async function SettingsPage({
   searchParams,
@@ -19,10 +21,9 @@ export default async function SettingsPage({
 
   if (!data) {
     return (
-      <main data-testid="dashboard-settings">
-        <h1>{t(dict, 'settings.title')}</h1>
-        <p>{t(dict, 'common.loadError')}</p>
-      </main>
+      <div data-testid="dashboard-settings">
+        <LoadError title={t(dict, 'settings.title')} message={t(dict, 'common.loadError')} />
+      </div>
     )
   }
 
@@ -30,42 +31,62 @@ export default async function SettingsPage({
   const p = data.plan
 
   return (
-    <main data-testid="dashboard-settings">
-      <h1>{t(dict, 'settings.title')}</h1>
+    <div data-testid="dashboard-settings">
+      <PageHeader title={t(dict, 'settings.title')} />
 
-      <section aria-label="business">
-        <h2>{t(dict, 'settings.business')}</h2>
-        <dl>
-          <dt>{t(dict, 'customers.name')}</dt>
-          <dd>{b?.business_name ?? '—'}</dd>
-          <dd>{b?.owner_name ?? '—'}</dd>
-          <dd>{b?.business_archetype ?? '—'}</dd>
-          <dd>{b?.working_hours ?? '—'}</dd>
-        </dl>
-      </section>
+      <div className="grid gap-6 lg:grid-cols-2">
+        <Card label="business">
+          <CardTitle>{t(dict, 'settings.business')}</CardTitle>
+          <dl className="mt-4 divide-y divide-border text-sm">
+            <Row label={t(dict, 'settings.businessName')} value={b?.business_name} />
+            <Row label={t(dict, 'settings.ownerName')} value={b?.owner_name} />
+            <Row label={t(dict, 'settings.archetype')} value={b?.business_archetype} />
+            <Row label={t(dict, 'settings.hours')} value={b?.working_hours} />
+          </dl>
+        </Card>
 
-      <section aria-label="plan">
-        <h2>{t(dict, 'settings.plan')}</h2>
-        <dl>
-          <dd>{p.plan_tier ?? '—'}</dd>
-          <dd>{p.trial_ends_at ? new Date(p.trial_ends_at).toLocaleDateString('en-IN') : '—'}</dd>
-        </dl>
-      </section>
+        <Card label="plan">
+          <CardTitle>{t(dict, 'settings.plan')}</CardTitle>
+          <dl className="mt-4 divide-y divide-border text-sm">
+            <Row label={t(dict, 'settings.planTier')} value={p.plan_tier} />
+            <Row
+              label={t(dict, 'settings.trialEnds')}
+              value={p.trial_ends_at ? new Date(p.trial_ends_at).toLocaleDateString('en-IN') : null}
+            />
+          </dl>
+        </Card>
+      </div>
 
-      <section aria-label="privacy">
-        <h2>{t(dict, 'settings.privacy')}</h2>
+      <Card label="privacy" className="mt-6">
+        <CardTitle>{t(dict, 'settings.privacy')}</CardTitle>
         {/* VT-341: EXPORT is self-serve (non-destructive, the owner's own PII-scrubbed data)
             via a POST form — a GET <a> could be prefetch/crawler-triggered. DELETE is NOT a
             self-serve control at launch (Fazal ruling 2026-06-06: an instant irreversible
             purge from a button is too hot); the owner contacts us + Fazal/ops runs the
             DSR-delete out-of-band. The request+grace self-serve model is VT-344 (post-launch). */}
-        <form method="POST" action="/api/dsr/export">
-          <button type="submit" data-testid="dsr-export">
+        <form method="POST" action="/api/dsr/export" className="mt-4">
+          <button
+            type="submit"
+            data-testid="dsr-export"
+            className="rounded-lg border border-input px-4 py-2 text-sm font-semibold text-foreground transition hover:bg-muted"
+          >
             {t(dict, 'settings.exportData')}
           </button>
         </form>
-        <p data-testid="dsr-delete-note">{t(dict, 'settings.deleteContact')}</p>
-      </section>
-    </main>
+        <p data-testid="dsr-delete-note" className="mt-3 text-sm text-muted-foreground">
+          {t(dict, 'settings.deleteContact')}
+        </p>
+      </Card>
+    </div>
+  )
+}
+
+/** A label/value row inside a settings card; falls back to an em-dash when empty. */
+function Row({ label, value }: { label: string; value?: string | null }) {
+  return (
+    <div className="flex items-center justify-between gap-4 py-2.5">
+      <dt className="text-muted-foreground">{label}</dt>
+      <dd className="text-right font-medium text-foreground">{value ?? '—'}</dd>
+    </div>
   )
 }

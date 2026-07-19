@@ -10,6 +10,54 @@
 
 **Source authority:** Meta-approval status owned by Fazal (vendor relationship). Twilio Content SIDs are the canonical runtime identifier — assigned when the template is uploaded to Twilio Content API after Meta approval. The `template_name` is the human-readable handle used in code.
 
+## TEMPLATE WHITELIST — the source of truth for what may send as a template (Fazal ruling 2026-07-18)
+
+Owner-facing template surface is MINIMAL. Everything not on the whitelist delivers ONLY inside
+the 24h conversation session (queued, idle-paced — VT-683). CC maintains this list.
+
+### ACTIVE (whitelisted, in use)
+
+| Template | Languages / SIDs | Purpose |
+|---|---|---|
+| **auth OTP** | Twilio Verify (no content SID) | login/verification |
+| **`team_welcome4`** | en `HXc8188616…` · hi `HXd8a8d5…` · hing `HX7097590ccf0e901d893f78d9a9224e92` (Meta approval pending) | account-created + Complete Setup button |
+| **`team_wakeup2`** | en `HXaedb9a8bff0163bd4c162c90cd05bc45` · hi `HXb2dd5579ea46c2715397f2e274ec533c` · hing `HXd2bfed18f25eb8c2319ccca9b22f5d35` — **Meta APPROVED 2026-07-18** (Fazal-confirmed; category verify pending CC ask) | daily wake-up v2 — "{{2}} item(s) waiting for your review" + Review button; opens the session + drains the queue (VT-683 P3). Vars: owner_name, pending_count |
+
+### UNDER RETIREMENT REVIEW (registered, still have live callers — migrate into the session per VT-683)
+
+| Template | Today's caller | Migration path |
+|---|---|---|
+| `team_weekly_approval` | weekly cadence arm (request_owner_approval) | → owner-comms queue (VT-683 P2) |
+| `team_agent_draft_approval` | L2 agent-send arm | → queue (P2) |
+| `team_l3_presend_notice` | L3 arm 2h hold | → queue (P2) |
+| `team_autonomy_offer` | coordinator streak sweep | → queue (P2) |
+| `team_agent_stuck_escalation` | extreme-scenario escalation | → queue (P2; consider keeping template for URGENT class — Fazal call at P2 review) |
+| `team_opt_out_confirmation` | reactive to owner STOP (window open) | → freeform NOW (P1 — no template needed) |
+| `team_status_ping` | reactive to owner ping | → freeform NOW (P1) |
+| `team_dsr_acknowledgment` | reactive to owner DSR keyword | → freeform NOW (P1) |
+| `team_error_handler` | async Twilio failure callback | keep as system fallback until P4 review |
+| `team_reengage` | manager stale-task nudge | → MERGE into `team_wakeup` (Fazal point B, pending) |
+| `team_monthly_report` | **ORPHANED — no code sends it** (report ships via email/PDF) | mark deprecated at P4 |
+
+### DEPRECATED (never send)
+`team_welcome` · `team_welcome2` · `team_welcome3` · **`team_wakeup` v1** (en `HXd6c8cb13…` hi `HX26d778c5…` hing `HX08b86198…` — Meta force-converted UTILITY→MARKETING 2026-07-18, the welcome2/3 class; superseded by `team_wakeup2`).
+
+---
+
+## WhatsApp Senders (the sending numbers)
+
+The number the runtime sends FROM (`TEAM_TWILIO_FROM_NUMBER`) — a Twilio WhatsApp Sender resource, per env. Recorded here so the sender identity isn't lost in the consoles.
+
+| Env | Display name | Number | Twilio sender SID | Meta phone_number_id | Status |
+|---|---|---|---|---|---|
+| **dev** | **Viabe** | `+918108084223` | `XE5dca19b08f04ba5e11d69735c6969a9d` | `1166430683220266` | ONLINE — wired 2026-06-16 |
+
+Notes (dev wiring, 2026-06-16, CL-431-autonomous; **prefix question RESOLVED VT-488 2026-06-29**):
+- Dev `TEAM_TWILIO_FROM_NUMBER` = `+918108084223` — stored as **plain E.164, NO `whatsapp:` prefix in env**. The `whatsapp:` channel scheme IS REQUIRED on the wire and the send path (`utils/twilio_send._wa()`) applies it **idempotently to BOTH `from_` AND `to=` at the call site** (never double-prefixed). **The Twilio log proved the prefix is mandatory:** the one send that went out with a RAW E.164 `from_=+918108084223` (no `whatsapp:`) hit Twilio error **21659**; the 21 sends that carried `whatsapp:` on both ends delivered. This supersedes the earlier "NO prefix in code / flip only if the canary proves it" framing — the prefix is ON, on both ends, decided. (VT-399 first added `_wa`; VT-488 confirms + makes it the standing contract.)
+- VT-487 backstop: `_wa()` now also FAIL-CLOSES on a non-E.164 target (`^\+[1-9]\d{7,14}$`) — a malformed/corrupted number (e.g. a scientific-notation float artifact like `+91998886e+11`, the six 21211 "invalid To" failures) raises `BlockedRecipientError` and is never dispatched.
+- The superseded prev dev sender `+18704122234` (Twilio sender SID `XE47d50f0ba019ad3ad3cc252e511a2e9f`) was DROPPED from the registry (VT-488). It is no longer a FROM; current dev FROM = `+918108084223` only. It carried no code/config reference (grep-clean).
+- Dev **inbound** callback (Twilio sender webhook) → team-web `…/api/team/twilio/webhook` on `viabe-team-web-dev`, behind a Vercel **Protection-Bypass-for-Automation** token. The bypass secret is kept OUT of the repo — it lives only in the Twilio sender callback URL and in `TEAM_TWILIO_WEBHOOK_URL` (Vercel `viabe-team-web-dev`, Production). Twilio signs the full callback URL incl. the bypass query param, so those two must stay byte-identical.
+
 ## Why this file exists in this place
 
 WhatsApp templates have a registration lifecycle outside the codebase: author → Meta review → approve → upload to Twilio → get a SID. The SID is the only thing the runtime cares about. Without a durable repo-side record of the `template_name` → `SID` mapping:
@@ -27,11 +75,43 @@ This file becomes the contract. Code in `apps/team-orchestrator/` (when wired) r
 
 ## Approved templates
 
-### `team_welcome`
+### `team_welcome4`  *(live welcome — Tier-A launch-blocking)*
 
-- **Twilio Content SID:** `HX1b66c0daaa52dc0b8575e50eebadfdd1`
-- **Tier:** Tier-A (launch-blocking, onboarding flow)
+- **Twilio Content SID (en):** `HXc8188616b2e97b557f4c7330157c4f8f`
+- **Twilio Content SID (hi):** `HXd8a8d5945c79c75d373d9c24edd4b183`
+- **Meta category:** **UTILITY** (created + submitted 2026-07-02 via Content API — `canaries/vt555_welcome4_create.py`; approval ASYNC — `status=received` at submit)
+- **Content type:** `twilio/quick-reply` — a "Complete Setup" button (id/payload **`COMPLETE_SETUP`**, same both langs)
+- **Variables:** `{{1}}` = owner name ONLY (the `{{2}}` trial-date var was dropped — no trial/free wording)
+- **Copy (en):** `Hi {{1}}, your Viabe account has been created. To complete your setup, tap the button below.`
+- **Copy (hi):** `नमस्ते {{1}}, आपका Viabe अकाउंट बन गया है। सेटअप पूरा करने के लिए नीचे दिए गए बटन पर टैप करें।` *(HI copy = Fazal-approved)*
+- **Button (en/hi):** `Complete Setup` / `सेटअप पूरा करें`
+- **Twilio Content SID (hing / hi-Latn):** `HX7097590ccf0e901d893f78d9a9224e92` — Roman-script
+  Hindi registered under Meta language=en (Meta has no hi-Latn code), Fazal-created 2026-07-18
+  (O5). Meta approval ASYNC; hinglish welcome routing flips to it on Fazal's approved-confirm.
+- **TEMPLATE-WHITELIST RULING (Fazal 2026-07-18):** owner-facing template surface is MINIMAL —
+  auth OTP (Twilio-handled) + welcome + wake-up/re-engage ONLY. All other owner comms ride the
+  24h conversation session (owner replies daily → session opens → queued comms deliver at idle
+  pace). NO hing variants for weekly_approval / monthly_report / draft_approval, by design.
+- **VT-555:** replaces `team_welcome3` (Meta force-converted that UTILITY→MARKETING). Leads with the account-created FACT + one transactional next-step (a button), no offer/promotion/brand-greeting → Meta classifies UTILITY. `_default_welcome` + the `welcome` routing both point here. Continue-trigger: the onboarding journey lazy-starts on the button tap OR any typed reply.
+
+---
+
+### `team_welcome3` — **DEPRECATED (VT-555)**: Meta force-converted this from **UTILITY → MARKETING** after approval → would be declined like team_welcome2 (63049). Superseded by `team_welcome4` (strictly-transactional UTILITY quick-reply, trial wording removed). SIDs en `HX3ec52f76cf477cebf80b3eff5835817e` / hi `HX1ee2cb5bb504137ff8be5071ee9b7799`. The appeal path was dropped for the fresh template (Fazal 2026-07-02). Not sent by any live path.
+
+---
+
+### `team_welcome2` — **DEPRECATED (VT-520)**: Meta-approved as **MARKETING** → delivery declined (63049 "Meta chose not to deliver this marketing message"). Superseded by `team_welcome3` (UTILITY). SIDs en `HX65602e94b48bb2d6e82c70630d01da20` / hi `HXa2e1bcb65189ed25ec1f6b92d9458108`. Not sent by any live path.
+
+---
+
+### `team_welcome` — **DEPRECATED (VT-404)**, superseded by `team_welcome2`. Not sent by any live path.
+
+- **Twilio Content SID:** `HX1b66c0daaa52dc0b8575e50eebadfdd1` (en) · `HXf154fc0f582955f65c75b6306662388a` (hi)
+- **Tier:** Tier-A (retained for history/back-compat resolution only)
 - **Variables:** `{{1}}` = owner name, `{{2}}` = trial end date
+- **Why retired:** the copy told a passive owner to WAIT for a message ("You'll receive a WhatsApp
+  message here when the proposal is ready") — it never invited a reply, so the 24h window never
+  opened and onboarding stalled (Sundaram e2e).
 
 ```
 Hi {{1}}, your Viabe Team account is now active. Your trial period ends on {{2}}.
@@ -142,6 +222,25 @@ Hi {{1}}, things are running. Last activity on your account: {{2}}. {{3}} is up 
 
 ---
 
+### `team_reengage`  *(VT-486 — owner-facing OUT-OF-WINDOW (>24h) re-engagement; system-invoked, NOT agent-selectable)*
+
+- **Twilio Content SID (en):** `HXbdb250089fafc02a0d75ce6817e9ce11`
+- **Twilio Content SID (hi):** `HX27a50d65fedbb7b6a3c2fb6a6a24f13c`
+- **Category:** Utility · **Audience:** owner · **NO STOP line** (STOP is a customer-marketing opt-out, not an owner utility)
+- **Variables:** `{{1}}` = owner_name
+- **VT-486:** the window-aware owner send. When >24h have passed since the tenant's last inbound, the
+  24h owner-care window is CLOSED, so a free-form re-engage send fails (Twilio 63016). This
+  Meta-approved template is sent instead (out-of-window). The owner's reply RE-OPENS the 24h window
+  and the conversation continues free-form (the VT-349 in/out-of-window split + the VT-479 in-window
+  path). Routed via `template_routing.yaml` `reengage: any → team_reengage`; the composer selects it
+  out-of-window. `agent_selectable: false`.
+
+```
+Hi {{1}}, this is your Viabe Team. I have updates ready on your business — are you available to continue? Reply to this message and I'll pick up where we left off.
+```
+
+---
+
 ### `team_campaign_not_sent`  *(VT-248 — SYSTEM-invoked on fail-closed campaign rejection, NOT agent-selectable)*
 
 - **Twilio Content SID:** `HXcedcda2a0bc1e8f47b37950ef458feb4` (en) / `HXcd2688e6ea1862c063378b18e382e700` (hi)
@@ -151,6 +250,21 @@ Hi {{1}}, things are running. Last activity on your account: {{2}}. {{3}} is up 
 
 ```
 Hi {{1}}, I couldn't send this week's campaign: {{2}} of the targeted customers couldn't be verified, so I held the entire campaign — nothing was sent. Reply here to retry or adjust the targeting.
+```
+
+---
+
+### `onboarding_confirm_yesno`  *(VT-479 — INTERACTIVE in-session quick-reply buttons; NOT a Meta-approved 24h-window template)*
+
+- **Twilio Content SID:** `HX60ace8008b02439ca0db444dee6327d2` (en)
+- **Content type:** `twilio/quick-reply` (Yes / No / Skip buttons) · **Approval:** NONE NEEDED — in-session interactive content (≤3 buttons) does not require Meta template approval; this HX is a Twilio Content-API registration only (created by CC on the dev account).
+- **Sent by:** `onboarding/journey._send` for a CONFIRM question, via `twilio_send.send_interactive_message` (NOT `send_template_message`). The journey only sends in response to an owner inbound → the 24h session window is open by construction.
+- **Variables:** `{{1}}` = the confirm question text (the reconciled prompt, e.g. "We found you're a Local services business — is that right?").
+- **Button `id` payloads:** `confirm_yes` / `confirm_no` / `confirm_skip`. The button TITLE ("Yes"/"No"/"Skip") flows back as the inbound `Body` and matches the existing `_YES`/`_NO`/`_SKIP` token sets in `handle_reply` — so no answer-parse change was needed; buttons just remove the brittle free-text "yes" reliance (the VT-477 root). Falls back to plain freeform text on any send failure.
+
+```
+{{1}}
+[ Yes ]  [ No ]  [ Skip ]
 ```
 
 ---
@@ -197,7 +311,8 @@ Hi {{1}}, your Viabe Team report for {{2}} is ready — I've attached the full P
 
 ### Hindi bodies for the 8 existing templates
 
-**`team_welcome` [hi]** — `HXf154fc0f582955f65c75b6306662388a`
+**`team_welcome` [hi]** — `HXf154fc0f582955f65c75b6306662388a` — **DEPRECATED (VT-404)**, replaced by
+`team_welcome2` [hi] `HXa2e1bcb65189ed25ec1f6b92d9458108` (reply-inviting copy).
 
 ```
 नमस्ते {{1}}, आपका Viabe Team अकाउंट अब सक्रिय हो गया है। आपकी ट्रायल अवधि {{2}} को समाप्त होगी। इस दौरान, आपका एजेंट आपके व्यवसाय के डेटा की समीक्षा करेगा और आपकी समीक्षा के लिए अपना पहला कैंपेन प्रस्ताव तैयार करेगा। प्रस्ताव तैयार होने पर आपको यहीं WhatsApp पर संदेश मिलेगा।
@@ -263,13 +378,151 @@ templates — they become free-form sends in VT-349 and are removed from the reg
 | template | tier | en SID | hi SID |
 |---|---|---|---|
 | `trial_ending` | VT-90 trial lifecycle | `HX7a7e4a40e500b632b65d4060d62da592` | `HX93ceca39d063ce4eaebefbc6751e01b3` |
-| `trial_extension_offered` | VT-90 trial lifecycle | `HX8324b93b9df5bfa06bf56efe17a917c2` | `HXfe73c83ad79f867f6dfcc3edac45237f` |
-| `trial_max_reached` | VT-90 trial lifecycle | `HX69a298407b209f3dc22141943f768f7a` | `HX025441f9544b9f8ad3a910488c89edb4` |
-| `refund_offer` | VT-85 day-39 offer | `HX188eba65b0de1ee521f7922435e76ae6` | `HXe78d29b842092b2fa3dd196fc1e652de` |
-| `refund_completed` | VT-93 refund (out-of-window) | `HX38a56278276122a6689edd8f3cb28137` | `HX161b11c468fc4216ff6d27c033b6bd7f` |
+<!-- VT-365 (Fazal 2026-06-09): removed `trial_extension_offered`, `trial_max_reached` (no extensions),
+     `refund_offer` (VT-85 day-39), `refund_completed` (VT-93) — the refund subsystem + trial extensions
+     are gone. 30-day flat trial → `trial_ending` warn → subscribe-or-lapse. SIDs retired in Twilio. -->
 
 | `support_resolved` | VT-108 batch-2 · SupportBot resolve (owner) | `HX4a14a1dc0e84beeee383094c5d47942a` | `HXd3a19118d25953cc77ee8915b32099a6` |
 | `trial_subscribe_link` | VT-108 batch-2 · trial-end pay link (owner; VT-332 send) | `HX3c61f10c65156d381438c265b09474a9` | `HX3d8bb10b75c83d0ebc9310d66504e729` |
 | `dsr_deletion_completed` | VT-108 batch-2 · DSR purge confirmation (customer) | `HXa2aada217c00112c386966f8daa1984c` | `HX60e633af93225f5e46c78203e0b99c44` |
 | `breach_notification_owner` | VT-108 batch-2 · breach notice (owner) — incident-use only, ops path, never agent_selectable | `HX269a7f69da791f24b4cee23bd820383e` | `HX1b4a5c64f7f4c3d07c0ba8798fa120bf` |
 | `breach_notification_customer` | VT-108 batch-2 · breach notice (customer) — incident-use only, ops path, never agent_selectable | `HXdbf0129d38d60d57b11851d8acf581e6` | `HX48dcbb5f65877f8592296921b3bad100` |
+
+## VT-369 agent surface (Gap-5) — 5 templates, F1 ARMED (VT-383 / CL-438, 2026-06-12)
+
+The first agent-initiated customer-messaging surface (Sales Recovery win-backs + the
+owner approval/autonomy loop). **F1 landed 2026-06-12 (CL-438):** Fazal delivered the 10
+Meta-approved Twilio Content SIDs (5 templates × en/hi). The VT-383 Content-API canary
+(`apps/team-orchestrator/canaries/vt383_f1_content_api.py`) fetched each SID — **every
+`meta_status` is `approved`** — and the APPROVED body + per-language `body_sha256` were
+recorded as canon in `.viabe/queue/VT-383-canary-results.json`. The bodies below are
+**verbatim from that approved canary output** (Fazal edited copy at submission; the
+approved body is canon, not earlier drafts). The two `team_winback_*` carry the customer
+STOP opt-out line in the FIXED Meta body (canary asserted STOP present, both langs) and
+are now `agent_selectable: true`; the three `owner_notification` surfaces are
+system-invoked and stay `agent_selectable: false`.
+
+| template | tier | en SID | hi SID |
+|---|---|---|---|
+| `team_winback_simple` | VT-369 agent surface · customer win-back (category `customer_marketing`, `optout_line: true`, `agent_selectable: true`) | `HX601925a292da89e9d00d3fdf8742f765` | `HX5da4406f8a6691f52555cd179f40be73` |
+| `team_winback_offer` | VT-369 agent surface · customer win-back with offer (category `customer_marketing`, `optout_line: true`, `money_bearing: true` — always-confirm floor, never L3 auto-send; `agent_selectable: true`) | `HX637d3dc2969a722f627e0dfd2c166b1e` | `HX9370d1b1a1c917a88ef512b7d545ac46` |
+| `team_agent_draft_approval` | VT-369 agent surface · owner L2 approval ask (category `owner_notification`, system-invoked, `agent_selectable: false`) | `HX1fa31e0339d5739d7936e6edf39e08a3` | `HX81929b92dd3a159e920b5eb338700cf8` |
+| `team_l3_presend_notice` | VT-369 agent surface · owner L3 pre-send notice, delivery-anchored 2h hold (category `owner_notification`, system-invoked, `agent_selectable: false`) | `HXb114769da63f0c72d4a9f01c2fd0ed80` | `HX8184dfe127d1f5bc124384192a4793be` |
+| `team_autonomy_offer` | VT-369 agent surface · owner L3 opt-in offer — C3 consent evidence; body promises the standing "stop" kill keyword (category `owner_notification`, system-invoked, `agent_selectable: false`) | `HX150525f3963603ad00d234bd01b37224` | `HXae12acceccc259235478a7a60c53d628` |
+
+### Approved bodies (verbatim from the VT-383 canary — Meta status `approved`)
+
+All `body_sha256` values below are `sha256(approved_body_utf8)` and are pinned per-language
+in `apps/team-orchestrator/config/twilio_templates.yaml` (`body_sha256: {en, hi}`).
+
+#### `team_winback_simple`  *(customer · `customer_marketing` · `optout_line: true` · `agent_selectable: true`)*
+
+- **Variables:** `{{1}}` = customer_name, `{{2}}` = business_name
+- **en SID:** `HX601925a292da89e9d00d3fdf8742f765` · **body_sha256:** `15edf62d44cfc28b478a9b589529a9fa6cf0b7367622fbfeb23ab1ad63a4d740`
+
+```
+Hi {{1}}, this is a message from {{2}}. We haven't seen you in a while and we'd love to welcome you back — your favourites are waiting for you. Visit us or reply here and we'll help you right away.
+Reply STOP to stop receiving these messages.
+```
+
+- **hi SID:** `HX5da4406f8a6691f52555cd179f40be73` · **body_sha256:** `d32d3a974cb63b78cb505430cd465f62bed597f02056646c270ba92a47163dc4`
+
+```
+नमस्ते {{1}}, यह संदेश {{2}} की ओर से है। आपको काफ़ी समय से नहीं देखा — हमें आपकी कमी महसूस हो रही है। दोबारा पधारें या यहीं जवाब दें, हम तुरंत आपकी मदद करेंगे।
+इन संदेशों को रोकने के लिए STOP लिखें।
+```
+
+#### `team_winback_offer`  *(customer · `customer_marketing` · `optout_line: true` · `money_bearing: true` · `agent_selectable: true`)*
+
+- **Variables:** `{{1}}` = customer_name, `{{2}}` = business_name, `{{3}}` = offer_description (grounded against the customer fact bundle; validator-enforced)
+- **en SID:** `HX637d3dc2969a722f627e0dfd2c166b1e` · **body_sha256:** `b8ecced1091c1ecfdb7ac302ce8ca16fc5ffdaae284841bd08913aab2ec4810e`
+
+```
+Hi {{1}}, a special offer from {{2}}: {{3}}. Show this message when you visit, or reply here to know more. We'd love to see you again!
+Reply STOP to stop receiving these messages.
+```
+
+- **hi SID:** `HX9370d1b1a1c917a88ef512b7d545ac46` · **body_sha256:** `5a31e9acb6e57fd2652a9c94fed76864c00a3b3b9acdb891360b4390ae3c6db9`
+
+```
+नमस्ते {{1}}, {{2}} की ओर से आपके लिए एक खास पेशकश: {{3}}। आने पर यह संदेश दिखाएँ या अधिक जानकारी के लिए यहीं जवाब दें। आपके फिर से आने का इंतज़ार रहेगा!
+इन संदेशों को रोकने के लिए STOP लिखें।
+```
+
+#### `team_agent_draft_approval`  *(owner · `owner_notification` · system-invoked · `agent_selectable: false`)*
+
+- **Variables:** `{{1}}` = owner_name, `{{2}}` = draft_count, `{{3}}` = sample_message (rendered at arm-time from an RLS read of `agent_drafts`; goes into the WhatsApp send ONLY — never into the `pending_approvals` row, no-customer-PII rule)
+- **en SID:** `HX1fa31e0339d5739d7936e6edf39e08a3` · **body_sha256:** `5fba29d4eec7937a8510fab43f3ac1a4a07fd3854efcac869d7f935a50c21501`
+
+```
+Hi {{1}}, your Viabe assistant has prepared {{2}} customer message(s) for your approval. Sample: "{{3}}"
+Reply YES to approve and send, EDIT to change, or NO to reject. Nothing is sent without your approval.
+```
+
+- **hi SID:** `HX81929b92dd3a159e920b5eb338700cf8` · **body_sha256:** `94e40feada67567d350e0951901d470df6f272f4bfe3eace89660f9fb5547477`
+
+```
+नमस्ते {{1}}, आपके Viabe असिस्टेंट ने आपकी मंज़ूरी के लिए {{2}} ग्राहक संदेश तैयार किए हैं। नमूना: "{{3}}"
+भेजने की मंज़ूरी के लिए YES, बदलाव के लिए EDIT, या अस्वीकार करने के लिए NO लिखें। आपकी मंज़ूरी के बिना कुछ भी नहीं भेजा जाएगा।
+```
+
+#### `team_l3_presend_notice`  *(owner · `owner_notification` · system-invoked · `agent_selectable: false`)*
+
+- **Variables:** `{{1}}` = owner_name, `{{2}}` = send_count
+- **en SID:** `HXb114769da63f0c72d4a9f01c2fd0ed80` · **body_sha256:** `fcafd820af259593814a79eb6f46d40ec09d59157889ede657c97a08abebaca1`
+
+```
+Hi {{1}}, under the autonomy you enabled, your Viabe assistant will automatically send {{2}} customer message(s) in 2 hours. No action is needed if you're okay with this. Reply with anything to pause and review them first — replying STOP turns off automatic sending.
+```
+
+- **hi SID:** `HX8184dfe127d1f5bc124384192a4793be` · **body_sha256:** `92759384a731b7b7d14d5fcf4943835327769c82bba99d61deddb4f6ee6cdbfc`
+
+```
+नमस्ते {{1}}, आपकी दी गई अनुमति के तहत आपका Viabe असिस्टेंट 2 घंटे में {{2}} ग्राहक संदेश अपने आप भेज देगा। सहमत हैं तो कुछ करने की ज़रूरत नहीं। पहले देखना चाहें तो कोई भी जवाब भेजें — भेजना रुक जाएगा। STOP लिखने से ऑटोमैटिक भेजना बंद हो जाएगा।
+```
+
+#### `team_autonomy_offer`  *(owner · `owner_notification` · system-invoked · `agent_selectable: false`)*
+
+- **Variables:** `{{1}}` = owner_name, `{{2}}` = streak_count
+- **en SID:** `HX150525f3963603ad00d234bd01b37224` · **body_sha256:** `c39414a0c6f0901a785cc7d6d3305076e861cd171005e6412d12e9a9c9491680`
+
+```
+Hi {{1}}, you've approved {{2}} messages from your Viabe assistant in a row without changes. Would you like it to send similar routine messages automatically from now on? You'll get a notice 2 hours before every automatic send, and you can always say STOP to turn this off instantly.
+Reply ENABLE to turn on automatic sending, or ignore this message to keep approving each one.
+```
+
+- **hi SID:** `HXae12acceccc259235478a7a60c53d628` · **body_sha256:** `c036772fdf65196b978bdc6cc4a4bbe8eab907cc75363dcbdf8aa73f7688a66c`
+
+```
+नमस्ते {{1}}, आपने अपने Viabe असिस्टेंट के लगातार {{2}} संदेश बिना बदलाव के मंज़ूर किए हैं। क्या आप चाहेंगे कि ऐसे रोज़मर्रा के संदेश अब अपने आप भेजे जाएँ? हर ऑटोमैटिक भेजने से 2 घंटे पहले आपको सूचना मिलेगी, और आप कभी भी STOP कहकर इसे तुरंत बंद कर सकते हैं।
+ऑटोमैटिक भेजना चालू करने के लिए ENABLE लिखें, या हर संदेश खुद मंज़ूर करते रहने के लिए इस संदेश को अनदेखा करें।
+```
+
+**Draft variable signatures** (yaml `variables:` is the machine mirror; both files update
+in lockstep when F1 copy is finalized):
+
+- `team_winback_simple` — `{{1}}` customer_name, `{{2}}` business_name. Fixed body MUST
+  contain the customer STOP opt-out line.
+- `team_winback_offer` — `{{1}}` customer_name, `{{2}}` business_name, `{{3}}`
+  offer_description (grounded against the customer fact bundle; validator-enforced).
+  Fixed body MUST contain the customer STOP opt-out line.
+- `team_agent_draft_approval` — `{{1}}` owner_name, `{{2}}` draft_count, `{{3}}`
+  sample_message (rendered at arm-time from an RLS read of `agent_drafts`; goes into the
+  WhatsApp send ONLY — never into the `pending_approvals` row, no-customer-PII rule).
+- `team_l3_presend_notice` — `{{1}}` owner_name, `{{2}}` send_count.
+- `team_autonomy_offer` — `{{1}}` owner_name, `{{2}}` streak_count.
+
+**Body-hash pinning (DONE at F1 — VT-383, plan §3c):** the Meta-APPROVED content was
+fetched once via the Twilio Content API (canary), the opt-out line asserted against the
+APPROVED body (not this doc), and a per-language `body_sha256` pinned next to each SID in
+`twilio_templates.yaml`. CI now fails on any doc/yaml/Meta drift (the
+`templates_registry.canary_load` body_sha256 check + `test_template_registry_gap5.py`
+armed-shape pins). The approved-body hashes are recorded above and in
+`.viabe/queue/VT-383-canary-results.json` (canon).
+
+**`agent_selectable` note (resolved at F1):** the two `team_winback_*` are now
+`agent_selectable: true` — Meta-approved with real SIDs wired, so they correctly enter
+`approved_template_names()` / the live VT-45 selectable set. The Gap-5 drafting gate
+requires `category: customer_marketing` + `agent_selectable: true` at send time, which
+both winbacks now satisfy. The three `owner_notification` entries stay `false` forever
+(system-invoked, never agent-chosen).

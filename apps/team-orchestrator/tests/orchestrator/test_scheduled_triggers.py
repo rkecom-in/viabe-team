@@ -55,11 +55,6 @@ def test_attribution_close_workflow_id_format() -> None:
     )
 
 
-def test_day39_workflow_id_format() -> None:
-    tenant = uuid4()
-    assert st.day39_workflow_id(tenant) == f"day39:{tenant}"
-
-
 def test_monthly_workflow_id_format() -> None:
     tenant = uuid4()
     assert st.monthly_workflow_id(tenant, "2026-05") == f"monthly:{tenant}:2026-05"
@@ -70,11 +65,10 @@ def test_cross_trigger_isolation_different_namespaces() -> None:
     same = UUID("00000000-0000-4000-8000-000000000001")
     ids = {
         st.attribution_close_workflow_id(same),
-        st.day39_workflow_id(same),
         st.monthly_workflow_id(same, "2026-05"),
         st.weekly_workflow_id(same, "2026-W22"),
     }
-    assert len(ids) == 4
+    assert len(ids) == 3
 
 
 # ---------------------------------------------------------------------------
@@ -84,10 +78,27 @@ def test_cross_trigger_isolation_different_namespaces() -> None:
 def test_cron_expressions_match_brief() -> None:
     assert st.WEEKLY_CADENCE_CRON == "0 9 * * MON"
     assert st.ATTRIBUTION_CLOSE_CRON == "0 2 * * *"
-    assert st.DAY39_EVALUATION_CRON == "0 6 * * *"
+    # VT-365: the day-39 refund-evaluation trigger is gone; the kept lifecycle
+    # sweep is the daily VT-90 trial-expiry evaluation (7 AM IST, off-peak).
+    assert st.TRIAL_EVALUATION_CRON == "0 7 * * *"
     assert st.MONTHLY_IMPACT_CRON == "0 8 1 * *"
     # VT-47 — 5th trigger: owner-approval timeout sweep, every 30 min.
     assert st.APPROVAL_TIMEOUT_SWEEP_CRON == "*/30 * * * *"
+    # VT-432 — 18th trigger: daily implicit-attribution sweep, 23:00 UTC / 04:30 IST.
+    assert st.IMPLICIT_ATTRIBUTION_SWEEP_CRON == "0 23 * * *"
+    # VT-439 — 19th trigger: daily Razorpay orphan-detect backstop, 01:00 UTC / 06:30 IST.
+    assert st.RECONCILE_SUBSCRIPTION_ORPHANS_CRON == "0 1 * * *"
+    # VT-440 — 20th trigger: daily Razorpay dead-letter backstop, 22:30 UTC / 04:00 IST.
+    assert st.DEAD_LETTER_RETRY_SWEEP_CRON == "30 22 * * *"
+    # VT-560 — 2 steady-state sweeps: retry-ladder every 10 min, orphan-run hourly. The VT-552
+    # silent-terminal detector is deliberately NOT scheduled (no final_outcome writer yet —
+    # batch-review finding; boot-only until that lands).
+    assert st.STALLED_TASK_SWEEP_CRON == "*/10 * * * *"
+    assert st.ORPHAN_RUN_REAPER_CRON == "0 * * * *"
+    # VT-679 — §7A proactive planning: monthly refresh (1st 03:30 UTC / 09:00 IST) + daily
+    # initiative pick (05:00 UTC / 10:30 IST).
+    assert st.PLAN_REFRESH_CRON == "30 3 1 * *"
+    assert st.DAILY_INITIATIVE_CRON == "0 5 * * *"
 
 
 # ---------------------------------------------------------------------------
@@ -122,91 +133,12 @@ def test_attribution_close_body_delegates_to_billing_module(monkeypatch) -> None
     assert out == eligible
 
 
-def test_day39_body_delegates_and_invokes_refund_transition(monkeypatch) -> None:
-    """VT-176: body scans eligibility + calls billing.evaluate_day39.
-
-    Refund-verdict tenant also triggers a transition attempt (best-effort
-    wrapped). Monkeypatch the scanner + the evaluator + the transition
-    helper; assert the call graph.
-    """
-    eligible = [UUID("00000000-0000-4000-8000-000000bbb176")]
-    monkeypatch.setattr(st, "_scan_day39_eligible", lambda now: eligible)
-
-    from types import SimpleNamespace
-
-    refund_verdict = SimpleNamespace(
-        tenant_id=eligible[0],
-        verdict="refund_triggered",
-        already_decided=False,
-    )
-
-    import orchestrator.billing.day39_evaluator as eval_mod
-
-    monkeypatch.setattr(eval_mod, "evaluate_day39", lambda tid: refund_verdict)
-
-    transition_calls: list[UUID] = []
-    monkeypatch.setattr(
-        st, "_send_day39_refund_offer", lambda tid, verdict: transition_calls.append(tid)
-    )
-
-    out = st.run_day39_evaluation_body(
-        now=datetime(2026, 5, 26, 6, 0, tzinfo=timezone.utc)
-    )
-    assert len(out) == 1
-    assert out[0].verdict == "refund_triggered"
-    assert transition_calls == eligible
-
-
-def test_day39_body_continue_branch_skips_refund_transition(monkeypatch) -> None:
-    """VT-176: continue verdict does NOT call apply_transition."""
-    eligible = [UUID("00000000-0000-4000-8000-000000ccc176")]
-    monkeypatch.setattr(st, "_scan_day39_eligible", lambda now: eligible)
-
-    from types import SimpleNamespace
-
-    cont_verdict = SimpleNamespace(
-        tenant_id=eligible[0],
-        verdict="continue",
-        already_decided=False,
-    )
-
-    import orchestrator.billing.day39_evaluator as eval_mod
-
-    monkeypatch.setattr(eval_mod, "evaluate_day39", lambda tid: cont_verdict)
-
-    transition_calls: list[UUID] = []
-    monkeypatch.setattr(
-        st, "_send_day39_refund_offer", lambda tid, verdict: transition_calls.append(tid)
-    )
-
-    st.run_day39_evaluation_body(now=datetime(2026, 5, 26, 6, 0, tzinfo=timezone.utc))
-    assert transition_calls == []
-
-
-def test_day39_body_replays_skip_refund_transition(monkeypatch) -> None:
-    """VT-176: already_decided=True replay skips the transition call."""
-    eligible = [UUID("00000000-0000-4000-8000-000000ddd176")]
-    monkeypatch.setattr(st, "_scan_day39_eligible", lambda now: eligible)
-
-    from types import SimpleNamespace
-
-    replay_verdict = SimpleNamespace(
-        tenant_id=eligible[0],
-        verdict="refund_triggered",
-        already_decided=True,
-    )
-
-    import orchestrator.billing.day39_evaluator as eval_mod
-
-    monkeypatch.setattr(eval_mod, "evaluate_day39", lambda tid: replay_verdict)
-
-    transition_calls: list[UUID] = []
-    monkeypatch.setattr(
-        st, "_send_day39_refund_offer", lambda tid, verdict: transition_calls.append(tid)
-    )
-
-    st.run_day39_evaluation_body(now=datetime(2026, 5, 26, 6, 0, tzinfo=timezone.utc))
-    assert transition_calls == [], "replay should not re-trigger the transition"
+# VT-365: the day-39 refund-evaluation body (run_day39_evaluation_body) and its
+# refund/continue/replay branch tests are DELETED — the day-39 2x-or-refund
+# subsystem (billing.day39_evaluator, _scan_day39_eligible, _send_day39_refund_offer)
+# was removed. The kept lifecycle sweep is the VT-90 trial-expiry evaluation
+# (trial_evaluation_scheduled → trial_sweep.run_trial_evaluation_body), exercised
+# via the scheduled-handler signature smoke + the register idempotency count below.
 
 
 # ---------------------------------------------------------------------------
@@ -391,6 +323,468 @@ def test_approval_timeout_sweep_one_failure_does_not_halt(monkeypatch) -> None:
     assert out == [UUID(a2)]
 
 
+def test_approval_timeout_sweep_business_policy_grant_skips_resume_run(monkeypatch) -> None:
+    """VT-609 fix round 2 — a business_policy_grant proposal's run_id is a MINIMAL
+    pipeline_runs row (no LangGraph checkpoint), so the sweep must NOT call resume_run for it
+    (that would raise — no checkpoint to resume). mark_approval_resolved still runs (the
+    grant/no-grant decision for a timeout is always "no grant" — see business_policy.
+    apply_business_policy_decision); the sweep closes the minimal run directly instead."""
+    tid, rid, aid = str(uuid4()), str(uuid4()), str(uuid4())
+    monkeypatch.setattr(
+        st, "_scan_timed_out_approvals",
+        lambda now: [
+            {"id": aid, "tenant_id": tid, "run_id": rid, "approval_type": "business_policy_grant"}
+        ],
+    )
+    sweep_conn = _SweepConn()
+    monkeypatch.setattr("orchestrator.db.tenant_connection", lambda t: sweep_conn)
+    marked: list[tuple] = []
+    monkeypatch.setattr(
+        "orchestrator.agent.approval_resume.mark_approval_resolved",
+        lambda conn, tenant_id, approval_id, decision, **kw: marked.append((approval_id, decision)),
+    )
+
+    def _resume_must_not_be_called(run_id, decision):
+        raise AssertionError("resume_run must not be called for business_policy_grant")
+
+    monkeypatch.setattr(
+        "orchestrator.agent.approval_resume.resume_run", _resume_must_not_be_called
+    )
+
+    out = st.run_approval_timeout_sweep_body(
+        now=datetime(2026, 5, 31, 12, 0, tzinfo=timezone.utc)
+    )
+
+    assert out == [UUID(aid)]
+    assert marked == [(aid, "timeout")]
+    assert sweep_conn.updates, "the minimal run must still close to 'completed'"
+
+
+def test_approval_timeout_sweep_agent_customer_send_skips_resume_run_and_close(monkeypatch) -> None:
+    """VT-611 pre-work #7 — the SAME class VT-609 fixed for business_policy_grant, but pre-
+    existing/unrelated to VT-609. An agent_customer_send approval's run_id is a REAL dispatch
+    pipeline_runs row (l3_hold._resolve_batch_run_id's deterministic run id — not a fabricated
+    FK stub), but it has NO LangGraph checkpoint (the agent dispatch workflow owns its own run
+    lifecycle, not a graph-invoke one) — resume_run must NOT be called for it (that would raise:
+    a guaranteed checkpoint-miss). Unlike business_policy_grant, this run is also NOT this
+    approval's to close (mirrors runner.try_resume_pending_approval's own agent_customer_send
+    branch, which never closes it either) — so NO pipeline_runs UPDATE at all, only the
+    resolve (the batch -> 'cancelled' flip already lands inside mark_approval_resolved)."""
+    tid, rid, aid = str(uuid4()), str(uuid4()), str(uuid4())
+    monkeypatch.setattr(
+        st, "_scan_timed_out_approvals",
+        lambda now: [
+            {"id": aid, "tenant_id": tid, "run_id": rid, "approval_type": "agent_customer_send"}
+        ],
+    )
+    sweep_conn = _SweepConn()
+    monkeypatch.setattr("orchestrator.db.tenant_connection", lambda t: sweep_conn)
+    marked: list[tuple] = []
+    monkeypatch.setattr(
+        "orchestrator.agent.approval_resume.mark_approval_resolved",
+        lambda conn, tenant_id, approval_id, decision, **kw: marked.append((approval_id, decision)),
+    )
+
+    def _resume_must_not_be_called(run_id, decision):
+        raise AssertionError("resume_run must not be called for agent_customer_send")
+
+    monkeypatch.setattr(
+        "orchestrator.agent.approval_resume.resume_run", _resume_must_not_be_called
+    )
+
+    out = st.run_approval_timeout_sweep_body(
+        now=datetime(2026, 5, 31, 12, 0, tzinfo=timezone.utc)
+    )
+
+    assert out == [UUID(aid)]
+    assert marked == [(aid, "timeout")]
+    # Nothing closes this run — it belongs to the agent dispatch workflow, not this approval.
+    assert sweep_conn.updates == []
+
+
+# ---------------------------------------------------------------------------
+# VT-432 — implicit attribution sweep handler (18th trigger)
+# ---------------------------------------------------------------------------
+
+
+def test_implicit_attribution_sweep_scheduled_calls_sweep(monkeypatch) -> None:
+    """VT-432: the scheduled handler delegates to run_implicit_attribution_sweep
+    and logs the result. Monkeypatched sweep returns synthetic counts; no DB,
+    no send (assert no Twilio/Resend call)."""
+    import orchestrator.feedback.implicit_attribution as ia_mod
+
+    called_with: list[dict] = []
+
+    def _fake_sweep() -> dict:
+        called_with.append({})
+        return {"considered": 3, "written": 2, "skipped_no_outcome": 1}
+
+    monkeypatch.setattr(ia_mod, "run_implicit_attribution_sweep", _fake_sweep)
+
+    fake_scheduled = datetime(2026, 6, 25, 23, 0, tzinfo=timezone.utc)
+    fake_actual = datetime(2026, 6, 25, 23, 0, 5, tzinfo=timezone.utc)
+    # Handler must not raise; best-effort wrapper catches exceptions.
+    st.implicit_attribution_sweep_scheduled(fake_scheduled, fake_actual)
+
+    assert called_with, "run_implicit_attribution_sweep must be called by the handler"
+
+
+def test_implicit_attribution_sweep_no_send(monkeypatch) -> None:
+    """VT-432: the sweep path NEVER reaches Twilio or Resend. Patch both send
+    clients and assert neither is called when the handler runs."""
+    import orchestrator.feedback.implicit_attribution as ia_mod
+
+    # Stub sweep to return a non-empty result to exercise the full handler path.
+    monkeypatch.setattr(
+        ia_mod, "run_implicit_attribution_sweep",
+        lambda: {"considered": 1, "written": 1, "skipped_no_outcome": 0},
+    )
+
+    send_called: list[str] = []
+
+    # Patch at the alerts clients level — if any send path is reachable it
+    # would call these.
+    try:
+        import orchestrator.alerts.clients as clients_mod  # noqa: F401
+
+        monkeypatch.setattr(
+            clients_mod,
+            "send_telegram",
+            lambda *a, **kw: send_called.append("telegram"),
+        )
+        monkeypatch.setattr(
+            clients_mod,
+            "send_resend_email",
+            lambda *a, **kw: send_called.append("resend"),
+        )
+    except (ImportError, AttributeError):
+        pass  # module may not be importable without network deps; that's fine
+
+    fake_scheduled = datetime(2026, 6, 25, 23, 0, tzinfo=timezone.utc)
+    fake_actual = datetime(2026, 6, 25, 23, 0, 5, tzinfo=timezone.utc)
+    st.implicit_attribution_sweep_scheduled(fake_scheduled, fake_actual)
+
+    assert not send_called, (
+        f"VT-432 sweep must NOT send via Telegram/Resend; called: {send_called}"
+    )
+
+
+def test_implicit_attribution_sweep_handler_is_best_effort(monkeypatch) -> None:
+    """VT-432: a sweep exception must not propagate — handler is best-effort."""
+    import orchestrator.feedback.implicit_attribution as ia_mod
+
+    def _raising_sweep() -> dict:
+        raise RuntimeError("DB unavailable")
+
+    monkeypatch.setattr(ia_mod, "run_implicit_attribution_sweep", _raising_sweep)
+
+    fake_scheduled = datetime(2026, 6, 25, 23, 0, tzinfo=timezone.utc)
+    fake_actual = datetime(2026, 6, 25, 23, 0, 5, tzinfo=timezone.utc)
+    # Must not raise — handler wraps in try/except BLE001.
+    st.implicit_attribution_sweep_scheduled(fake_scheduled, fake_actual)
+
+
+# ---------------------------------------------------------------------------
+# VT-439 — reconcile_subscription_orphans handler (19th trigger)
+# ---------------------------------------------------------------------------
+
+
+def _make_empty_pool():
+    """Shared pool stub that returns zero subscription rows."""
+    class _Cursor:
+        def execute(self, *a, **k): pass
+        def fetchall(self): return []
+        def __enter__(self): return self
+        def __exit__(self, *exc): return False
+
+    class _Conn:
+        def cursor(self, row_factory=None): return _Cursor()
+        def __enter__(self): return self
+        def __exit__(self, *exc): return False
+
+    class _Pool:
+        def connection(self): return _Conn()
+
+    return _Pool()
+
+
+def test_reconcile_subscription_orphans_scheduled_calls_reconcile(monkeypatch) -> None:
+    """VT-439: the scheduled handler delegates to reconcile_subscription_orphans
+    with the DB-fetched subscription IDs and logs the result. Monkeypatched DB
+    returns one known ID; reconcile stub reports zero orphans. No send path."""
+    import orchestrator.api.razorpay_subscribe as rs_mod
+    from orchestrator import graph as graph_mod
+
+    known_id = "sub_stub_tenant1_abc123"
+
+    class _Cursor:
+        def execute(self, *a, **k): pass
+        def fetchall(self): return [{"razorpay_subscription_id": known_id}]
+        def __enter__(self): return self
+        def __exit__(self, *exc): return False
+
+    class _Conn:
+        def cursor(self, row_factory=None): return _Cursor()
+        def __enter__(self): return self
+        def __exit__(self, *exc): return False
+
+    class _Pool:
+        def connection(self): return _Conn()
+
+    monkeypatch.setattr(graph_mod, "_pool", _Pool())
+
+    called_with: list[list[str]] = []
+
+    def _fake_reconcile(vendor_ids: list[str]) -> list[str]:
+        called_with.append(vendor_ids)
+        return []  # no orphans
+
+    monkeypatch.setattr(rs_mod, "reconcile_subscription_orphans", _fake_reconcile)
+
+    fake_scheduled = datetime(2026, 6, 25, 1, 0, tzinfo=timezone.utc)
+    fake_actual = datetime(2026, 6, 25, 1, 0, 3, tzinfo=timezone.utc)
+    st.reconcile_subscription_orphans_scheduled(fake_scheduled, fake_actual)
+
+    assert called_with, "reconcile_subscription_orphans must be called by the handler"
+    assert called_with[0] == [known_id], "handler must pass the DB-fetched IDs"
+
+
+def test_reconcile_subscription_orphans_no_send(monkeypatch) -> None:
+    """VT-439: the sweep path NEVER reaches Twilio or Resend (DETECT-ONLY).
+    Patch both send clients and assert neither is called when the handler runs."""
+    import orchestrator.api.razorpay_subscribe as rs_mod
+    from orchestrator import graph as graph_mod
+
+    monkeypatch.setattr(graph_mod, "_pool", _make_empty_pool())
+    monkeypatch.setattr(rs_mod, "reconcile_subscription_orphans", lambda ids: [])
+
+    send_called: list[str] = []
+    try:
+        import orchestrator.alerts.clients as clients_mod
+
+        monkeypatch.setattr(
+            clients_mod, "send_telegram", lambda *a, **kw: send_called.append("telegram")
+        )
+        monkeypatch.setattr(
+            clients_mod, "send_resend_email", lambda *a, **kw: send_called.append("resend")
+        )
+    except (ImportError, AttributeError):
+        pass
+
+    fake_scheduled = datetime(2026, 6, 25, 1, 0, tzinfo=timezone.utc)
+    fake_actual = datetime(2026, 6, 25, 1, 0, 3, tzinfo=timezone.utc)
+    st.reconcile_subscription_orphans_scheduled(fake_scheduled, fake_actual)
+
+    assert not send_called, (
+        f"VT-439 handler must NOT send via Telegram/Resend; called: {send_called}"
+    )
+
+
+def test_reconcile_subscription_orphans_handler_is_best_effort(monkeypatch) -> None:
+    """VT-439: a reconcile exception must not propagate — handler is best-effort."""
+    from orchestrator import graph as graph_mod
+
+    class _RaisingPool:
+        def connection(self):
+            raise RuntimeError("DB unavailable")
+
+    monkeypatch.setattr(graph_mod, "_pool", _RaisingPool())
+
+    fake_scheduled = datetime(2026, 6, 25, 1, 0, tzinfo=timezone.utc)
+    fake_actual = datetime(2026, 6, 25, 1, 0, 3, tzinfo=timezone.utc)
+    # Must not raise — handler wraps in try/except BLE001.
+    st.reconcile_subscription_orphans_scheduled(fake_scheduled, fake_actual)
+
+
+# ---------------------------------------------------------------------------
+# VT-440 — dead_letter_retry_sweep handler (20th trigger). DETECT/ALERT-ONLY.
+# ---------------------------------------------------------------------------
+
+
+def _patch_count_pending(monkeypatch, value: int) -> None:
+    """Stub orchestrator.billing.dead_letter.count_pending to return `value`."""
+    import orchestrator.billing.dead_letter as dl_mod
+
+    monkeypatch.setattr(dl_mod, "count_pending", lambda: value)
+
+
+def test_dead_letter_retry_sweep_alerts_when_pending(monkeypatch) -> None:
+    """VT-440: with pending dead-letters, the handler alerts Fazal exactly once
+    with a COUNT (PII-free), and never reaches a replay/charge/send-of-money path."""
+    _patch_count_pending(monkeypatch, 3)
+
+    import orchestrator.alerts.clients as clients_mod
+
+    alerts: list[str] = []
+    monkeypatch.setattr(clients_mod, "alert_fazal", lambda text: alerts.append(text))
+
+    # Guard against any replay/send: patching replay to explode proves it is never called.
+    import orchestrator.billing.dead_letter as dl_mod
+
+    def _no_replay(*a, **k):
+        raise AssertionError("VT-440 sweep must NEVER call dead_letter.replay")
+
+    monkeypatch.setattr(dl_mod, "replay", _no_replay)
+
+    fake_scheduled = datetime(2026, 6, 25, 22, 30, tzinfo=timezone.utc)
+    fake_actual = datetime(2026, 6, 25, 22, 30, 4, tzinfo=timezone.utc)
+    st.dead_letter_retry_sweep_scheduled(fake_scheduled, fake_actual)
+
+    assert len(alerts) == 1, "exactly one Fazal alert when pending > 0"
+    assert "3 pending" in alerts[0], "alert must carry the count"
+    # PII-free: no event_id / payload leak — the count only.
+    assert "event_id" not in alerts[0].lower()
+
+
+def test_dead_letter_retry_sweep_silent_when_empty(monkeypatch) -> None:
+    """VT-440: zero pending dead-letters → NO alert (no noise)."""
+    _patch_count_pending(monkeypatch, 0)
+
+    import orchestrator.alerts.clients as clients_mod
+
+    alerts: list[str] = []
+    monkeypatch.setattr(clients_mod, "alert_fazal", lambda text: alerts.append(text))
+
+    fake_scheduled = datetime(2026, 6, 25, 22, 30, tzinfo=timezone.utc)
+    fake_actual = datetime(2026, 6, 25, 22, 30, 4, tzinfo=timezone.utc)
+    st.dead_letter_retry_sweep_scheduled(fake_scheduled, fake_actual)
+
+    assert alerts == [], "no alert when there are no pending dead-letters"
+
+
+def test_dead_letter_retry_sweep_no_send(monkeypatch) -> None:
+    """VT-440: DETECT/ALERT-ONLY — the sweep NEVER reaches Twilio or the raw
+    Resend/Telegram send clients (the Fazal alert is the only outbound, and it is
+    a count, not a money/customer send). Patch the low-level send clients and
+    assert neither fires even with pending rows."""
+    _patch_count_pending(monkeypatch, 5)
+
+    import orchestrator.alerts.clients as clients_mod
+
+    send_called: list[str] = []
+    monkeypatch.setattr(
+        clients_mod, "send_telegram", lambda *a, **kw: send_called.append("telegram")
+    )
+    monkeypatch.setattr(
+        clients_mod, "send_resend_email", lambda *a, **kw: send_called.append("resend")
+    )
+    # alert_fazal is allowed (the observability alert); stub it to a no-op so the
+    # real client doesn't try to reach the network in the unit test.
+    monkeypatch.setattr(clients_mod, "alert_fazal", lambda text: None)
+
+    fake_scheduled = datetime(2026, 6, 25, 22, 30, tzinfo=timezone.utc)
+    fake_actual = datetime(2026, 6, 25, 22, 30, 4, tzinfo=timezone.utc)
+    st.dead_letter_retry_sweep_scheduled(fake_scheduled, fake_actual)
+
+    assert not send_called, (
+        f"VT-440 sweep must not directly send via Telegram/Resend; called: {send_called}"
+    )
+
+
+def test_dead_letter_retry_sweep_is_best_effort(monkeypatch) -> None:
+    """VT-440: a count_pending exception must NOT propagate (best-effort sweep)."""
+    import orchestrator.billing.dead_letter as dl_mod
+
+    def _boom():
+        raise RuntimeError("DB unavailable")
+
+    monkeypatch.setattr(dl_mod, "count_pending", _boom)
+
+    fake_scheduled = datetime(2026, 6, 25, 22, 30, tzinfo=timezone.utc)
+    fake_actual = datetime(2026, 6, 25, 22, 30, 4, tzinfo=timezone.utc)
+    # Must not raise — handler wraps in try/except BLE001.
+    st.dead_letter_retry_sweep_scheduled(fake_scheduled, fake_actual)
+
+
+def test_dead_letter_retry_sweep_idempotent_double_run(monkeypatch) -> None:
+    """VT-440 money-safety (handler level): running the sweep TWICE over the same
+    pending state produces the SAME alert each time and ZERO money effect — no
+    replay/charge/write. The sweep is read-only; the alert is the only side effect
+    and is itself idempotent (same count both runs)."""
+    _patch_count_pending(monkeypatch, 2)
+
+    import orchestrator.alerts.clients as clients_mod
+    import orchestrator.billing.dead_letter as dl_mod
+
+    alerts: list[str] = []
+    monkeypatch.setattr(clients_mod, "alert_fazal", lambda text: alerts.append(text))
+    monkeypatch.setattr(
+        dl_mod, "replay", lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("replay must never be called by the sweep")
+        ),
+    )
+
+    fake_scheduled = datetime(2026, 6, 25, 22, 30, tzinfo=timezone.utc)
+    fake_actual = datetime(2026, 6, 25, 22, 30, 4, tzinfo=timezone.utc)
+    st.dead_letter_retry_sweep_scheduled(fake_scheduled, fake_actual)
+    st.dead_letter_retry_sweep_scheduled(fake_scheduled, fake_actual)
+
+    # Two identical alerts — the count is unchanged because the sweep wrote nothing.
+    assert len(alerts) == 2
+    assert alerts[0] == alerts[1], "both runs alert with the identical (count-only) text"
+
+
+# ---------------------------------------------------------------------------
+# VT-560 — boot-only reapers/detectors promoted to steady-state scheduled sweeps
+# ---------------------------------------------------------------------------
+
+
+def test_stalled_task_sweep_scheduled_delegates(monkeypatch) -> None:
+    """VT-560: the 10-min handler calls reap_stalled_manager_tasks (the VT-557 ladder)."""
+    import orchestrator.orphan_reaper as reaper_mod
+
+    called: list[int] = []
+    monkeypatch.setattr(reaper_mod, "reap_stalled_manager_tasks", lambda: called.append(1) or 0)
+
+    fake_scheduled = datetime(2026, 7, 2, 10, 0, tzinfo=timezone.utc)
+    fake_actual = datetime(2026, 7, 2, 10, 0, 3, tzinfo=timezone.utc)
+    st.stalled_task_sweep_scheduled(fake_scheduled, fake_actual)
+    assert called, "handler must call reap_stalled_manager_tasks"
+
+
+def test_silent_terminal_detector_is_not_scheduled() -> None:
+    """Batch-review finding (VT-560): the VT-552 silent-terminal detector must NOT be on the
+    scheduled substrate — no live code writes the final_outcome it keys on, so a scheduled
+    detector would open an incident + alert per completed run under traffic. It stays a
+    boot-time catch-up (main.py) until the close-path final_outcome writer lands."""
+    assert not hasattr(st, "silent_terminal_sweep_scheduled")
+    assert not hasattr(st, "SILENT_TERMINAL_SWEEP_CRON")
+
+
+def test_orphan_run_reaper_scheduled_delegates(monkeypatch) -> None:
+    """VT-560: the hourly handler calls reap_orphan_runs (the VT-481 reaper)."""
+    import orchestrator.orphan_reaper as reaper_mod
+
+    called: list[int] = []
+    monkeypatch.setattr(reaper_mod, "reap_orphan_runs", lambda: called.append(1) or 0)
+
+    fake_scheduled = datetime(2026, 7, 2, 11, 0, tzinfo=timezone.utc)
+    fake_actual = datetime(2026, 7, 2, 11, 0, 3, tzinfo=timezone.utc)
+    st.orphan_run_reaper_scheduled(fake_scheduled, fake_actual)
+    assert called, "handler must call reap_orphan_runs"
+
+
+@pytest.mark.parametrize(
+    ("handler", "target"),
+    [
+        ("stalled_task_sweep_scheduled", "reap_stalled_manager_tasks"),
+        ("orphan_run_reaper_scheduled", "reap_orphan_runs"),
+    ],
+)
+def test_vt560_sweep_handlers_are_best_effort(monkeypatch, handler, target) -> None:
+    """VT-560: a body exception must NOT propagate — every sweep handler is best-effort."""
+    import orchestrator.orphan_reaper as reaper_mod
+
+    def _boom() -> int:
+        raise RuntimeError("DB unavailable")
+
+    monkeypatch.setattr(reaper_mod, target, _boom)
+    fake_scheduled = datetime(2026, 7, 2, 12, 0, tzinfo=timezone.utc)
+    fake_actual = datetime(2026, 7, 2, 12, 0, 3, tzinfo=timezone.utc)
+    # Must not raise — handler wraps in try/except BLE001.
+    getattr(st, handler)(fake_scheduled, fake_actual)
+
+
 # ---------------------------------------------------------------------------
 # 5. Pillar 1 — deterministic bodies must NOT import LLM modules
 # ---------------------------------------------------------------------------
@@ -427,8 +821,11 @@ def test_deterministic_bodies_do_not_import_orchestrator_agent() -> None:
     [
         st.weekly_cadence_scheduled,
         st.attribution_close_scheduled,
-        st.day39_evaluation_scheduled,
+        st.trial_evaluation_scheduled,  # VT-365: replaced the removed day-39 handler
         st.monthly_impact_scheduled,
+        st.implicit_attribution_sweep_scheduled,  # VT-432
+        st.reconcile_subscription_orphans_scheduled,  # VT-439
+        st.dead_letter_retry_sweep_scheduled,  # VT-440
     ],
 )
 def test_scheduled_handler_accepts_scheduled_and_actual_time(monkeypatch, fn) -> None:
@@ -436,12 +833,15 @@ def test_scheduled_handler_accepts_scheduled_and_actual_time(monkeypatch, fn) ->
     are stubbed to return empty so we exercise the signature without DB."""
     _captured_payloads(monkeypatch)
     monkeypatch.setattr(st, "_scan_attribution_close_eligible", lambda now: [])
-    monkeypatch.setattr(st, "_scan_day39_eligible", lambda now: [])
+    # VT-365: the trial sweep scans active trials via get_pool().connection();
+    # the empty-pool stub below yields zero rows so the body is a clean no-op.
 
-    # Monthly impact body queries the pool inline; stub the pool getter.
+    # Monthly impact body + VT-439 orphan handler + VT-440 dead-letter count query the
+    # pool inline; stub it. fetchone() returns a 0-count tuple for count_pending (VT-440).
     class _EmptyCursor:
         def execute(self, *a, **k): pass
         def fetchall(self): return []
+        def fetchone(self): return {"n": 0}  # count_pending reads row["n"] (dict_row)
         def __enter__(self): return self
         def __exit__(self, *exc): return False
 
@@ -461,6 +861,32 @@ def test_scheduled_handler_accepts_scheduled_and_actual_time(monkeypatch, fn) ->
     fn(fake_scheduled, fake_actual)
 
 
+def test_trial_evaluation_scheduled_wires_real_owner_notify(monkeypatch) -> None:
+    """VT-426 (Row C): the daily trial sweep handler must pass the REAL owner notify
+    (``trial_sweep._owner_notify`` → the VT-393 send seam) into the body — NOT the
+    logging-only ``_default_notify`` default. Without this, a trial-ending owner gets
+    no WhatsApp. We capture the kwargs the handler hands the body."""
+    from orchestrator.billing import trial_sweep as ts
+
+    captured: dict[str, Any] = {}
+
+    def _fake_body(now=None, *, notify_fn=None):
+        captured["now"] = now
+        captured["notify_fn"] = notify_fn
+        return []
+
+    monkeypatch.setattr(ts, "run_trial_evaluation_body", _fake_body)
+
+    fake_scheduled = datetime(2026, 5, 26, 1, 30, tzinfo=timezone.utc)
+    fake_actual = datetime(2026, 5, 26, 1, 30, 9, tzinfo=timezone.utc)
+    st.trial_evaluation_scheduled(fake_scheduled, fake_actual)
+
+    assert captured["now"] == fake_actual
+    assert captured["notify_fn"] is ts._owner_notify, (
+        "scheduler must wire the real _owner_notify, not the logging _default_notify"
+    )
+
+
 # ---------------------------------------------------------------------------
 # 7. register_scheduled_triggers idempotency
 # ---------------------------------------------------------------------------
@@ -476,6 +902,7 @@ def test_register_scheduled_triggers_idempotent(monkeypatch) -> None:
     """
     from dbos import DBOS
     call_count = {"n": 0}
+    workflow_count = {"n": 0}
 
     def _fake_scheduled(cron):
         def _wrap(fn):
@@ -483,19 +910,247 @@ def test_register_scheduled_triggers_idempotent(monkeypatch) -> None:
             return fn
         return _wrap
 
+    def _fake_workflow(*args, **kwargs):
+        # VT-464 D3: register_scheduled_triggers now wraps each handler with
+        # DBOS.workflow() BEFORE DBOS.scheduled() (DBOS 2.x: scheduled() alone
+        # does NOT register a workflow, so the cron fire raised
+        # DBOSWorkflowFunctionNotFoundError). Patch it too so this stays a pure
+        # unit check that doesn't mutate the real global DBOS registry.
+        def _wrap(fn):
+            workflow_count["n"] += 1
+            return fn
+        return _wrap
+
     monkeypatch.setattr(DBOS, "scheduled", _fake_scheduled)
+    monkeypatch.setattr(DBOS, "workflow", _fake_workflow)
     st._registered = False
     st.register_scheduled_triggers()
     first = call_count["n"]
+    first_wf = workflow_count["n"]
     st.register_scheduled_triggers()
     second = call_count["n"]
-    # VT-47 5th (owner-approval timeout sweep); VT-68 6th (nightly L3 construction);
-    # VT-76 7th (reconstitution sweep); VT-304 8th (audit-chain verify); VT-305 9th
-    # (PII-in-log sweep); VT-307 10th (KG-drain straggler sweep); VT-311 11th
-    # (L2 retention soft-delete sweep); VT-85 12th (refund-offer 48h timeout sweep);
-    # VT-354 13th counting from VT-47 (waitlist 6-month retention purge);
-    # VT-357 14th counting from VT-47 (hourly SLA-breach sweep);
-    # VT-280 15th counting from VT-47 (daily VTR digest).
-    assert first == 16, "expected 16 triggers registered on first call"
-    assert second == 16, "second call must short-circuit (idempotent)"
+    # The registered set (19): weekly_cadence, attribution_close, trial_evaluation
+    # (VT-90, the kept lifecycle sweep — NOT the removed VT-365 day-39 refund eval),
+    # monthly_impact, approval_timeout_sweep (VT-47), L3_construction (VT-68),
+    # reconstitution_sweep (VT-76), audit_chain_verify (VT-304), pii_log_sweep
+    # (VT-305), kg_drain_sweep (VT-307), l2_retention_sweep (VT-311),
+    # waitlist_retention_purge (VT-354), sla_breach_sweep (VT-357), vtr_digest (VT-280),
+    # override_expiry_sweep (VT-374 — the F8 next-run pin expiry bound),
+    # outbox_redaction_sweep (VT-382 — the CL-437 ruling-3.3 redaction backfill/backstop),
+    # l2_approved_send_sweep (VT-418 — the L2 owner-approve→send reconciler, recovery-only),
+    # implicit_attribution_sweep (VT-432 — daily VT-198 feedback tier-1 sweep, NO SEND),
+    # reconcile_subscription_orphans (VT-439 — daily Razorpay orphan-DETECT backstop, DETECT-ONLY),
+    # dead_letter_retry_sweep (VT-440 — daily Razorpay dead-letter backstop, DETECT/ALERT-ONLY).
+    # VT-365 removed two triggers (day-39 refund evaluation + the VT-85 refund-offer
+    # 48h timeout sweep): 16 → 14; VT-374 added one: 14 → 15; VT-382 added one: 15 → 16;
+    # VT-418 added one: 16 → 17; VT-432 added one: 17 → 18; VT-439 added one: 18 → 19;
+    # VT-440 added one: 19 → 20; VT-560 added two (stalled_task_sweep +
+    # orphan_run_reaper — the boot-only reapers promoted to steady-state
+    # @DBOS.scheduled sweeps; the silent-terminal detector deliberately stays
+    # boot-only — no final_outcome writer yet, batch-review finding): 20 → 22.
+    # VT-620 added one (test_tenant_reaper — hourly GC of leaked convo-harness
+    # test tenants so they stop paging ops as noise): 22 → 23.
+    # VT-679 added two (plan_refresh + daily_initiative — §7A proactive planning, both behind
+    # TEAM_PROACTIVE_PLANNING; the cron registration itself is unconditional): 23 → 25.
+    assert first == 25, "expected 25 triggers registered on first call"
+    assert second == 25, "second call must short-circuit (idempotent)"
+    # VT-464 D3: every scheduled handler MUST also be registered as a workflow
+    # (one DBOS.workflow() wrap per DBOS.scheduled() call) — otherwise the cron
+    # fire raises DBOSWorkflowFunctionNotFoundError.
+    assert first_wf == 25, "expected 25 handlers wrapped as @DBOS.workflow"
     st._registered = False
+
+
+def test_scheduled_sweeps_are_registered_workflows() -> None:
+    """VT-464 D3: the scheduled sweeps must land in the DBOS workflow registry.
+
+    The live re-drive saw approval_timeout_sweep_scheduled +
+    l2_approved_send_sweep_scheduled fire and raise
+    ``DBOSWorkflowFunctionNotFoundError: ... not a registered workflow function``
+    — because DBOS 2.x's ``DBOS.scheduled`` registers ONLY a cron poller, not a
+    workflow, so the poller-fire enqueue + recovery lookup in
+    ``workflow_info_map`` missed. After the fix (register_scheduled_triggers
+    wraps each handler with ``@DBOS.workflow`` before ``@DBOS.scheduled``) both
+    sweeps resolve. This drives the REAL registration path (no monkeypatch) and
+    asserts the registry contains them — the regression guard for the crash.
+    """
+    from dbos._dbos import _get_or_create_dbos_registry
+
+    st._registered = False
+    try:
+        st.register_scheduled_triggers()
+        reg = _get_or_create_dbos_registry()
+        assert "approval_timeout_sweep_scheduled" in reg.workflow_info_map, (
+            "approval_timeout_sweep_scheduled must be a registered workflow "
+            "(else the 30-min poller fire raises DBOSWorkflowFunctionNotFoundError)"
+        )
+        assert "l2_approved_send_sweep_scheduled" in reg.workflow_info_map, (
+            "l2_approved_send_sweep_scheduled must be a registered workflow "
+            "(else the reconciler poller fire raises DBOSWorkflowFunctionNotFoundError)"
+        )
+        # VT-560: the two boot-only reapers are now steady-state scheduled sweeps —
+        # each MUST be a registered workflow or its poller fire would raise
+        # DBOSWorkflowFunctionNotFoundError (the same class the live re-drive hit).
+        # (The silent-terminal detector is deliberately NOT here — boot-only.)
+        for name in (
+            "stalled_task_sweep_scheduled",
+            "orphan_run_reaper_scheduled",
+        ):
+            assert name in reg.workflow_info_map, (
+                f"{name} must be a registered workflow (VT-560 steady-state sweep)"
+            )
+        # VT-679 — same class of bug: both new proactive-planning handlers must be registered
+        # workflows too, or their (currently flag-gated) cron fire would raise the same error
+        # once TEAM_PROACTIVE_PLANNING flips on.
+        for name in ("plan_refresh_scheduled", "daily_initiative_scheduled"):
+            assert name in reg.workflow_info_map, (
+                f"{name} must be a registered workflow (VT-679 proactive planning)"
+            )
+    finally:
+        st._registered = False
+
+
+# ---------------------------------------------------------------------------
+# VT-679 (§7A) — proactive planning: flag gate, IST belt, sweep delegation
+# ---------------------------------------------------------------------------
+
+
+def test_plan_refresh_scheduled_noop_when_flag_unset(monkeypatch) -> None:
+    monkeypatch.delenv("TEAM_PROACTIVE_PLANNING", raising=False)
+    called = {"n": 0}
+    monkeypatch.setattr(st, "run_plan_refresh_body", lambda **kw: called.__setitem__("n", called["n"] + 1))
+    st.plan_refresh_scheduled(
+        datetime(2026, 8, 1, 3, 30, tzinfo=timezone.utc),
+        datetime(2026, 8, 1, 3, 30, 5, tzinfo=timezone.utc),
+    )
+    assert called["n"] == 0, "flag unset must no-op fast — run_plan_refresh_body must not run"
+
+
+def test_plan_refresh_scheduled_delegates_when_flag_set(monkeypatch) -> None:
+    monkeypatch.setenv("TEAM_PROACTIVE_PLANNING", "1")
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(st, "run_plan_refresh_body", lambda **kw: captured.update(kw))
+    actual = datetime(2026, 8, 1, 3, 30, 5, tzinfo=timezone.utc)
+    st.plan_refresh_scheduled(datetime(2026, 8, 1, 3, 30, tzinfo=timezone.utc), actual)
+    assert captured.get("now") == actual
+
+
+def test_daily_initiative_scheduled_noop_when_flag_unset(monkeypatch) -> None:
+    monkeypatch.delenv("TEAM_PROACTIVE_PLANNING", raising=False)
+    called = {"n": 0}
+    monkeypatch.setattr(
+        st, "run_daily_initiative_body", lambda **kw: called.__setitem__("n", called["n"] + 1)
+    )
+    # Even a NIGHT-time fire (would fail the IST belt) must no-op cleanly when the flag is unset —
+    # the flag check runs FIRST, before the belt assert.
+    st.daily_initiative_scheduled(
+        datetime(2026, 8, 2, 20, 0, tzinfo=timezone.utc),
+        datetime(2026, 8, 2, 20, 0, 5, tzinfo=timezone.utc),
+    )
+    assert called["n"] == 0
+
+
+def test_daily_initiative_scheduled_delegates_when_flag_set(monkeypatch) -> None:
+    monkeypatch.setenv("TEAM_PROACTIVE_PLANNING", "1")
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(st, "run_daily_initiative_body", lambda **kw: captured.update(kw))
+    # 05:00 UTC = 10:30 IST — inside the belt.
+    actual = datetime(2026, 8, 2, 5, 0, 5, tzinfo=timezone.utc)
+    st.daily_initiative_scheduled(datetime(2026, 8, 2, 5, 0, tzinfo=timezone.utc), actual)
+    assert captured.get("now") == actual
+
+
+def test_daily_initiative_scheduled_raises_outside_ist_belt(monkeypatch) -> None:
+    """D1.2 belt: a mis-set cron firing outside 10:00-19:00 IST must raise, never silently run."""
+    monkeypatch.setenv("TEAM_PROACTIVE_PLANNING", "1")
+    monkeypatch.setattr(
+        st,
+        "run_daily_initiative_body",
+        lambda **kw: pytest.fail("must not reach the body — the IST belt should have raised"),
+    )
+    # 20:00 UTC = 01:30 IST (next day) — well outside 10:00-19:00 IST.
+    with pytest.raises(RuntimeError, match="outside the 10:00-19:00 IST belt"):
+        st.daily_initiative_scheduled(
+            datetime(2026, 8, 2, 20, 0, tzinfo=timezone.utc),
+            datetime(2026, 8, 2, 20, 0, 5, tzinfo=timezone.utc),
+        )
+
+
+@pytest.mark.parametrize(
+    "utc_hour,utc_minute,should_raise",
+    [
+        (4, 0, True),  # 04:00 UTC = 09:30 IST — before the belt (hour=9)
+        (4, 30, False),  # 04:30 UTC = 10:00 IST — exactly at the belt open (hour=10)
+        (13, 0, False),  # 13:00 UTC = 18:30 IST — inside the belt (hour=18)
+        (13, 30, True),  # 13:30 UTC = 19:00 IST — exactly at the belt close, exclusive (hour=19)
+    ],
+)
+def test_ist_belt_boundaries(utc_hour, utc_minute, should_raise) -> None:
+    now = datetime(2026, 8, 2, utc_hour, utc_minute, tzinfo=timezone.utc)
+    if should_raise:
+        with pytest.raises(RuntimeError):
+            st._assert_ist_daytime(now)
+    else:
+        st._assert_ist_daytime(now)  # must not raise
+
+
+def test_run_plan_refresh_body_starts_workflow_per_tenant(monkeypatch) -> None:
+    """VT-679 D1.1: the sweep scans active paid/trial tenants and starts
+    ``refresh_business_plan_workflow`` per tenant, keyed on ``monthly_workflow_id`` — one
+    tenant's failure to start must not halt the sweep."""
+    t1 = UUID("00000000-0000-4000-8000-000000000601")
+    t2 = UUID("00000000-0000-4000-8000-000000000602")
+    monkeypatch.setattr(st, "_scan_active_paid_or_trial_tenants", lambda: [t1, t2])
+
+    from orchestrator.business_plan import generator as gen_mod
+
+    started: list[tuple[Any, ...]] = []
+
+    class _FakeDBOS:
+        @staticmethod
+        def start_workflow(fn, *args):
+            if args and args[0] == str(t1):
+                raise RuntimeError("boom — t1 fails to start")
+            started.append((fn, args))
+
+    class _FakeSetWorkflowID:
+        def __init__(self, workflow_id):
+            self.workflow_id = workflow_id
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    import dbos as dbos_mod
+
+    monkeypatch.setattr(dbos_mod, "DBOS", _FakeDBOS)
+    monkeypatch.setattr(dbos_mod, "SetWorkflowID", _FakeSetWorkflowID)
+
+    out = st.run_plan_refresh_body(now=datetime(2026, 8, 1, 3, 30, tzinfo=timezone.utc))
+
+    assert out == [t2], "t1's start failure must not halt the sweep; only t2 recorded as started"
+    assert started == [(gen_mod.refresh_business_plan_workflow, (str(t2),))]
+
+
+def test_run_daily_initiative_body_delegates_per_tenant(monkeypatch) -> None:
+    t1 = UUID("00000000-0000-4000-8000-000000000701")
+    t2 = UUID("00000000-0000-4000-8000-000000000702")
+    monkeypatch.setattr(st, "_scan_active_paid_or_trial_tenants", lambda: [t1, t2])
+
+    from orchestrator.business_plan import daily_initiative as di_mod
+
+    def _fake_dispatch(tenant_id, *, now):
+        if tenant_id == t1:
+            raise RuntimeError("boom — t1 dispatch fails")
+        return {"task_id": "abc", "item_id": "item-1", "owning_agent": "reputation"}
+
+    monkeypatch.setattr(di_mod, "dispatch_daily_initiative", _fake_dispatch)
+
+    now = datetime(2026, 8, 2, 5, 0, tzinfo=timezone.utc)
+    out = st.run_daily_initiative_body(now=now)
+
+    assert out == [{"task_id": "abc", "item_id": "item-1", "owning_agent": "reputation"}], (
+        "t1's failure must not halt the sweep; only t2's result recorded"
+    )

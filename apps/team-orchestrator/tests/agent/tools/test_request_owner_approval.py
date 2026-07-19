@@ -11,6 +11,7 @@ langgraph is a heavy dep; importorskip guards the dep-less smoke job.
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from uuid import uuid4
 
 import pytest
@@ -36,10 +37,12 @@ class _FakeCursorResult:
 class _FakeConn:
     """Captures execute() calls. ``open_row`` is what _find_open_approval sees."""
 
-    def __init__(self, *, open_row=None, owner_phone="+919811112222"):
+    def __init__(self, *, open_row=None, owner_phone="+919811112222", insert_raises=None):
         self._open_row = open_row
         self._owner_phone = owner_phone
+        self._insert_raises = insert_raises
         self.inserts: list[tuple] = []
+        self.deletes: list[tuple] = []
         self.queries: list[str] = []
 
     def execute(self, sql, params=None):
@@ -50,9 +53,24 @@ class _FakeConn:
         if "owner_phone" in s and "FROM tenants" in s:
             return _FakeCursorResult({"owner_phone": self._owner_phone, "whatsapp_number": None})
         if s.startswith("INSERT INTO pending_approvals"):
+            if self._insert_raises is not None:  # migration-128 race-loser
+                raise self._insert_raises
             self.inserts.append((sql, params))
             return _FakeCursorResult(None)
+        if s.startswith("DELETE FROM pending_approvals"):
+            self.deletes.append((sql, params))
+            return _FakeCursorResult(None)
         return _FakeCursorResult(None)
+
+    def rollback(self):  # autocommit conn: no-op, mirrors psycopg on nothing-pending
+        pass
+
+    def cursor(self):
+        # VT-514 emit_tm_audit's fail-closed insert uses `with conn.cursor() as
+        # cur: cur.execute(...)` (real psycopg style), distinct from this fake's
+        # direct `conn.execute(...)` callers above — a real psycopg.Connection
+        # supports both. nullcontext(self) makes `cur` == this conn.
+        return nullcontext(self)
 
 
 class _ConnFactory:
@@ -110,8 +128,9 @@ def test_arm_sends_template_then_inserts_row():
 
 
 def test_send_failure_writes_no_orphan_row():
-    """Pillar 7: template send failure -> error envelope, NO pending_approvals
-    row (so the caller will NOT interrupt — no stuck/orphan pause)."""
+    """Pillar 7 (VT-615 arm-then-send): the row is INSERTed first, then the template
+    send fails -> the armed row is DELETEd, so NO OPEN orphan remains (the caller
+    will NOT interrupt — no stuck pause). Verify insert-then-rollback, not no-insert."""
     conn = _FakeConn()
 
     def failing_send(tenant_id, template_name, params, *, recipient_phone=None):
@@ -124,11 +143,13 @@ def test_send_failure_writes_no_orphan_row():
     )
     assert res.status == "error"
     assert res.error is not None
-    assert len(conn.inserts) == 0, "no pending_approvals row on send failure"
+    assert len(conn.inserts) == 1, "arm-then-send: the row IS inserted first"
+    assert len(conn.deletes) == 1, "send failure must DELETE the armed row (no orphan)"
 
 
 def test_send_raises_writes_no_orphan_row():
-    """A raised exception from the sender is caught -> error envelope, no row."""
+    """A raised exception from the sender is caught -> error envelope; the armed row
+    is rolled back (DELETEd) so no open orphan remains."""
     conn = _FakeConn()
 
     def raising_send(tenant_id, template_name, params, *, recipient_phone=None):
@@ -138,7 +159,36 @@ def test_send_raises_writes_no_orphan_row():
         _input(), conn_factory=_ConnFactory(conn), send_fn=raising_send
     )
     assert res.status == "error"
-    assert len(conn.inserts) == 0
+    assert len(conn.inserts) == 1
+    assert len(conn.deletes) == 1, "raised send must DELETE the armed row"
+
+
+def test_race_loser_refuses_before_any_send():
+    """VT-615 arm-then-send core: a migration-128 one-open-per-tenant race lost at the
+    INSERT must refuse BEFORE any owner-facing send — no phantom template, no summary,
+    so no campaign is silently dropped. This is the whole point of INSERT-first."""
+    from psycopg.errors import UniqueViolation
+
+    conn = _FakeConn(insert_raises=UniqueViolation("one open per tenant"))
+    send = _OkSend()
+    summary_sent: list[str] = []
+
+    import orchestrator.owner_surface.freeform_acks as fa
+    orig = fa.send_freeform_ack
+    fa.send_freeform_ack = lambda *a, **k: summary_sent.append("summary")
+    try:
+        res = arm_pause_request(
+            _input(chat_summary={"en": "plan"}),
+            conn_factory=_ConnFactory(conn),
+            send_fn=send,
+        )
+    finally:
+        fa.send_freeform_ack = orig
+
+    assert res.status == "refused"
+    assert res.error is not None and res.error.code == "approval_queue_busy"
+    assert send.calls == [], "race-loser must NOT send the approval template"
+    assert summary_sent == [], "race-loser must NOT send the plan summary either"
 
 
 def test_idempotent_when_open_approval_exists():

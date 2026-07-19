@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Any
 from uuid import UUID
 
-from orchestrator.state import MAX_TRIAL_EXTENSIONS, SubscriberState
+from orchestrator.state import SubscriberState
 
 
 class InvariantViolationError(RuntimeError):
@@ -41,28 +41,11 @@ def check_invariants(
             f"phase '{phase}' but paid_conversion_at is None",
         )
 
-    # 2. Trial extensions are capped.
-    if state["trial_extension_count"] > MAX_TRIAL_EXTENSIONS:
-        raise InvariantViolationError(
-            "trial_extension_cap",
-            f"trial_extension_count {state['trial_extension_count']} "
-            f"exceeds {MAX_TRIAL_EXTENSIONS}",
-        )
+    # VT-365: the trial-extension cap + the lapsed-vs-terminal billing invariants
+    # were REMOVED along with the deprecated billing subsystem (no extensions, no
+    # money-return path; the corresponding phases + extension constant are gone).
 
-    # 3. 'refunded' requires a day39_refund_triggered event for this tenant.
-    if phase == "refunded":
-        row = conn.execute(
-            "SELECT EXISTS (SELECT 1 FROM phase_transitions "
-            "WHERE tenant_id = %s AND event = 'day39_refund_triggered') AS refund_exists",
-            (str(state["tenant_id"]),),
-        ).fetchone()
-        if not (row and row["refund_exists"]):
-            raise InvariantViolationError(
-                "refunded_requires_day39",
-                "phase 'refunded' but no day39_refund_triggered event recorded",
-            )
-
-    # 4. phase_entered_at is monotonic non-decreasing for this tenant.
+    # 2. phase_entered_at is monotonic non-decreasing for this tenant.
     row = conn.execute(
         "SELECT MAX(transition_at) AS prior_max FROM phase_transitions "
         "WHERE tenant_id = %s AND id <> %s",

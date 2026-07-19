@@ -1,0 +1,45 @@
+{
+  "name": "j08_devanagari_services_speechact",
+  "notes": "journey-sim-spec.md #8 — a services business (clinic/salon) with a catalog site + WhatsApp, owner texts in Devanagari / mixed script. Surface: language handling + speech-act classification across scripts (the negation / apostrophe / Devanagari-matra failure modes VT-329 hardened). Arc: a Devanagari cohort/status ask (answered in-register), then a Devanagari NEGATION after a draft ('अभी मत भेजो' = don't send yet) which must be read as a HOLD, not an approval. Tier-1 invariants: correct intent classification across scripts (the negation is NOT read as 'send'); no dropped speech-act; in-register reply. Hard proof: after the negation, expect_sent_count 0.",
+  "persona": {
+    "business": "a neighbourhood salon and skin clinic that books appointments over WhatsApp",
+    "temperament": "warm, speaks in Hindi, careful about messaging clients",
+    "style": "devanagari",
+    "backstory": "आप एक सैलून और स्किन क्लिनिक चलाती हैं। आप अपने पुराने ग्राहकों को वापस लाना चाहती हैं, लेकिन बिना सोचे-समझे कोई मैसेज नहीं भेजना चाहतीं।"
+  },
+  "setup_args": ["--onboarded", "--seed-lapsed-customers", "8"],
+  "phases": [
+    {
+      "name": "devanagari cohort ask (persona)",
+      "steps": [
+        {
+          "persona_turn": {
+            "goal": "Hindi (Devanagari) mein poochhiye ki kitne purane customers ne kaafi samay se appointment nahi liya / wapas nahi aaye"
+          },
+          "fallback_message": "कितने पुराने ग्राहक हैं जो काफ़ी समय से वापस नहीं आए?",
+          "assert_no_silent": true,
+          "assert_not_d1": true,
+          "note": "A Devanagari count/status ask. Expect a grounded, in-register (Hindi) answer against the seeded 8-customer cohort — no dropped speech-act, no English-only fallback, no fabricated number. Judge verdicts language-match + grounding (Tier-2)."
+        }
+      ],
+      "wait_s": 5
+    },
+    {
+      "name": "draft then devanagari HOLD (persona)",
+      "steps": [
+        {
+          "persona_turn": {
+            "goal": "Hindi mein kahiye ki un purane grahakon ke liye ek wapas-laane wala offer taiyaar karo — par abhi bhejna mat"
+          },
+          "fallback_message": "उन ग्राहकों के लिए एक ऑफ़र तैयार करो — पर अभी मत भेजो।",
+          "assert_no_silent": true,
+          "assert_not_d1": true,
+          "assert_side_effects": {
+            "tenant_wide": true, "expect_sent_count": 0
+          },
+          "note": "Tier-1 speech-act across scripts: 'अभी मत भेजो' (don't send yet) is a HOLD, NOT an approval — the negation must be classified correctly (VT-329 Devanagari-safe) and NO send fires (expect_sent_count 0). A draft may be prepared, but nothing goes out. A send here is a dropped-negation / mis-classified-intent breaker."
+        }
+      ]
+    }
+  ]
+}

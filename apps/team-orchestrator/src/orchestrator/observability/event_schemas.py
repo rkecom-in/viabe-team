@@ -143,12 +143,12 @@ EVENT_SCHEMAS: dict[str, dict[str, Validator]] = {
         "ok": lambda v: None if isinstance(v, bool) else f"expected bool, got {type(v).__name__}",
         # Optional fields: result (any, redacted), error (str, redacted).
     },
-    # VT-28 scheduled-trigger event types. Three SHELL events (plumbing-
+    # VT-28 scheduled-trigger event types. Two SHELL events (plumbing-
     # mode per CL-274 + phantom-Done prevention per CL-318/319/380) +
     # one full-implementation weekly_cadence event. The corresponding
-    # completion event names (`attribution_closed`, `day39_evaluated`,
-    # `monthly_impact_started`) are RESERVED for VT-176 and intentionally
-    # NOT registered here.
+    # completion event names (`attribution_closed`, `monthly_impact_started`)
+    # are RESERVED for VT-176 and intentionally NOT registered here.
+    # (VT-365: the deprecated day-N SHELL event was removed with its subsystem.)
     "weekly_cadence_fired": {
         "trigger_reason": _required_str,
     },
@@ -156,67 +156,20 @@ EVENT_SCHEMAS: dict[str, dict[str, Validator]] = {
         "status": _required_str,
         "trigger_reason": _required_str,
     },
-    "day39_shell": {
-        "status": _required_str,
-        "trigger_reason": _required_str,
-    },
     "monthly_impact_shell": {
         "status": _required_str,
         "trigger_reason": _required_str,
     },
-    # VT-175 released event types (formerly reserved by VT-28). The
-    # canonical completion events for attribution-close + day-39 — no
-    # longer SHELL forms now that the schema substrate + deterministic
-    # evaluators ship in this row. Production emission via
-    # `orchestrator.billing.attribution_close.close_attribution` +
-    # `orchestrator.billing.day39_evaluator.evaluate_day39`. The shell
-    # event types above stay registered so VT-176's body-swap rollout
-    # can ship without an intermediate schema break.
+    # VT-175 released event type (formerly reserved by VT-28). The canonical
+    # completion event for attribution-close — no longer a SHELL form now that
+    # the schema substrate + deterministic evaluator ship. Production emission
+    # via `orchestrator.billing.attribution_close.close_attribution`.
+    # (VT-365: the deprecated day-N billing subsystem + its event taxonomy were
+    # REMOVED; no money-return path ever.)
     "attribution_closed": {
         "campaign_id": _required_str,
         "tenant_id": _required_str,
         "total_arrr_paise": _required_int,
-    },
-    "day39_continue": {
-        "tenant_id": _required_str,
-        "verdict": _required_str,
-        "arrr_paise": _required_int,
-        "cumulative_fees_paise": _required_int,
-    },
-    "day39_refund_triggered": {
-        "tenant_id": _required_str,
-        "verdict": _required_str,
-        "arrr_paise": _required_int,
-        "cumulative_fees_paise": _required_int,
-    },
-    # VT-93 refund execution audit (pipeline_log; the immutable copy goes to
-    # privacy_audit_log). Emitted by billing/refund_executor on completion.
-    # TAXONOMY (Cowork PB1, 20260605T095500Z): 'refund_executed' is the CLEAN
-    # terminal audit event for an EXECUTED refund. The phase-machine event
-    # 'day39_refund_triggered' (transitions.py) keeps its ORIGINAL meaning — it
-    # fires the paid_active/paid_at_risk -> refunded transition; it is NOT
-    # overloaded to mean "executed". 'refund_partial_failed' goes only to
-    # privacy_audit_log (its CHECK), not here. VT-85 owns the fuller
-    # day39_refund_offered / day39_refund_decision taxonomy.
-    "refund_executed": {
-        "tenant_id": _required_str,
-        "refund_reason": _required_str,
-        "total_refund_paise": _required_int,
-    },
-    # VT-85 day-39 refund-conversation taxonomy. 'day39_refund_offered' replaces
-    # the old auto-fire 'day39_refund_triggered' EMIT on the refund verdict — the
-    # evaluator now makes an OFFER (no auto-refund). 'day39_refund_decision' records
-    # the owner's reply (or the 48h timeout default).
-    "day39_refund_offered": {
-        "tenant_id": _required_str,
-        "verdict": _required_str,
-        "arrr_paise": _required_int,
-        "cumulative_fees_paise": _required_int,
-    },
-    "day39_refund_decision": {
-        "tenant_id": _required_str,
-        "decision": _required_str,  # refund | continue | discuss
-        "source": _required_str,  # reply | timeout
     },
     # VT-89: Razorpay webhook processing audit (one per deduped event).
     "razorpay_event_processed": {
@@ -237,6 +190,105 @@ EVENT_SCHEMAS: dict[str, dict[str, Validator]] = {
     "composer_invoked": {
         "intent_or_trigger": _required_str,
         "message_type": _required_str,
+    },
+    # VT-367 journey-completion seam (was emitted-but-unregistered; registered with VT-368, whose
+    # generator is the execution subscriber). gap4_trigger is a bool but the registry has no bool
+    # validator — presence is what matters; tenant_id is the routing field.
+    "onboarding_journey_completed": {
+        "tenant_id": _required_str,
+    },
+    # VT-368 Gap-4 business-plan lifecycle (the spine). All routed on tenant_id; reasons/versions in
+    # the payload verbatim.
+    "business_plan_generated": {
+        "tenant_id": _required_str,
+        "version": _required_int,
+    },
+    "business_plan_skipped": {
+        "tenant_id": _required_str,
+        "reason": _required_str,
+    },
+    "business_plan_generation_degraded": {
+        "tenant_id": _required_str,
+    },
+    "business_plan_grounding_violation": {
+        "tenant_id": _required_str,
+    },
+    "business_plan_delivered": {
+        "tenant_id": _required_str,
+        "version": _required_int,
+    },
+    "business_plan_item_edited": {
+        "tenant_id": _required_str,
+        "item_id": _required_str,
+    },
+    # VT-369 Gap-5 agent-surface lifecycle (specialist agents + master
+    # coordinator). Per-tenant events route on tenant_id; reasons/IDs ride in
+    # the payload verbatim (IDs-in-state — never customer PII, plan §3d).
+    "agent_item_dispatched": {
+        "tenant_id": _required_str,
+        "agent": _required_str,
+    },
+    "agent_drafts_created": {
+        "tenant_id": _required_str,
+        "draft_count": _required_int,
+    },
+    "agent_send_result": {
+        "tenant_id": _required_str,
+        "action": _required_str,
+    },
+    "agent_approval_armed": {
+        "tenant_id": _required_str,
+    },
+    "agent_approval_resolved": {
+        "tenant_id": _required_str,
+        "decision": _required_str,
+    },
+    # Workspace-level: the daily coordinator sweep spans tenants, so this
+    # event intentionally carries no tenant_id (precedent: the tenant-less
+    # webhook_received / scheduled_trigger_fired schemas above).
+    "coordinator_sweep_completed": {
+        "tenants_processed": _required_int,
+    },
+    # VT-369 PR-2 — autonomy lifecycle (counters/reasons only, no PII).
+    "agent_autonomy_regressed": {
+        "tenant_id": _required_str,
+        "agent": _required_str,
+        "kind": _required_str,
+    },
+    "agent_autonomy_granted": {
+        "tenant_id": _required_str,
+        "agent": _required_str,
+    },
+    "agent_autonomy_revoked": {
+        "tenant_id": _required_str,
+        "agent": _required_str,
+        "reason": _required_str,
+    },
+    "agent_autonomy_frozen": {
+        "tenant_id": _required_str,
+        "agent": _required_str,
+    },
+    "agent_autonomy_unfrozen": {
+        "tenant_id": _required_str,
+        "agent": _required_str,
+    },
+    # VT-376 run-control alert events (CC's rostered flag: the alerts the panel
+    # surfaces must be REGISTERED schemas, not ad-hoc). Both writers predate this
+    # registration and emit through observability.log.log_event:
+    #   * run_control_rerun_overlap — rerun._emit_overlap_alert (VT-375 C1 Option A):
+    #     an owner approval armed DURING a rerun's execution window; the lineage row
+    #     closed 'escalated'. Optional field: approval_id (str | None).
+    #   * run_control_degraded — run_control._emit_degraded (F9 two-tier): a control
+    #     read failed with no known pause → fail OPEN; posture is the enum ('fail_open').
+    # Payloads are IDs/enums only (CL-390).
+    "run_control_rerun_overlap": {
+        "workflow_kind": _required_str,
+        "source_run_id": _required_uuid_str,
+        "final_outcome": _required_str,
+    },
+    "run_control_degraded": {
+        "workflow_kind": _required_str,
+        "posture": _required_str,
     },
 }
 

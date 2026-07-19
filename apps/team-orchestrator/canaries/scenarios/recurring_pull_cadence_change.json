@@ -1,0 +1,22 @@
+{
+  "name": "recurring_pull_cadence_change",
+  "domain": "integration",
+  "critical": false,
+  "setup_args": ["--onboarded", "--seed-lapsed-customers", "6"],
+  "expected_fail": false,
+  "notes": "Owner asks to CHANGE the recurring pull cadence on an ALREADY-connected data source. --seed-lapsed-customers seeds a real, live tenant_connector_status row (connector_id='google_sheet', enabled=TRUE, last_status='ok', last_sync_at=now()) alongside the customers/ledger substrate — the grounded precondition for this ask (agent/integration_agent.py's schedule_recurring_pull tool: 'a successful commit_ingestion already auto-schedules a sensible default daily cadence server-side — call this only when the owner wants a DIFFERENT cadence'). Expect the system to engage the real cadence-change path (roster.py's integration specialist description explicitly covers 'add or configure a data source') and acknowledge the new cadence without fabricating specifics it can't know. Setup: `setup --onboarded --seed-lapsed-customers 6` then `script <tenant> recurring_pull_cadence_change.json`.",
+  "steps": [
+    {
+      "message": "Can you pull my Google Sheet twice a day instead of just once, so the customer counts stay fresh?",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "note": "A cadence-change ask on an already-connected source — expect real engagement (schedule_recurring_pull) and an acknowledgement of the new cadence, not a canned deflection."
+    },
+    {
+      "message": "great, when's the next pull going to happen?",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "note": "Follow-up asking for the concrete next-run time — expect a real, DB-grounded answer (verify_connector reads next_scheduled_run) rather than a vague or fabricated timestamp."
+    }
+  ]
+}

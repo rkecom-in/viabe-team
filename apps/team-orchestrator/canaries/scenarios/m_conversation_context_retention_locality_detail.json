@@ -1,0 +1,30 @@
+{
+  "name": "m_conversation_context_retention_locality_detail",
+  "domain": "manager",
+  "critical": true,
+  "expected_fail": false,
+  "setup_args": ["--onboarded"],
+  "notes": "Core context-retention closer (the 'stop-re-asking' bar): the owner mentions a locality/delivery-area detail once, unprompted, mid-chat — no flow beat forces it. An unrelated capability question intervenes. A later turn then directly checks retention. COMPLETE journey, no --flow/--journey (plain-chat/normal-brain path, same as honesty_probe). Setup: `setup --onboarded --name convo-harness-<id>` then `script <tenant> m_conversation_context_retention_locality_detail.json`.",
+  "steps": [
+    {
+      "message": "by the way, just so you know — we only deliver within 5 km of Karol Bagh, rest we don't cover",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "note": "A locality/business-detail fact stated once, unprompted. Expect an acknowledging reply, not a re-ask of something just given."
+    },
+    {
+      "message": "anyway, what all can you actually help me with day to day",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "note": "Unrelated capability question — the intervening turn that context must survive."
+    },
+    {
+      "message": "quick one — do you remember what area I said I deliver to?",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_contains": ["karol bagh"],
+      "assert_not_contains": ["which area do you deliver", "what area do you deliver", "please tell me your delivery area", "what is your delivery area", "which area is that"],
+      "note": "Direct retention check. Must recall 'Karol Bagh' from turn 1 — never re-ask for the delivery area."
+    }
+  ]
+}

@@ -1,6 +1,6 @@
 /** VT-95 — landing-page i18n (EN+HI parity + sections resolve) + config-sourced prices. */
 
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import { getLandingDictionary, t } from '@/lib/i18n'
 import { planPrices } from '@/lib/team-pricing'
@@ -53,7 +53,19 @@ describe('VT-95 landing i18n', () => {
 })
 
 describe('VT-95 pricing (config-sourced, Pillar 7)', () => {
-  it('planPrices returns the 3 tiers in order', () => {
+  // VT-429: planPrices() now presents only the OFFERED tiers (NEXT_PUBLIC_OFFERED_TIERS); these
+  // VT-95 price-mapping assertions widen the offered set so they test what they mean to (config-
+  // sourced rupee values, no paise literals) — the offered-filter itself is in team-pricing.test.ts.
+  const ORIG_OFFERED = process.env.NEXT_PUBLIC_OFFERED_TIERS
+  beforeEach(() => {
+    process.env.NEXT_PUBLIC_OFFERED_TIERS = 'founding,standard,pro'
+  })
+  afterEach(() => {
+    if (ORIG_OFFERED === undefined) delete process.env.NEXT_PUBLIC_OFFERED_TIERS
+    else process.env.NEXT_PUBLIC_OFFERED_TIERS = ORIG_OFFERED
+  })
+
+  it('planPrices returns the offered tiers in canonical order', () => {
     expect(planPrices().map((p) => p.tier)).toEqual(['founding', 'standard', 'pro'])
   })
 

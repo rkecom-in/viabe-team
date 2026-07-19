@@ -42,11 +42,18 @@ from dataclasses import asdict, dataclass, field, is_dataclass, replace
 from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import UUID
 
 import yaml
 from psycopg.types.json import Jsonb
+
+if TYPE_CHECKING:
+    # VT-490: type-only import of the VT-369 frozen fact bundle. The runtime
+    # import stays LAZY (inside _build_dormant_cohort / serialize) because the
+    # executor module pulls the coordinator → dbos import surface, which must
+    # never be paid at context_builder import time (dep-less smoke + Pillar-1).
+    from orchestrator.agents.sales_recovery_executor import CustomerFactBundle
 
 from orchestrator._tenant_guard import emit_pipeline_step
 from orchestrator.db import tenant_connection
@@ -190,6 +197,7 @@ _DEFAULT_RECOVERY_TARGET_MULTIPLIER: float = 1.1  # default per-tenant recovery-
 _DEFAULT_SECTION_KEYS = (
     "business_profile",
     "customer_ledger_summary",
+    "dormant_cohort",  # VT-490
     "recent_campaigns",
     "attribution_snapshot",
     "pending_owner_inputs",
@@ -222,6 +230,14 @@ class SalesRecoveryContext:
     trigger_reason: TriggerReason = "weekly_cadence"
     business_profile: BusinessProfile = field(default_factory=BusinessProfile)
     customer_ledger_summary: LedgerSummary = field(default_factory=LedgerSummary)
+    # VT-490 — the per-customer DORMANT COHORT surfaced into the conversational
+    # SR lane: a REUSE of the VT-369 ``CustomerFactBundle`` (detect_lapsed_customers
+    # + build_customer_fact_bundle) behind the SAME CL-425 owner-inputs gate the
+    # autonomous executor lane uses. Safe-empty default (CL-190). The aggregate
+    # ``customer_ledger_summary`` above gives the distribution; this gives the brain
+    # the actual candidate rows it must name in ``target_cohort.customer_ids``.
+    # Frozen rows; display-name level at most — NO phone/email by construction.
+    dormant_cohort: list[CustomerFactBundle] = field(default_factory=list)
     recent_campaigns: list[CampaignSnapshot] = field(default_factory=list)
     attribution_snapshot: AttributionSnapshot = field(
         default_factory=AttributionSnapshot
@@ -229,6 +245,27 @@ class SalesRecoveryContext:
     pending_owner_inputs: list[OwnerInput] = field(default_factory=list)
     l3_priors: L3Priors = field(default_factory=L3Priors)
     l4_skills: L4Skills = field(default_factory=L4Skills)
+    # VT-607 (Loop Package 6) — the Manager's OWN framing for this dispatch (desired_outcome +
+    # acceptance_criteria from the durable plan step), threaded through from
+    # handoffs._build_sales_recovery_update's read of manager_step_desired_outcome /
+    # manager_step_acceptance_criteria (both already populated in graph state by
+    # manager.workflow._dispatch_specialist_step). Safe-empty default (CL-190) — a non-loop
+    # dispatch (legacy/shadow mode, or a caller outside the manager loop entirely) never sets
+    # these, so the specialist just sees one fewer section, never a crash.
+    manager_desired_outcome: str = ""
+    manager_acceptance_criteria: list[str] = field(default_factory=list)
+    # VT-667 — the owner's CAMPAIGN CONTENT brief, in their own words. Threaded
+    # from handoffs._build_sales_recovery_update's read of ``manager_step_situation``
+    # (the owner's redacted verbatim ask; on the D3/VT-657 campaign dispatch path it
+    # IS the creative brief — "whip up a Diwali festive offer …"). Free text, LLM-read,
+    # NO keyword extraction (CL-2026-07-15-no-lists). serialize_bundle_for_prompt
+    # renders it SCOPED to MESSAGE CONTENT / template / offer choice ONLY — the
+    # recipient cohort, the campaign window, and the recovery ₹ floors stay
+    # SERVER-owned (VT-651/499) and the brief never overrides them. Safe-empty
+    # default (CL-190): an autonomous (weekly-cadence) dispatch, or any caller
+    # outside the conversational campaign path, leaves it "" so the render section is
+    # omitted and every existing constructor / brief-less flow is byte-unchanged.
+    creative_brief: str = ""
     meta: ContextMeta = field(default_factory=_default_meta)
     # CL-190: True = real data; False = safe-empty fallback (substrate absent
     # or no rows for tenant). Keys are the five section names below.
@@ -302,7 +339,13 @@ def _build_ledger_summary(tenant_id: UUID) -> tuple[LedgerSummary, bool]:
 
     Reads live per-tenant SQL via ``tenant_connection`` (RLS — the owner's own
     data, lawful; no cross-tenant):
-    - ``recency_days_pctl``: p25/50/75/90 of days-since-last_inbound (customers).
+    - ``recency_days_pctl``: p25/50/75/90 of days-since-LAST-ACTIVITY per
+      customer — activity = the LATER of ``customers.last_inbound_at`` and the
+      customer's latest purchase-ledger ``entry_date`` (VT-485). Using the
+      purchase ledger (not ``last_inbound_at`` alone) means a Shopify-sourced
+      customer lapsed BY PURCHASE (bought 90+ days ago, never messaged) is a
+      valid dormant-cohort member instead of being excluded → the agent can
+      ground a win-back instead of falling through to ``insufficient_data``.
     - ``spend_paise_pctl``: p25/50/75/90 of per-customer total SALE paise
       (customer_ledger_entries, entry_type='sale').
     - ``business_type`` + ``total_customers``.
@@ -427,40 +470,47 @@ def _build_l4_skills(tenant_id: UUID, user_request: str) -> tuple[L4Skills, bool
 
 
 def _build_recent_campaigns(tenant_id: UUID) -> tuple[list[CampaignSnapshot], bool]:
-    """campaigns-table read (VT-138).
+    """campaigns-table read (VT-138) + per-campaign recovered ARRR (VT-563).
 
     Reads the live ``campaigns`` table via ``tenant_connection`` (RLS +
     GUC scoped); returns the most-recent ``LIMIT 5`` rows mapped to
     ``CampaignSnapshot``. ``id``, ``status`` and ``generated_at`` map
-    directly; ``recovered_paise`` is set to ``0`` because the per-
-    campaign attribution substrate does not exist yet (CL blocker
-    367387c2-cc5a-81a7-aa37-e6e23c222357 — Option 2, completeness-
-    flag-honest).
+    directly; ``recovered_paise`` is the campaign's real attributed ARRR
+    (SUM ``attributions.attributed_paise``) — 0 when a campaign has no
+    closed attribution yet, which is complete knowledge, not a placeholder.
 
-    The completeness flag is ``False`` whenever this builder runs —
-    even when real rows return — because ``recovered_paise`` is a
-    placeholder. The flag will flip to ``True`` only when a future
-    ``campaign_attribution`` substrate populates the real recovered-
-    paise figure; that substrate is its own VT row and is OUT of scope
-    here.
+    Completeness is ``True`` when the attribution read SUCCEEDS. It fails
+    open — an unreadable substrate degrades to ``recovered_paise=0`` +
+    completeness ``False`` and NEVER raises into dispatch context building.
 
     Belt-and-braces over RLS (CL-71 / CL-190): the raw rows are passed
-    through ``assert_tenant_scoped`` before mapping — RLS should make a
-    cross-tenant row impossible, but the assertion logs + raises if it
-    ever happens.
+    through ``assert_tenant_scoped`` (in the wrapper) before mapping.
     """
     # VT-306: via the wrapper (own tenant_connection + assert_tenant_scoped).
-    rows = CampaignsWrapper().list_recent_basic(tenant_id, limit=5)
+    wrapper = CampaignsWrapper()
+    rows = wrapper.list_recent_basic(tenant_id, limit=5)
+    recovered: dict[str, int] = {}
+    complete = True
+    try:
+        recovered = wrapper.recovered_paise_for_campaigns(
+            tenant_id, [str(row["id"]) for row in rows]
+        )
+    except Exception:  # noqa: BLE001 — attribution read is best-effort; never break dispatch
+        logger.warning(
+            "recovered_paise read failed (tenant=%s); recovered=0 + incomplete",
+            tenant_id,
+        )
+        complete = False
     snapshots = [
         CampaignSnapshot(
             campaign_id=row["id"],
             status=row["status"],
-            recovered_paise=0,
+            recovered_paise=recovered.get(str(row["id"]), 0),
             proposed_at=row["generated_at"],
         )
         for row in rows
     ]
-    return snapshots, False
+    return snapshots, complete
 
 
 def _build_attribution_snapshot(tenant_id: UUID) -> tuple[AttributionSnapshot, bool]:
@@ -583,6 +633,65 @@ def _write_composition_audit(
         )
 
 
+def _build_dormant_cohort(tenant_id: UUID) -> tuple[list[CustomerFactBundle], bool]:
+    """VT-490 — surface the per-customer dormant cohort into the conversational
+    Sales-Recovery lane. A REUSE of the VT-369 mechanism: it imports and calls the
+    EXISTING ``detect_lapsed_customers`` + ``build_customer_fact_bundle``
+    (``agents.sales_recovery_executor``) AS-IS — the executor is NOT modified — and
+    returns the frozen ``CustomerFactBundle`` rows the brain needs to ground a
+    ``target_cohort`` instead of falling through to ``insufficient_data``.
+
+    SINGLE-TENANT (Pillar 3, VT-490 privacy gate). The read runs on a
+    ``tenant_connection`` (SET ROLE app_role + ``app.current_tenant`` GUC → FORCE
+    RLS) AND the detection SQL (``db.wrappers._LAPSED_CANDIDATES_SQL``) is
+    explicitly ``WHERE c.tenant_id = …`` — the owner's OWN customers only, never
+    cross-tenant. k-anonymity is N/A here (it is a CROSS-TENANT control); this is
+    the owner's lawful first-party data, display-name level at most.
+
+    CL-425 (fail-closed): the SAME ``owner_inputs`` gate the executor's
+    ``_owner_inputs_ok`` enforces — gate FALSE / any consent-read error → safe-empty
+    ``([], False)`` so the brain falls back to ``insufficient_data`` cleanly and NO
+    PII is read or transmitted. CL-390: the returned bundles carry NO raw
+    phone/email by construction; they are PROMPT-ONLY (rendered display-name level)
+    and are NEVER persisted into ``composition_audits``. Cohort cap =
+    ``DEFAULT_DETECTION_LIMIT`` (200), reused from the executor.
+
+    Completeness flag = True iff at least one candidate surfaced (real rows), so the
+    serializer can mark the section substrate-backed vs safe-empty.
+    """
+    # Lazy import (Pillar-1 / dep-less smoke): the executor module pulls the
+    # coordinator → dbos surface; pay it only on the live build path.
+    from orchestrator.agents.sales_recovery_executor import (
+        DEFAULT_DETECTION_LIMIT,
+        build_customer_fact_bundle,
+        detect_lapsed_customers,
+    )
+
+    # CL-425 consent gate FIRST — fail-closed, identical posture to the executor's
+    # _owner_inputs_ok. No candidate read (no PII surfacing) until consent is True.
+    try:
+        from orchestrator.memory.l0_writer import _owner_inputs_enabled
+
+        if not _owner_inputs_enabled(tenant_id):
+            return [], False
+    except Exception:  # noqa: BLE001 — never surface PII on an unknown consent state
+        logger.warning(
+            "VT-490: owner_inputs consent check failed (tenant=%s); fail-closed",
+            tenant_id,
+        )
+        return [], False
+
+    with tenant_connection(tenant_id) as conn:
+        candidates = detect_lapsed_customers(
+            tenant_id, conn=conn, limit=DEFAULT_DETECTION_LIMIT
+        )
+        bundles = [
+            build_customer_fact_bundle(tenant_id, cand.customer_id, conn=conn)
+            for cand in candidates
+        ]
+    return bundles, bool(bundles)
+
+
 # --- the bundle constructor --------------------------------------------------
 
 
@@ -591,6 +700,10 @@ def build_sales_recovery_context(
     run_id: UUID,
     trigger_reason: TriggerReason,
     user_request: str,
+    *,
+    manager_desired_outcome: str = "",
+    manager_acceptance_criteria: list[str] | None = None,
+    creative_brief: str = "",
 ) -> SalesRecoveryContext:
     """Sole constructor for SalesRecoveryContext bundles.
 
@@ -602,6 +715,15 @@ def build_sales_recovery_context(
     ``user_request`` (Exec-6.85): the orchestrator-supplied owner message
     that triggered the dispatch. Required, must be non-empty — the
     specialist cannot be spawned without one.
+
+    ``manager_desired_outcome`` / ``manager_acceptance_criteria`` (VT-607, Loop Package 6):
+    the durable plan step's OWN framing, when this dispatch is running inside the manager loop
+    (``handoffs._build_sales_recovery_update`` reads them from graph state and passes them
+    through). Both default empty — a non-loop caller (legacy/shadow mode) never supplies them.
+
+    ``creative_brief`` (VT-667): the owner's CAMPAIGN CONTENT ask in their own words, threaded
+    from ``handoffs._build_sales_recovery_update``'s read of ``manager_step_situation``. Default
+    empty — an autonomous / brief-less dispatch leaves it "" and the prompt render is unchanged.
     """
     if not isinstance(user_request, str) or not user_request.strip():
         raise ValueError(
@@ -614,6 +736,7 @@ def build_sales_recovery_context(
 
     business_profile, bp_ok = _build_business_profile(tenant_id)
     ledger_summary, ls_ok = _build_ledger_summary(tenant_id)
+    dormant_cohort, dc_ok = _build_dormant_cohort(tenant_id)  # VT-490
     recent_campaigns, rc_ok = _build_recent_campaigns(tenant_id)
     attribution_snapshot, as_ok = _build_attribution_snapshot(tenant_id)
     pending_owner_inputs, oi_ok = _build_pending_owner_inputs(tenant_id)
@@ -637,6 +760,7 @@ def build_sales_recovery_context(
     data_completeness = {
         "business_profile": bp_ok,
         "customer_ledger_summary": ls_ok,
+        "dormant_cohort": dc_ok,  # VT-490
         "recent_campaigns": rc_ok,
         "attribution_snapshot": as_ok,
         "pending_owner_inputs": oi_ok,
@@ -648,6 +772,7 @@ def build_sales_recovery_context(
         return (
             _estimate_tokens(business_profile)
             + _estimate_tokens(ledger_summary)
+            + _estimate_tokens(dormant_cohort)  # VT-490
             + _estimate_tokens(recent_campaigns)
             + _estimate_tokens(attribution_snapshot)
             + _estimate_tokens(pending_owner_inputs)
@@ -675,6 +800,16 @@ def build_sales_recovery_context(
         if business_profile.hours:
             business_profile = replace(business_profile, hours={})
             truncated.append("business_profile")
+            continue
+        # VT-490: the dormant cohort is the load-bearing SR context (the rows the
+        # brain MUST name in target_cohort.customer_ids). It sheds rows — lowest
+        # lifetime-spend FIRST, since detection is richest-first (ORDER BY
+        # lifetime_spend_paise DESC), so the tail is the least-valuable candidate —
+        # only AFTER the cheap per-tenant sections are exhausted, but BEFORE the
+        # L3/L4 moat. It is therefore the most-protected per-tenant section.
+        if dormant_cohort:
+            dormant_cohort = dormant_cohort[:-1]
+            truncated.append("dormant_cohort")
             continue
         # Moat layers — only after the per-tenant sections are exhausted.
         if l4_skills.skills:
@@ -713,6 +848,10 @@ def build_sales_recovery_context(
         section_token_counts={
             "business_profile": _estimate_tokens(business_profile),
             "customer_ledger_summary": _estimate_tokens(ledger_summary),
+            # VT-490: a COUNTER only (CL-390) — the raw cohort rows (display names)
+            # never land in the audit; this is the section's token total for
+            # truncation observability, an int, never a row.
+            "dormant_cohort": _estimate_tokens(dormant_cohort),
             "recent_campaigns": _estimate_tokens(recent_campaigns),
             "attribution_snapshot": _estimate_tokens(attribution_snapshot),
             "pending_owner_inputs": _estimate_tokens(pending_owner_inputs),
@@ -732,11 +871,15 @@ def build_sales_recovery_context(
         trigger_reason=trigger_reason,
         business_profile=business_profile,
         customer_ledger_summary=ledger_summary,
+        dormant_cohort=dormant_cohort,  # VT-490
         recent_campaigns=recent_campaigns,
         attribution_snapshot=attribution_snapshot,
         pending_owner_inputs=pending_owner_inputs,
         l3_priors=l3_priors,
         l4_skills=l4_skills,
+        manager_desired_outcome=manager_desired_outcome,
+        manager_acceptance_criteria=list(manager_acceptance_criteria or []),
+        creative_brief=creative_brief,
         meta=meta,
         data_completeness=data_completeness,
         recovery_target_multiplier=recovery_target_multiplier,
@@ -757,6 +900,82 @@ def build_sales_recovery_context(
 def _default_templates_available() -> tuple[str, ...]:
     """Live read of agent-selectable template names from the registry."""
     return approved_template_names("en")
+
+
+def _target_recovered_paise(context: SalesRecoveryContext) -> int:
+    """The expected-ARRR sizing target the agent (and the self_evaluate gate)
+    use to judge a plan's ``expected_arrr`` band (VT-164). Single-sourced so the
+    prompt's ``## Expected outcome`` figure and the gate's grounding context
+    agree on the same number."""
+    return max(
+        round(
+            context.attribution_snapshot.last_7d_recovered_paise
+            * context.recovery_target_multiplier
+        ),
+        context.recovery_target_floor_paise,
+    )
+
+
+def build_self_evaluate_context_summary(
+    context: SalesRecoveryContext,
+    *,
+    target_recovered_paise: int | None = None,
+) -> dict[str, Any]:
+    """VT-485 — the compact grounding context the self_evaluate gate
+    cross-references on its ``consistency`` category.
+
+    Before VT-485 the gate adapter passed ``context_summary={}``, so the model
+    saw an empty context and could not verify whether a draft's
+    ``target_cohort`` / ``expected_arrr`` were grounded in the tenant's actual
+    data — a fabricated plan and a real one looked identical to the
+    ``consistency`` check. This derives a SMALL dict (a subset of the bundle —
+    the gate gets a compact summary, NOT the agent's full bundle or its
+    reasoning, per Pillar-7 independence) carrying exactly the substrate the
+    prompt's ``consistency`` examples reference:
+
+    - ``customer_ledger_summary``: total_customers + the recency/spend
+      percentile distributions, plus an explicit ``recency_basis`` note that
+      recency = last inbound OR last purchase (VT-485) — so the gate can sanity-
+      check a dormant ``target_cohort`` against the real distribution.
+    - ``attribution_snapshot``: the figure the prompt's first ``consistency``
+      example names verbatim (a draft targeting a bucket with zero attributed
+      customers should flag).
+    - ``recent_campaigns_count`` + ``data_completeness``: which sections are
+      substrate-backed vs safe-empty, so the gate weights accordingly.
+    - ``expected_arrr_target_paise``: the same target the agent sized its
+      ``expected_arrr`` band against — the gate flags an implausible band.
+
+    It carries NO PII (no customer ids, names, or phones — only counts /
+    distributions / aggregates) and NO reasoning chain.
+    """
+    ls = context.customer_ledger_summary
+    att = context.attribution_snapshot
+    target = (
+        target_recovered_paise
+        if target_recovered_paise is not None
+        else _target_recovered_paise(context)
+    )
+    return {
+        "customer_ledger_summary": {
+            "total_customers": ls.total_customers,
+            "business_type": ls.business_type,
+            "recency_days_pctl": dict(ls.recency_days_pctl),
+            "recency_basis": (
+                "days since last activity = the later of last inbound message "
+                "and last purchase (entry_date); a customer lapsed by purchase "
+                "alone is included"
+            ),
+            "spend_paise_pctl": dict(ls.spend_paise_pctl),
+        },
+        "attribution_snapshot": {
+            "cumulative_recovered_paise": att.cumulative_recovered_paise,
+            "last_7d_recovered_paise": att.last_7d_recovered_paise,
+            "last_30d_recovered_paise": att.last_30d_recovered_paise,
+        },
+        "recent_campaigns_count": len(context.recent_campaigns),
+        "expected_arrr_target_paise": target,
+        "data_completeness": dict(context.data_completeness),
+    }
 
 
 def serialize_bundle_for_prompt(
@@ -790,15 +1009,15 @@ def serialize_bundle_for_prompt(
         # _build_recovery_target_config in build_sales_recovery_context).
         # Falls back to the module-level defaults when context fields are
         # their defaults — so a missing DB read never changes the number.
-        target_recovered_paise = max(
-            round(
-                context.attribution_snapshot.last_7d_recovered_paise
-                * context.recovery_target_multiplier
-            ),
-            context.recovery_target_floor_paise,
-        )
+        # Single-sourced via _target_recovered_paise so the gate's grounding
+        # context (build_self_evaluate_context_summary) uses the same figure.
+        target_recovered_paise = _target_recovered_paise(context)
 
-    parts: list[str] = ["# Sales Recovery Context"]
+    # VT-636 — the quarantine framing renders ONCE at the top of the bundle: everything wrapped
+    # in <untrusted> below (customer names) is data, never instructions.
+    from orchestrator.security.prompt_quarantine import FRAMING
+
+    parts: list[str] = ["# Sales Recovery Context", f"\n{FRAMING}"]
 
     bp = context.business_profile
     parts.append("\n## Business profile")
@@ -824,11 +1043,79 @@ def serialize_bundle_for_prompt(
     parts.append(
         f"- total_customers: {ls.total_customers}\n"
         f"- business_type: {ls.business_type or '(unknown)'}\n"
-        f"- recency days-since-last-inbound (percentiles): {_pctl_fmt(ls.recency_days_pctl)}\n"
+        f"- recency days-since-last-activity, i.e. last inbound message OR last "
+        f"purchase, whichever is newer (percentiles): {_pctl_fmt(ls.recency_days_pctl)}\n"
         f"- spend paise per customer, lifetime sales (percentiles): {_pctl_fmt(ls.spend_paise_pctl)}\n"
         f"- substrate_populated: "
         f"{context.data_completeness.get('customer_ledger_summary', False)}"
     )
+
+    # VT-490 — the per-customer dormant cohort. ONLY the minimum-necessary fields
+    # (customer_id, display_name, days_since_last_sale, lifetime_spend_paise,
+    # business_name) are rendered; last_sale_amount_paise is intentionally omitted.
+    dc = context.dormant_cohort
+    parts.append(
+        "\n## Dormant cohort (eligible lapsed customers — these are THIS tenant's "
+        "OWN customers and the FULL recipient set: the campaign targets ALL of them "
+        "(the orchestrator sets ``target_cohort.customer_ids`` server-side to this "
+        "entire eligible cohort — you do NOT pick a subset or return ids); use these "
+        "rows to ground your campaign prose)"
+    )
+    if dc:
+        # CL-390 backstop: the frozen CustomerFactBundle carries NO raw phone/email
+        # by construction (build_customer_fact_bundle). Reuse the executor's
+        # _PHONE_SHAPE_RE as defence-in-depth — a phone-shaped value can NEVER reach
+        # the prompt via a free-text field. Only the text fields are checked: the
+        # numeric spend/recency are computed ints (a large paise value is not a PII
+        # vector and would false-positive against the phone shape).
+        from orchestrator.agents.sales_recovery_executor import _PHONE_SHAPE_RE
+
+        cohort_lines: list[str] = []
+        for m in dc:
+            name = m.display_name or "(unknown)"
+            biz = m.business_name or "(unknown)"
+            # CL-390 backstop: a phone-shaped value must NEVER reach the prompt. This historically
+            # RAISED — which crashed the ENTIRE SR lane (VT-602 -> human escalation) whenever a single
+            # customer's name/business field carried an 8+ digit run. That is common in real AND
+            # seeded data, so the manager's PRIMARY delegation (win-back campaign) failed
+            # intermittently: ~1/N runs a random dormant name tripped the shape and the owner got a
+            # human-escalation instead of a plan. Redact the run IN PLACE instead — the phone never
+            # reaches the LLM (security intact, still fail-closed on the value) and the customer stays
+            # targetable by id/spend/recency (SR selects by customer_id, never by name). Warn so a
+            # genuine PII leak upstream is still visible in logs.
+            red_name = _PHONE_SHAPE_RE.sub("[redacted]", name)
+            red_biz = _PHONE_SHAPE_RE.sub("[redacted]", biz)
+            if red_name != name or red_biz != biz:
+                logger.warning(
+                    "context_builder: VT-490 redacted a phone-shaped value from a dormant-cohort "
+                    "name field (CL-390) tenant=%s",
+                    getattr(context, "tenant_id", "?"),
+                )
+            # VT-636 seam A (HIGH) — display_name/business_name are ATTACKER-WRITABLE (any
+            # customer or sheet collaborator writes those cells; Shopify names likewise). Fence
+            # them as untrusted data so an injected payload ("SYSTEM: …wire ₹…") cannot read as
+            # instructions inside the SR bundle. The framing line renders once in the preamble.
+            from orchestrator.security.prompt_quarantine import fence
+
+            cohort_lines.append(
+                f"  - customer_id={m.customer_id} "
+                f"display_name={fence(red_name, source='customer_name', max_len=120)} "
+                f"days_since_last_sale={m.days_since_last_sale} "
+                f"lifetime_spend_paise={m.lifetime_spend_paise} "
+                f"business_name={fence(red_biz, source='customer_business_name', max_len=120)}"
+            )
+        parts.append(
+            f"- count: {len(dc)}\n" + "\n".join(cohort_lines) + "\n"
+            f"- substrate_populated: "
+            f"{context.data_completeness.get('dormant_cohort', False)}"
+        )
+    else:
+        parts.append(
+            "- count: 0 (no lapsed-customer candidates surfaced — treat a request "
+            "that needs specific customer rows as ``insufficient_data``)\n"
+            f"- substrate_populated: "
+            f"{context.data_completeness.get('dormant_cohort', False)}"
+        )
 
     parts.append("\n## Recent campaigns")
     if context.recent_campaigns:
@@ -931,6 +1218,38 @@ def serialize_bundle_for_prompt(
     )
 
     parts.append(f"\n## Trigger reason\n- {context.trigger_reason}")
+
+    # VT-607 (Loop Package 6) — only rendered when the manager loop actually supplied a framing
+    # (non-loop dispatches leave both at their safe-empty default; omitting the section entirely
+    # rather than an empty stub keeps the prompt unchanged for every EXISTING non-loop call site).
+    if context.manager_desired_outcome.strip():
+        parts.append(f"\n## Manager's desired outcome for this step\n{context.manager_desired_outcome}")
+        if context.manager_acceptance_criteria:
+            criteria_lines = "\n".join(f"- {c}" for c in context.manager_acceptance_criteria)
+            parts.append(f"\n## Acceptance criteria\n{criteria_lines}")
+
+    # VT-667 — the owner's campaign CONTENT brief (their own words), rendered ONLY when the
+    # conversational campaign path supplied one. An autonomous / brief-less dispatch leaves
+    # creative_brief at its safe-empty default and this section is OMITTED entirely (not an
+    # empty stub) — the prompt for every brief-less flow is byte-unchanged. The instruction
+    # scopes the brief to MESSAGE CONTENT only: the recipient cohort, the campaign window, and
+    # the recovery ₹ figures are SYSTEM-owned (VT-651/499) and the brief must NOT change them.
+    if context.creative_brief.strip():
+        parts.append(
+            "\n## Campaign brief (owner's own words)\n"
+            f"{context.creative_brief}\n\n"
+            "Use this brief to shape the MESSAGE CONTENT ONLY — the greeting, the tone, and the "
+            "offer copy. When the brief describes a specific offer (a discount, a free item, a "
+            "festival theme), choose the win-back template that fits it: `team_winback_offer` "
+            "carries an offer line in its `offer_description` param ({{3}}) — select it and put "
+            "the owner's offer text there; `team_winback_simple` has no offer slot. The owner's "
+            "brief is a legitimate grounding source for the OFFER copy (an owner-authored offer "
+            "is not a customer fact) — but any claim ABOUT a customer still grounds in the cohort "
+            "facts above, never invented, and customer names stay the `<customer_name>` "
+            "placeholder. The recipient cohort (who receives it), the campaign window (when it "
+            "runs), and the expected-recovery figures are SYSTEM-owned — the brief must NOT "
+            "change them."
+        )
 
     parts.append(f"\n## Owner request\n{context.user_request}")
 

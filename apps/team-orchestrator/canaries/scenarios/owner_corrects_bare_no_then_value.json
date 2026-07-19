@@ -1,0 +1,29 @@
+{
+  "name": "owner_corrects_bare_no_then_value",
+  "domain": "onboarding",
+  "critical": true,
+  "setup_args": ["--owner-inputs", "true", "--journey", "--draft-type", "printing", "--draft-city", "Indore"],
+  "expected_fail": false,
+  "notes": "A bare negative to the pre-seeded business_type confirm ('printing') must NOT re-present the identical confirm string (VT-569a dead-end fix, journey.py _reprompt_after_no) — it must instead ask for the correct value. The owner then supplies the correction, which must be recorded and never re-asked afterward. Setup: `setup --owner-inputs true --journey --draft-type printing --draft-city Indore` then `script <tenant> owner_corrects_bare_no_then_value.json`.",
+  "steps": [
+    {
+      "message": "no",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "note": "Bare negative to the business_type confirm. Expect an acknowledgement + a request for the CORRECT value — not a re-send of the identical 'is that right?' confirm, not a dead end."
+    },
+    {
+      "message": "Hum actually ek stationery aur photocopy shop hain, printing nahi",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "note": "Owner gives the real business type (stationery + photocopy, not printing). Expect this correction to be recorded and the flow to move on."
+    },
+    {
+      "message": "aage kya karna hai",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_not_contains": ["what kind of business is it", "what kind of business", "kis tarah ka business", "is that right"],
+      "note": "The corrected business type must never be re-asked after being supplied."
+    }
+  ]
+}

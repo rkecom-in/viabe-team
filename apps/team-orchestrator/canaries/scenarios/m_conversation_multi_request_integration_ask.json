@@ -1,0 +1,24 @@
+{
+  "name": "m_conversation_multi_request_integration_ask",
+  "domain": "manager",
+  "critical": false,
+  "expected_fail": false,
+  "setup_args": ["--onboarded", "--flow", "ready_asked"],
+  "notes": "Long multi-request single message, variation B: bundled around the integration/readiness beat instead of win-back delegation — an affirmation + a data-privacy question + a platform-support question, all in ONE message. Distinct from variation A (status/new_task/pricing) and from multi_field_single_message.json (profile FIELDS, not distinct request kinds). VT-465 gap: Instagram is not a wired connector today, only Shopify — the reply must not fabricate an Instagram connection. Setup: `setup --onboarded --flow ready_asked --name convo-harness-<id>` then `script <tenant> m_conversation_multi_request_integration_ask.json`.",
+  "steps": [
+    {
+      "message": "Yes let's connect — also while we're at it, what happens to my data once it's connected, and by the way do you support Instagram shop too or only Shopify?",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_not_contains": ["your instagram", "instagram is connected", "connected your instagram", "instagram shop is connected"],
+      "note": "Three asks in one message: readiness affirm + a privacy question + a platform-support question. Expect the store connection to be engaged, a real data-handling answer, and an honest capability answer on Instagram (not wired) — never a fabricated Instagram connection."
+    },
+    {
+      "message": "ok so just to be clear, which one should I go with",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_not_contains": ["which platforms are you on", "what platform do you use"],
+      "note": "Follow-up referencing the platform question from turn 1. Expect a coherent recommendation (Shopify, the wired connector) — not a re-ask of which platform the owner uses."
+    }
+  ]
+}

@@ -35,11 +35,14 @@ def test_invalid_acquired_via_rejected():
 
 
 def test_enum_has_all_vt6_methods():
-    # Single-source enum must carry the 13 VT-6 methods.
+    # Single-source enum must carry the 13 VT-6 methods + the VT-417 inbound
+    # connector lineage (shopify / google_sheet / drive_sheet).
     assert ACQUIRED_VIA == {
         "paper_book", "contacts", "upi_phonepe", "upi_gpay", "upi_paytm",
         "kot_pos", "cash_book", "qr_opt_in", "apify_zomato", "apify_swiggy",
         "apify_magicpin", "apify_gbp", "owner_typed",
+        # VT-417 inbound connector lineage.
+        "shopify", "google_sheet", "drive_sheet",
     }
 
 

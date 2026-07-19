@@ -228,6 +228,18 @@ def _advance_campaign_status(
     CampaignsWrapper().set_status(tenant_id, campaign_id, "sent", conn=conn)
 
 
+def _campaign_status(conn: Any, tenant_id: str, campaign_id: str) -> str | None:
+    """VT-558 — read the campaign's current status via the wrapper on the caller's conn (a fresh
+    statement, so a concurrently-committed operator kill IS observed mid-loop; the loop body runs in
+    autocommit). FAIL-OPEN: any unreadable status (missing row / read error / non-str value) returns
+    None → the kill check treats it as NOT cancelled, because aborting a live campaign on an UNCERTAIN
+    status read would wrongly drop legitimate sends. A real kill lands a real 'cancelled'."""
+    try:
+        return CampaignsWrapper().get_status(tenant_id, campaign_id, conn=conn)
+    except Exception:  # noqa: BLE001 — a status-read failure must never kill a live campaign
+        return None
+
+
 # Type alias for the injectable send function (matches VT-45's public API).
 # The injected callable receives (payload, *, pool) -> SendWhatsappTemplateOutput.
 _SendFn = Callable[..., SendWhatsappTemplateOutput]
@@ -285,7 +297,7 @@ def execute_approved_campaign(
     tenant_id_str = str(tenant_id)
     campaign_id_str = str(campaign_id)
 
-    # VT-328 — refunded/cancelled tenants must NOT dispatch outbound customer campaigns. This is
+    # VT-328 (VT-365) — cancelled tenants must NOT dispatch outbound customer campaigns. This is
     # THE single enforcement point (Pillar 8): every present/future caller funnels through this fn,
     # not just the supervisor node. Phase is derived SERVER-SIDE from the tenant's own row via the
     # RLS-scoped conn — never a client field (IDOR, VT-293/294). Short-circuit BEFORE loading
@@ -293,15 +305,14 @@ def execute_approved_campaign(
     from orchestrator.billing.graceful_exit import dispatch_allowed
 
     _guard_row = conn.execute(
-        "SELECT phase, refunded_at FROM tenants WHERE id = %s", (tenant_id_str,)
+        "SELECT phase, opt_out FROM tenants WHERE id = %s", (tenant_id_str,)
     ).fetchone()
     if _guard_row is None:
         raise RuntimeError(
             f"execute_approved_campaign: tenant {tenant_id_str} not found (dispatch guard)"
         )
     _phase = _guard_row["phase"] if isinstance(_guard_row, dict) else _guard_row[0]
-    _refunded_at = _guard_row["refunded_at"] if isinstance(_guard_row, dict) else _guard_row[1]
-    if not dispatch_allowed(_phase, _refunded_at):
+    if not dispatch_allowed(_phase):
         logger.info(
             "execute_approved_campaign: dispatch_blocked tenant=%s campaign=%s phase=%s",
             tenant_id_str, campaign_id_str, _phase,
@@ -312,6 +323,56 @@ def execute_approved_campaign(
             "skipped_complaint_freeze": 0,
             "failed": 0,
             "dispatch_blocked": 1,
+        }
+
+    # T13b (full-77 sr_stop_then_resume money_action, 2026-07-12) — an OWNER opt-out is a hard
+    # consent withdrawal (opt_out_handler sets tenants.opt_out=true + freezes autonomy). But an
+    # approval armed BEFORE the opt-out lives in pending_approvals, not the autonomy-batch store the
+    # freeze cancels — so a later "haan bhej do" could resolve that stale approval and fire a send
+    # AFTER the withdrawal (money_action + a marketing send against an opt-out — the worst class).
+    # Gate it HERE at the single Pillar-8 chokepoint so NO resolve/replay path can send over an
+    # owner opt-out, regardless of which store armed the approval. Fail-closed, count-only summary.
+    # Read SERVER-SIDE from the tenant's own RLS-scoped row (never a client field). The downstream
+    # emission gate (cluster-2a Layer-1) then swaps any "sent" claim — sent=0 ⇒ no send_fact.
+    _opt_out = _guard_row["opt_out"] if isinstance(_guard_row, dict) else _guard_row[1]
+    if _opt_out:
+        logger.info(
+            "execute_approved_campaign: opt_out_blocked tenant=%s campaign=%s",
+            tenant_id_str, campaign_id_str,
+        )
+        return {
+            "sent": 0,
+            "skipped_opt_out": 0,
+            "skipped_complaint_freeze": 0,
+            "failed": 0,
+            "opt_out_blocked": 1,
+        }
+
+    # VT-460 gaps (a)+(b): the SHARED onboarded (Gate-0) + WABA-live pre-gate — the SAME deterministic
+    # rail the agent path runs at agent_send_draft Gate-0/0b. Before VT-460 the campaign path reached
+    # real customer sends WITHOUT the onboarded/activation bar and discovered a not-live WABA only as
+    # a downstream Twilio 4xx; this closes that asymmetry by REUSING the existing gate functions
+    # (is_agent_eligible + wa_send_allowed) via the unified choke. Fail-closed: a non-onboarded /
+    # not-live tenant sends ZERO and the campaign short-circuits (count-only summary, no PII).
+    from orchestrator.agents.customer_send_choke import assert_customer_send_allowed
+
+    # OC1 (VT-533): shadow the customer-send policy rail on this live campaign path (observe-only —
+    # enforce_policy stays off, so the return is unchanged). Surfaces "enforcement would block here"
+    # data (chiefly: no policy grant seeded yet) to de-risk flipping enforce_policy=True later.
+    _pregate = assert_customer_send_allowed(
+        tenant_id_str, agent="sales_recovery", conn=conn, observe_policy=True
+    )
+    if not _pregate.allowed:
+        logger.info(
+            "execute_approved_campaign: pre_gate_blocked tenant=%s campaign=%s reason=%s",
+            tenant_id_str, campaign_id_str, _pregate.reason,
+        )
+        return {
+            "sent": 0,
+            "skipped_opt_out": 0,
+            "skipped_complaint_freeze": 0,
+            "failed": 0,
+            "pre_gate_blocked": 1,
         }
 
     _send_fn: _SendFn = send_template_fn if send_template_fn is not None else send_whatsapp_template
@@ -346,151 +407,210 @@ def execute_approved_campaign(
     skipped_opt_out = 0
     skipped_complaint_freeze = 0
     failed = 0
+    killed = 0
 
-    for recipient in recipients:
-        customer_id_str: str = recipient["customer_id"]
-        opt_out_status: str | None = recipient.get("opt_out_status")
-        complaint_status: str | None = recipient.get("complaint_status")
-        idempotency_key = f"{campaign_id_str}:{customer_id_str}"
+    # VT-558 campaign true-kill (entry gate): an operator cancel that landed before this run started
+    # aborts the whole fan-out — nothing is sent. The per-iteration re-check below stops an in-flight
+    # kill. 'cancelled' is a real terminal; the operator sets it via ops/run-control/kill-campaign.
+    if _campaign_status(conn, tenant_id_str, campaign_id_str) == "cancelled":
+        logger.info(
+            "execute_approved_campaign: killed_before_start tenant=%s campaign=%s",
+            tenant_id_str, campaign_id_str,
+        )
+        return {"killed": len(recipients), "pre_gate_blocked": 1}
 
-        # --- VT-321 complaint-freeze gate (#20, fail-closed, non-configurable) ---
-        # An OPEN complaint freezes ALL selling to this customer — no exceptions,
-        # never owner-overridable. Checked FIRST and independently of opt-out:
-        # we do NOT call VT-45, write a distinct 'complaint_freeze' skip marker,
-        # count it separately, and continue. Fail-closed: ONLY 'open' triggers;
-        # missing / 'none' / 'resolved' / NULL → sellable.
-        if complaint_status in _COMPLAINT_FREEZE_STATUSES:
-            try:
-                _write_complaint_freeze_skip_ledger(
-                    conn, tenant_id_str, customer_id_str, idempotency_key,
-                )
-            except Exception as exc:  # noqa: BLE001
-                # Skip-ledger write is best-effort; the no-call is the actual
-                # freeze. Log (no PII) but don't fail the loop.
+    # VT-460 gap (c): the gated extent of the customer-send fan-out. The transport refuses a
+    # customer send outside this context; the campaign path is a legitimate gated caller (the
+    # onboarded + WABA pre-gate ran above; per-recipient consent/opt-out/complaint gates run in the
+    # loop + VT-45). A future direct un-gated caller to a customer phone fails closed.
+    from orchestrator.utils.twilio_send import customer_send_context
+
+    with customer_send_context():
+        for idx, recipient in enumerate(recipients):
+            # VT-558 campaign true-kill (in-flight gate): an operator cancel that lands mid-fan-out
+            # stops the loop at the next recipient boundary — the remaining recipients are counted
+            # ``killed`` and never sent. Fresh read (autocommit loop) → the committed kill is seen.
+            if _campaign_status(conn, tenant_id_str, campaign_id_str) == "cancelled":
+                killed = len(recipients) - idx
                 logger.info(
-                    "execute_approved_campaign: complaint_skip_ledger_write_error "
-                    "tenant=%s customer=%s err=%s",
+                    "execute_approved_campaign: killed_in_flight tenant=%s campaign=%s "
+                    "sent_so_far=%d remaining_killed=%d",
+                    tenant_id_str, campaign_id_str, sent, killed,
+                )
+                break
+
+            customer_id_str = recipient["customer_id"]
+            opt_out_status: str | None = recipient.get("opt_out_status")
+            complaint_status: str | None = recipient.get("complaint_status")
+            idempotency_key = f"{campaign_id_str}:{customer_id_str}"
+
+            # --- VT-321 complaint-freeze gate (#20, fail-closed, non-configurable) ---
+            # An OPEN complaint freezes ALL selling to this customer — no exceptions,
+            # never owner-overridable. Checked FIRST and independently of opt-out:
+            # we do NOT call VT-45, write a distinct 'complaint_freeze' skip marker,
+            # count it separately, and continue. Fail-closed: ONLY 'open' triggers;
+            # missing / 'none' / 'resolved' / NULL → sellable.
+            if complaint_status in _COMPLAINT_FREEZE_STATUSES:
+                try:
+                    _write_complaint_freeze_skip_ledger(
+                        conn, tenant_id_str, customer_id_str, idempotency_key,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    # Skip-ledger write is best-effort; the no-call is the actual
+                    # freeze. Log (no PII) but don't fail the loop.
+                    logger.info(
+                        "execute_approved_campaign: complaint_skip_ledger_write_error "
+                        "tenant=%s customer=%s err=%s",
+                        tenant_id_str, customer_id_str, type(exc).__name__,
+                    )
+                skipped_complaint_freeze += 1
+                logger.info(
+                    "execute_approved_campaign: skipped_complaint_freeze tenant=%s "
+                    "customer=%s status=%s",
+                    tenant_id_str, customer_id_str, complaint_status,
+                )
+                continue
+
+            # --- Defence-in-depth consent gate (CL-421) ---
+            # VT-45 also gates this, but we short-circuit to write a
+            # 'skipped_opt_out' marker instead of an 'unauthorized' envelope
+            # (cleaner audit trail; avoids unnecessary pool churn).
+            if opt_out_status in _REFUSED_OPT_OUT_STATUSES:
+                try:
+                    _write_opt_out_skip_ledger(
+                        conn, tenant_id_str, customer_id_str, idempotency_key,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    # Writing the skip ledger row is best-effort; log but don't
+                    # fail the loop (defence-in-depth: the no-call is sufficient).
+                    logger.info(
+                        "execute_approved_campaign: skip_ledger_write_error "
+                        "tenant=%s customer=%s err=%s",
+                        tenant_id_str, customer_id_str, type(exc).__name__,
+                    )
+                skipped_opt_out += 1
+                logger.info(
+                    "execute_approved_campaign: skipped_opt_out tenant=%s "
+                    "customer=%s status=%s",
+                    tenant_id_str, customer_id_str, opt_out_status,
+                )
+                continue
+
+            # --- Send via VT-45 (handles idempotency, rate limit, campaign_messages) ---
+            try:
+                payload = SendWhatsappTemplateInput(
+                    tenant_id=tenant_id_str,
+                    customer_id=customer_id_str,
+                    template_id=template_id,
+                    language=language,  # type: ignore[arg-type]
+                    template_params=body_params,
+                    idempotency_key=idempotency_key,
+                )
+                result: SendWhatsappTemplateOutput = _send_fn(payload, pool=send_pool)
+            except Exception as exc:  # noqa: BLE001
+                # Unexpected exception from the send path — log and continue.
+                logger.info(
+                    "execute_approved_campaign: send_exception tenant=%s "
+                    "customer=%s err=%s",
                     tenant_id_str, customer_id_str, type(exc).__name__,
                 )
-            skipped_complaint_freeze += 1
-            logger.info(
-                "execute_approved_campaign: skipped_complaint_freeze tenant=%s "
-                "customer=%s status=%s",
-                tenant_id_str, customer_id_str, complaint_status,
-            )
-            continue
+                failed += 1
+                continue
 
-        # --- Defence-in-depth consent gate (CL-421) ---
-        # VT-45 also gates this, but we short-circuit to write a
-        # 'skipped_opt_out' marker instead of an 'unauthorized' envelope
-        # (cleaner audit trail; avoids unnecessary pool churn).
-        if opt_out_status in _REFUSED_OPT_OUT_STATUSES:
-            try:
-                _write_opt_out_skip_ledger(
-                    conn, tenant_id_str, customer_id_str, idempotency_key,
-                )
-            except Exception as exc:  # noqa: BLE001
-                # Writing the skip ledger row is best-effort; log but don't
-                # fail the loop (defence-in-depth: the no-call is sufficient).
+            if result.status in ("sent", "dry_run"):
+                sent += 1
                 logger.info(
-                    "execute_approved_campaign: skip_ledger_write_error "
-                    "tenant=%s customer=%s err=%s",
-                    tenant_id_str, customer_id_str, type(exc).__name__,
-                )
-            skipped_opt_out += 1
-            logger.info(
-                "execute_approved_campaign: skipped_opt_out tenant=%s "
-                "customer=%s status=%s",
-                tenant_id_str, customer_id_str, opt_out_status,
-            )
-            continue
-
-        # --- Send via VT-45 (handles idempotency, rate limit, campaign_messages) ---
-        try:
-            payload = SendWhatsappTemplateInput(
-                tenant_id=tenant_id_str,
-                customer_id=customer_id_str,
-                template_id=template_id,
-                language=language,  # type: ignore[arg-type]
-                template_params=body_params,
-                idempotency_key=idempotency_key,
-            )
-            result: SendWhatsappTemplateOutput = _send_fn(payload, pool=send_pool)
-        except Exception as exc:  # noqa: BLE001
-            # Unexpected exception from the send path — log and continue.
-            logger.info(
-                "execute_approved_campaign: send_exception tenant=%s "
-                "customer=%s err=%s",
-                tenant_id_str, customer_id_str, type(exc).__name__,
-            )
-            failed += 1
-            continue
-
-        if result.status in ("sent", "dry_run"):
-            sent += 1
-            logger.info(
-                "execute_approved_campaign: sent tenant=%s customer=%s "
-                "sid=%s status=%s",
-                tenant_id_str, customer_id_str,
-                result.message_sid, result.status,
-            )
-            # VT-320: the agent ACTED on this customer (a recovery contact) →
-            # record a customer-referencing L2 marker so VT-76's reconstitution
-            # sweep has real rows to anonymize on opt-out (else a forever no-op).
-            # Best-effort + idempotent per (customer, campaign): a marker failure
-            # must NOT break the send loop. Own tenant_connection (RLS GUC).
-            try:
-                record_customer_action_marker(
+                    "execute_approved_campaign: sent tenant=%s customer=%s "
+                    "sid=%s status=%s",
                     tenant_id_str, customer_id_str,
-                    action="campaign_send", dedup_source=campaign_id_str,
+                    result.message_sid, result.status,
                 )
-            except Exception:  # noqa: BLE001 — marker is best-effort observability
+                # VT-320: the agent ACTED on this customer (a recovery contact) →
+                # record a customer-referencing L2 marker so VT-76's reconstitution
+                # sweep has real rows to anonymize on opt-out (else a forever no-op).
+                # Best-effort + idempotent per (customer, campaign): a marker failure
+                # must NOT break the send loop. Own tenant_connection (RLS GUC).
+                try:
+                    record_customer_action_marker(
+                        tenant_id_str, customer_id_str,
+                        action="campaign_send", dedup_source=campaign_id_str,
+                    )
+                except Exception:  # noqa: BLE001 — marker is best-effort observability
+                    logger.info(
+                        "execute_approved_campaign: vt320_marker_error tenant=%s customer=%s",
+                        tenant_id_str, customer_id_str,
+                    )
+            elif result.status == "unauthorized":
+                # VT-45 refused — opt_out caught by the tool (should not reach
+                # here if our defence-in-depth gate runs first, but VT-45's
+                # consent gate is authoritative). Count as skipped.
+                skipped_opt_out += 1
                 logger.info(
-                    "execute_approved_campaign: vt320_marker_error tenant=%s customer=%s",
+                    "execute_approved_campaign: unauthorized tenant=%s customer=%s "
+                    "code=%s",
                     tenant_id_str, customer_id_str,
+                    result.error_envelope.code if result.error_envelope else "unknown",
                 )
-        elif result.status == "unauthorized":
-            # VT-45 refused — opt_out caught by the tool (should not reach
-            # here if our defence-in-depth gate runs first, but VT-45's
-            # consent gate is authoritative). Count as skipped.
-            skipped_opt_out += 1
-            logger.info(
-                "execute_approved_campaign: unauthorized tenant=%s customer=%s "
-                "code=%s",
-                tenant_id_str, customer_id_str,
-                result.error_envelope.code if result.error_envelope else "unknown",
-            )
-        else:
-            # rate_limited, error, or any other non-success status.
-            failed += 1
-            logger.info(
-                "execute_approved_campaign: send_failed tenant=%s customer=%s "
-                "status=%s code=%s",
-                tenant_id_str, customer_id_str,
-                result.status,
-                result.error_envelope.code if result.error_envelope else "none",
-            )
+            else:
+                # rate_limited, error, or any other non-success status.
+                failed += 1
+                logger.info(
+                    "execute_approved_campaign: send_failed tenant=%s customer=%s "
+                    "status=%s code=%s",
+                    tenant_id_str, customer_id_str,
+                    result.status,
+                    result.error_envelope.code if result.error_envelope else "none",
+                )
 
     # --- Advance campaign status → sent (D2: stop here, no attribution) ---
     # VT-65 PR-2: the status UPDATE + campaign_sent emit (with the cohort for
     # TARGETED edges) atomic in one txn — NOT the I/O send loop above.
-    from orchestrator.knowledge.kg_emit import drain_kg_events, emit_kg_event
-    from orchestrator.knowledge.kg_vocab import KgEventType
+    # VT-558: a killed campaign is NOT advanced to 'sent' (it stays 'cancelled') and does NOT emit
+    # CAMPAIGN_SENT — only the recipients actually contacted before the kill went out.
+    # VT-562 follow-up (review F2): the sends above already HAPPENED — from here down everything is
+    # bookkeeping, and a bookkeeping failure must never discard the summary (it is the only truth
+    # the owner-outcome report reads; raising here silently un-tells the owner about real sends).
+    status_advance_failed = False
+    if killed == 0:
+        from orchestrator.knowledge.kg_emit import drain_kg_events, emit_kg_event
+        from orchestrator.knowledge.kg_vocab import KgEventType
 
-    with conn.transaction():
-        _advance_campaign_status(conn, tenant_id_str, campaign_id_str)
-        emit_kg_event(conn, KgEventType.CAMPAIGN_SENT, tenant_id_str, {
-            "campaign_id": campaign_id_str,
-            "customer_ids": [r["customer_id"] for r in recipients],
-        })
-    drain_kg_events(tenant_id_str)
+        try:
+            with conn.transaction():
+                _advance_campaign_status(conn, tenant_id_str, campaign_id_str)
+                emit_kg_event(conn, KgEventType.CAMPAIGN_SENT, tenant_id_str, {
+                    "campaign_id": campaign_id_str,
+                    "customer_ids": [r["customer_id"] for r in recipients],
+                })
+        except Exception:  # noqa: BLE001 — sends happened; the summary must survive bookkeeping
+            status_advance_failed = True
+            logger.error(
+                "execute_approved_campaign: status-advance/CAMPAIGN_SENT emit FAILED after real "
+                "sends (tenant=%s campaign=%s) — campaign NOT advanced to 'sent'. Do NOT redrive "
+                "without checking the per-recipient send_result audit rows first (re-execution "
+                "would double-send).",
+                tenant_id_str, campaign_id_str, exc_info=True,
+            )
+        else:
+            try:
+                drain_kg_events(tenant_id_str)
+            except Exception:  # noqa: BLE001 — post-commit observability; outbox drain will retry
+                logger.warning(
+                    "execute_approved_campaign: KG drain failed post-advance (tenant=%s "
+                    "campaign=%s) — outbox rows persist for the scheduled drain",
+                    tenant_id_str, campaign_id_str, exc_info=True,
+                )
 
     summary = {
         "sent": sent,
         "skipped_opt_out": skipped_opt_out,
         "skipped_complaint_freeze": skipped_complaint_freeze,
         "failed": failed,
+        "killed": killed,
     }
+    if status_advance_failed:
+        # Honest marker for the audit trail + operators; the owner report reads only the counts.
+        summary["status_advance_failed"] = True
     logger.info(
         "execute_approved_campaign: done tenant=%s campaign=%s summary=%s",
         tenant_id_str, campaign_id_str, summary,

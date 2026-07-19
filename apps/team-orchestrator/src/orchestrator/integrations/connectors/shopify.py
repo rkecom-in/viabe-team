@@ -1,11 +1,26 @@
 """VT-208 — Shopify connector.
 
-Shopify Admin REST API 2024-04. CLIENT-CREDENTIALS grant (VT-208 rework
-2026-06-01): Shopify removed in-UI Admin API access-token paste, so auth is now
-the OAuth2 client_credentials grant — app Client ID + Client Secret → POST the
-store token endpoint → short-lived access_token. ZERO manual paste (CL-421).
-Works because the app + dev store are in the SAME ORG (dev: the eComVibe Dev
-Dashboard app + the kk4xva-di dev store; CL-422 synthetic only).
+Shopify Admin REST API 2026-04 (VT-422: bumped from 2024-04 — outside Shopify's ~1yr supported window by 2026-06).
+
+CANONICAL AUTH = OAuth authorization-code install (VT-283 / VT-422)
+------------------------------------------------------------------
+VT-422 promoted Shopify to the PUBLIC OAuth app. The canonical, production auth
+path is the standard Shopify OAuth authorization-code install (``build_oauth_install_url``
+→ owner consent → callback → ``_oauth_exchange_and_store`` → OFFLINE token). This is
+the only path that works for a REAL merchant on a DIFFERENT org, and it is what the
+registry now declares (``auth_flow="oauth2"``). ZERO manual paste (CL-421).
+
+client_credentials = DEV / own-store TEST FALLBACK ONLY
+-------------------------------------------------------
+The OAuth2 client_credentials grant (``_grant_and_store``, ``_shopify_env``,
+``SHOPIFY_STORE_DOMAIN``, ``shopify-dev.env``) is RETAINED as the dev/own-store
+test fallback — it is same-org-only (app + store in ONE org; dev: the eComVibe Dev
+Dashboard app + the kk4xva-di dev store; CL-422 synthetic only) and is the only way
+to exercise pulls against our own dev store without a different-org merchant. It is
+NOT the canonical path and is never used for a real merchant install. Do NOT delete
+it (VT-422 GAP-4).
+
+client_credentials grant mechanics (test fallback):
 
 Grant (confirmed vs shopify.dev get-api-access-tokens, Cowork 2026-06-01):
     POST https://{SHOPIFY_STORE_DOMAIN}/admin/oauth/access_token
@@ -64,14 +79,18 @@ import re
 import secrets
 from base64 import b64decode, b64encode
 from collections.abc import Callable
-from datetime import UTC, datetime, timedelta
+from dataclasses import dataclass
+from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from typing import Any, cast
 from urllib.parse import urlencode
 from uuid import UUID
 
 import httpx
 
-from orchestrator.graph import get_pool
+from orchestrator.integrations.ingest import CanonicalRow, SaleLine
+
+from orchestrator.db import tenant_connection
 from orchestrator.integrations.connectors.base import ConnectorBase
 from orchestrator.integrations.registry import get_connector
 from orchestrator.integrations.schemas import ConnectorSpec
@@ -83,11 +102,29 @@ from orchestrator.observability.encrypt_value import (
 logger = logging.getLogger(__name__)
 
 
-_SHOPIFY_API_VERSION = "2024-04"
-# Scopes the app is granted in the Dev Dashboard (Cowork VT-208). read_orders
-# covers abandoned checkouts; if the live walk 403s the /checkouts.json pull,
-# read_checkouts must be added in the Dashboard (flag for the live canary).
-_REQUIRED_SCOPES = {"read_customers", "read_orders", "read_products"}
+_SHOPIFY_API_VERSION = "2026-04"
+# VT-422 GAP-0 — read + WRITE scopes for the PUBLIC OAuth app. This constant is the
+# SINGLE SOURCE: the authorize URL, the offline token, and Shopify's consent screen
+# all derive from it, so widening it here is all the install needs to request write.
+# It is the PIN consumed at the canary (which needs Fazal's Partner app). read_orders
+# covers abandoned checkouts; if the live walk 403s /checkouts.json, read_checkouts
+# is added in the Dashboard (flag for the live canary).
+#   read_orders    — sale-of-record substrate (backfill + orders/create)
+#   read_customers — identity anchor (phone/email/name)
+#   read_products  — product context for sales-recovery messaging
+# Write block — Fazal decision pending (Cowork relaying): write_orders only vs
+# write_orders + write_customers. Default to BOTH for the build; if an unused write
+# scope spooks Shopify review, drop write_customers to a fast-follow and keep
+# write_orders (the e2e backdated-seed unblock).
+#   write_orders    — e2e backdated-seed via the app token + future order-action agent
+#   write_customers — future write-agent (tag/note/update customer for recovery campaigns)
+_REQUIRED_SCOPES = {
+    "read_customers",
+    "read_orders",
+    "read_products",
+    "write_orders",
+    "write_customers",
+}
 _TOKEN_PATH = "/admin/oauth/access_token"
 _AUTHORIZE_PATH = "/admin/oauth/authorize"
 _EXPIRY_SKEW = timedelta(minutes=5)  # proactive re-grant before the 24h TTL lapses
@@ -251,6 +288,223 @@ def _default_grant(store_domain: str, client_id: str, client_secret: str) -> dic
     return cast("dict[str, Any]", resp.json())
 
 
+# ---------- VT-417: Shopify order → CanonicalRow mapping ----------
+# The single Shopify-specific mapper. PII boundary (§3): persists ONLY
+# phone / email / name + the order TOTAL as ONE sale magnitude. Address and
+# line-items are NEVER read into the CanonicalRow — they are dropped here.
+
+_SHOPIFY_ACQUIRED_VIA = "shopify"
+_INR = "INR"
+
+
+def _normalize_e164(raw: object) -> str | None:
+    """Best-effort E.164 for an Indian-first store; ``None`` if un-normalizable.
+
+    Shopify usually stores E.164 already for IN. If we cannot confidently
+    normalize, return ``None`` and let email / name anchor the customer (never
+    invent a number). Mirrors the methods' ``contacts._normalize_phone`` shape but
+    drops the confidence channel (connector data is structured, not OCR).
+
+    VT-487 (SAFETY): coerce to str FIRST (a JSON phone arriving as a number, or a
+    re-imported float, never survives numeric — the old ``str``-typed signature would
+    AttributeError on ``.strip()``) and REJECT any 'e'/'E'/'.' scientific-notation /
+    decimal artifact — a corrupted numeric phone — instead of digit-gluing it into a
+    plausible-but-wrong number (the Twilio 21211 breach).
+    """
+    if not raw:
+        return None
+    s = str(raw).strip()
+    if not s:
+        return None
+    if "e" in s or "E" in s or "." in s:
+        return None  # VT-487: scientific-notation / decimal = corrupted numeric phone → reject
+    has_plus = s.startswith("+")
+    digits = re.sub(r"\D", "", s)
+    if not digits:
+        return None
+    if has_plus and digits.startswith("91") and len(digits) == 12:
+        return "+" + digits
+    if has_plus:
+        return "+" + digits  # already international (non-IN) — trust it
+    if len(digits) == 10:
+        return "+91" + digits
+    if len(digits) == 12 and digits.startswith("91"):
+        return "+" + digits
+    if len(digits) == 11 and digits.startswith("0"):
+        return "+91" + digits[1:]
+    return None  # ambiguous bare digits — don't guess a country code
+
+
+def _total_price_to_paise(total_price: Any) -> int | None:
+    """Shopify ``total_price`` (major-unit decimal STRING, e.g. "499.00") → paise.
+
+    ``round(Decimal(total_price) * 100)``. Returns ``None`` on a missing /
+    unparseable / negative value (the sale is then skipped, not written as 0).
+    """
+    if total_price is None:
+        return None
+    try:
+        paise = int((Decimal(str(total_price)) * 100).to_integral_value())
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+    return paise if paise >= 0 else None
+
+
+def _order_date(raw: Any) -> date | None:
+    """A Shopify order date (ISO 8601) → date-only (the ledger stores DATE). The caller passes
+    ``processed_at`` (the real transaction date) with a ``created_at`` fallback — VT-447:
+    ``processed_at`` is the paid/transaction date AND the only date that STICKS on an API-created
+    order (Shopify forces ``created_at``=now on order creation), so it is both more correct for
+    real merchants and the field a backdated seed order registers under."""
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(str(raw).replace("Z", "+00:00")).date()
+    except (ValueError, TypeError):
+        # Fallback: a bare ISO date prefix.
+        try:
+            return date.fromisoformat(str(raw).strip()[:10])
+        except (ValueError, TypeError):
+            return None
+
+
+@dataclass(frozen=True)
+class _OrderMapResult:
+    """The mapper outcome — the row plus WHY a sale was/wasn't attached, so the
+    caller can count ``skipped_non_inr`` without re-deriving currency."""
+
+    row: CanonicalRow | None         # None when the order has no identity anchor
+    skipped_non_inr: bool = False
+
+
+def shopify_order_to_canonical(payload: dict[str, Any]) -> _OrderMapResult:
+    """Map a Shopify ``orders/create`` (or backfill ``orders.json``) order into a
+    ``CanonicalRow``. Identity = phone(E.164) / email / name. Sale = the order
+    TOTAL → ONE ``SaleLine`` (confidence 1.0 — structured API data is certain).
+
+    Currency guard (§2.3): ``amount_paise`` is INR-minor. A non-INR order keeps
+    the customer (identity) but SKIPS the sale (no FX in scope) and is flagged
+    ``skipped_non_inr`` so the caller can count it — NEVER silently converted.
+
+    Address and order line-items are NOT read (PII boundary, §3).
+    """
+    customer = payload.get("customer") or {}
+    phone_raw = (
+        customer.get("phone")
+        or (payload.get("shipping_address") or {}).get("phone")
+        or payload.get("phone")
+    )
+    phone_e164 = _normalize_e164(phone_raw)
+    email_raw = customer.get("email") or payload.get("email")
+    email = email_raw.strip().lower() if isinstance(email_raw, str) and email_raw.strip() else None
+    display_name = (
+        f"{customer.get('first_name', '')} {customer.get('last_name', '')}".strip()
+        or None
+    )
+
+    if not (phone_e164 or email or display_name):
+        return _OrderMapResult(row=None)
+
+    sales: tuple[SaleLine, ...] = ()
+    skipped_non_inr = False
+    currency = (payload.get("currency") or "").upper()
+    paise = _total_price_to_paise(payload.get("total_price"))
+    # VT-447: processed_at (the real transaction date that also sticks on backdated/API orders),
+    # falling back to created_at for older payloads that omit it.
+    entry_date = _order_date(payload.get("processed_at") or payload.get("created_at"))
+
+    if paise is not None and entry_date is not None:
+        if currency and currency != _INR:
+            # Non-INR: keep identity, skip the sale (no FX). Log the CURRENCY only,
+            # never the amount-as-rupees (CL-390).
+            skipped_non_inr = True
+            logger.info("shopify_order_to_canonical: non-INR order skipped sale currency=%s", currency)
+        else:
+            sales = (SaleLine(amount_paise=paise, entry_date=entry_date, confidence=1.0),)
+
+    return _OrderMapResult(
+        row=CanonicalRow(
+            phone_e164=phone_e164,
+            email=email,
+            display_name=display_name,
+            sales=sales,
+            consent=None,  # option A (§2.4): Shopify writes NO consent
+        ),
+        skipped_non_inr=skipped_non_inr,
+    )
+
+
+# ---------- VT-425 Phase A: Shopify SAMPLE row → CanonicalRow (fixed-schema auto-map) ----------
+# The `pull_sample` shape is /customers.json + /checkouts.json objects (NOT orders) —
+# a different schema than `shopify_order_to_canonical` (which maps /orders.json). Phase A
+# onboarding auto-maps Shopify's KNOWN, FIXED customer/checkout schema → CanonicalRow with
+# NO owner mapping form and NO field-mapping reasoner (CL-443 fixed-schema auto-map). Because
+# the schema is fixed, NO column NAME or cell VALUE is ever sent to an LLM (CL-104 satisfied by
+# construction — Phase A's map path has no LLM call at all).
+#
+# PII boundary (§3, identical to the order mapper): persist ONLY phone(E.164) / email / name
+# + (for abandoned checkouts) the checkout TOTAL as ONE sale magnitude. Address / line-items
+# are NEVER read into the CanonicalRow.
+
+
+def shopify_sample_row_to_canonical(payload: dict[str, Any]) -> CanonicalRow | None:
+    """Map ONE Shopify ``pull_sample`` row (a /customers.json customer OR a
+    /checkouts.json abandoned checkout, tagged ``__source``) → ``CanonicalRow``.
+
+    Fixed-schema (no owner mapping, no reasoner):
+      * ``__source == 'customers'`` — identity only (phone / email / first+last name).
+        A bare contact carries no sale (empty ``sales``).
+      * ``__source == 'abandoned_checkouts'`` — identity + an INR ``total_price`` →
+        ONE ``SaleLine`` (an abandoned-checkout value is a real demand signal; the
+        Sales-Recovery substrate wants it). Non-INR keeps identity, skips the sale
+        (no FX — mirrors the order mapper's currency guard).
+
+    Returns ``None`` when no identity anchor (phone / email / name) is present.
+    PII boundary: address / line-items are dropped here, never read into CanonicalRow.
+    """
+    source = payload.get("__source")
+    # /checkouts.json nests the buyer under "customer"; /customers.json is the buyer itself.
+    customer = payload.get("customer") if source == "abandoned_checkouts" else payload
+    customer = customer or {}
+
+    phone_raw = (
+        customer.get("phone")
+        or payload.get("phone")
+        or (customer.get("default_address") or {}).get("phone")
+        or (payload.get("shipping_address") or {}).get("phone")
+    )
+    phone_e164 = _normalize_e164(phone_raw)
+    email_raw = customer.get("email") or payload.get("email")
+    email = (
+        email_raw.strip().lower()
+        if isinstance(email_raw, str) and email_raw.strip()
+        else None
+    )
+    display_name = (
+        f"{customer.get('first_name', '')} {customer.get('last_name', '')}".strip()
+        or None
+    )
+
+    if not (phone_e164 or email or display_name):
+        return None
+
+    sales: tuple[SaleLine, ...] = ()
+    if source == "abandoned_checkouts":
+        currency = (payload.get("currency") or "").upper()
+        paise = _total_price_to_paise(payload.get("total_price"))
+        entry_date = _order_date(payload.get("created_at"))
+        if paise is not None and entry_date is not None and (not currency or currency == _INR):
+            sales = (SaleLine(amount_paise=paise, entry_date=entry_date, confidence=1.0),)
+
+    return CanonicalRow(
+        phone_e164=phone_e164,
+        email=email,
+        display_name=display_name,
+        sales=sales,
+        consent=None,  # option A — Shopify writes no consent (detector AND-gate stays closed)
+    )
+
+
 class ShopifyConnector(ConnectorBase):
     """Shopify Admin API connector."""
 
@@ -335,8 +589,9 @@ class ShopifyConnector(ConnectorBase):
         )
         encrypted = encrypt_value(str(access_token))
         push_secret = secrets.token_urlsafe(32)
-        pool = get_pool()
-        with pool.connection() as conn:
+        # VT-608 raw-pool sweep (mirrors VT-603's own swap): RLS-scoped write keyed on the tenant
+        # this method was CALLED with — tenant_oauth_tokens has RLS enabled+forced (mig 033).
+        with tenant_connection(tenant_id) as conn:
             conn.execute(
                 """
                 INSERT INTO tenant_oauth_tokens (
@@ -367,7 +622,15 @@ class ShopifyConnector(ConnectorBase):
         }
 
     def _grant_and_store(self, tenant_id: UUID) -> dict[str, Any]:
-        """Run the client_credentials grant + persist the token (encrypted, 24h TTL)."""
+        """TEST / OWN-STORE FALLBACK ONLY (VT-422 GAP-4) — run the client_credentials
+        grant + persist the token (encrypted, 24h TTL).
+
+        Same-org-only (app + store in ONE org), so it CANNOT serve a real merchant on
+        a different org — that is the canonical OAuth-install path
+        (``_oauth_exchange_and_store``). Retained because it is the only way to
+        exercise pulls against our own dev store without a different-org merchant.
+        Do NOT delete; do NOT treat as the canonical auth path.
+        """
         client_id, client_secret, store_domain = _shopify_env()
         grant = self._grant_fn(store_domain, client_id, client_secret)
         access_token = grant.get("access_token")
@@ -384,8 +647,7 @@ class ShopifyConnector(ConnectorBase):
         encrypted = encrypt_value(str(access_token))
         expires_at = datetime.now(UTC) + timedelta(seconds=expires_in)
         push_secret = secrets.token_urlsafe(32)
-        pool = get_pool()
-        with pool.connection() as conn:
+        with tenant_connection(tenant_id) as conn:
             conn.execute(
                 """
                 INSERT INTO tenant_oauth_tokens (
@@ -434,14 +696,12 @@ class ShopifyConnector(ConnectorBase):
         return self._grant_and_store(tenant_id)
 
     def _read_token_row(self, tenant_id: UUID) -> dict[str, Any] | None:
-        pool = get_pool()
-        with pool.connection() as conn, conn.cursor() as cur:
-            cur.execute(
+        with tenant_connection(tenant_id) as conn:
+            raw = conn.execute(
                 "SELECT refresh_token_encrypted, shop_url, expires_at "
                 "FROM tenant_oauth_tokens WHERE tenant_id = %s AND connector_id = %s",
                 (str(tenant_id), self.connector_id),
-            )
-            raw = cur.fetchone()
+            ).fetchone()
         return cast("dict[str, Any] | None", raw)
 
     def get_access_token(self, tenant_id: UUID) -> tuple[str, str]:
@@ -537,24 +797,76 @@ class ShopifyConnector(ConnectorBase):
             for row in customers
         ]
 
+    def pull_orders(
+        self, tenant_id: UUID, since: datetime | None = None
+    ) -> list[dict[str, Any]]:
+        """VT-417 — initial-backfill ORDERS pull (the sale-of-record substrate).
+
+        ``pull_full`` only pulls ``/customers.json`` (identity, no sales). For
+        backfill of the Sales-Recovery substrate we need orders. Phase-1 cap = 250
+        (Shopify's default page_size); Link-header pagination beyond one page is a
+        VT-N follow-up (a known backfill ceiling for high-volume stores) — mirrors
+        the documented ``pull_full`` cap.
+        """
+        params: dict[str, str] = {"status": "any", "limit": "250"}
+        if since is not None:
+            params["updated_at_min"] = since.replace(microsecond=0).isoformat()
+        return self._request(
+            tenant_id, "/orders.json", params=params
+        ).get("orders", [])
+
+    def backfill_orders(
+        self, tenant_id: UUID, since: datetime | None = None
+    ) -> dict[str, int]:
+        """Pull orders (capped 250) → map each via ``shopify_order_to_canonical``
+        → land via ``ingest_customer_rows(acquired_via='shopify')`` (the SAME seam
+        the live webhook uses). Returns counts only (no PII).
+        """
+        from orchestrator.integrations.ingest import ingest_customer_rows
+
+        orders = self.pull_orders(tenant_id, since)
+        rows: list[CanonicalRow] = []
+        skipped_non_inr = 0
+        for order in orders:
+            mapped = shopify_order_to_canonical(order)
+            if mapped.skipped_non_inr:
+                skipped_non_inr += 1
+            if mapped.row is not None:
+                rows.append(mapped.row)
+        summary = ingest_customer_rows(
+            tenant_id, rows, acquired_via=_SHOPIFY_ACQUIRED_VIA
+        )
+        return {
+            "orders_pulled": len(orders),
+            "committed": summary.committed,
+            "sales_written": summary.sales_written,
+            "sales_skipped_duplicate": summary.sales_skipped_duplicate,
+            "ambiguous": summary.ambiguous,
+            "dropped": summary.dropped,
+            "skipped_non_inr": skipped_non_inr,
+        }
+
     # ---------- PUSH ----------
 
     def setup_push(self, tenant_id: UUID) -> dict[str, str]:
         """Register Shopify webhooks for checkouts + orders.
 
-        Hits POST /admin/api/.../webhooks.json for the 4 topics this
-        connector cares about. Each webhook signs with the same shop-
-        wide secret Shopify generates; we read it from
-        ``tenant_oauth_tokens.push_secret`` and document it back.
+        Hits POST /admin/api/.../webhooks.json for the 4 topics this connector cares
+        about. VT-422: an APP-registered webhook is signed by Shopify with the APP's
+        ``client_secret`` (``SHOPIFY_API_SECRET``) — NOT a per-tenant secret — so the
+        webhook handler verifies against the app secret (see api/shopify_webhook.py).
+        ``push_secret`` is vestigial for this OAuth path (retained for the sheet path);
+        it is read here only as an install precondition + echoed as a hint.
+
+        Wired to fire on OAuth-install success (api/shopify_oauth.py callback, VT-422)
+        so the webhooks actually register on install.
         """
-        pool = get_pool()
-        with pool.connection() as conn, conn.cursor() as cur:
-            cur.execute(
+        with tenant_connection(tenant_id) as conn:
+            raw = conn.execute(
                 "SELECT push_secret FROM tenant_oauth_tokens "
                 "WHERE tenant_id = %s AND connector_id = %s",
                 (str(tenant_id), self.connector_id),
-            )
-            raw = cur.fetchone()
+            ).fetchone()
         row = cast("dict[str, Any] | None", raw)
         if row is None or not row["push_secret"]:
             raise RuntimeError(
@@ -650,6 +962,7 @@ class ShopifyConnector(ConnectorBase):
             ).strip() or None,
             "order_amount": payload.get("total_price"),
             "order_date": payload.get("created_at"),
+            "currency": payload.get("currency"),  # VT-417 — money-row currency guard
             "acquired_via": "shopify",
             "__source": "shopify_webhook",
         }
@@ -668,6 +981,8 @@ __all__ = [
     "ShopifyConfigError",
     "ShopDomainError",
     "ShopifyConnector",
+    "shopify_order_to_canonical",
+    "shopify_sample_row_to_canonical",
     "validate_shop_domain",
     "verify_oauth_hmac",
 ]

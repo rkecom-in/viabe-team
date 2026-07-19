@@ -1,0 +1,34 @@
+{
+  "name": "onboarding_happy",
+  "domain": "onboarding",
+  "critical": false,
+  "setup_args": [
+    "--owner-inputs",
+    "true",
+    "--journey"
+  ],
+  "expected_fail": false,
+  "notes": "Fresh tenant (owner_inputs=true, NOT onboarded), journey ACTIVE with a pre-seeded 2-entry queue (confirm business_type='sweets' + gap 'about') — see VT-582 calibration fix: a synthetic tenant has no business_profile_draft/onboarding_journey unless `setup --journey` seeds them (real signup's post-create state), so WITHOUT it every reply here is the D1 fallback line, not a journey turn. Because the queue is already non-empty, step 1's text is treated as the ANSWER to the pre-seeded business_type confirm (NOT a bare 'entry tap' — there is no lazy-start greet when the queue isn't empty); the walker then advances to the 'about' gap, and step 3/4 continue against whatever the live turn-brain does next. assert_contains is intentionally sparse — the exact copy is owned by the journey turn-brain and evolves; tighten these against the FIRST live transcript. Run: `setup --owner-inputs true --journey --name convo-harness-<id>` (defaults: draft-type=sweets, draft-city=Chennai, draft-about a sweets-shop blurb) then `script <tenant> onboarding_happy.json`.",
+  "steps": [
+    {
+      "message": "Complete Setup",
+      "assert_no_silent": true,
+      "note": "The COMPLETE_SETUP entry tap (VT-567 live-drill path) — but with `--journey`'s queue already seeded (non-empty), this is NOT a lazy-start trigger; it lands as the reply to the pre-seeded business_type confirm. With ONBOARDING_TURN_BRAIN on (dev default) expect the brain to read it as a non-substantive ack and re-present/advance conversationally rather than record 'Complete Setup' as a literal business_type value; with the brain off the deterministic walker would record it as a correction. Either way expect a reply — that is the load-bearing check here."
+    },
+    {
+      "message": "Sundaram Sweets, a sweet shop in Chennai",
+      "assert_no_silent": true,
+      "note": "Owner supplies the business profile. Expect the journey to acknowledge and either confirm or ask the next question."
+    },
+    {
+      "message": "yes that's right",
+      "assert_no_silent": true,
+      "note": "Confirm the profile card. Expect a 'ready' / next-step acknowledgement."
+    },
+    {
+      "message": "what can you do for me",
+      "assert_no_silent": true,
+      "note": "Expect the integration offer / capability surface (connect your sales, etc.)."
+    }
+  ]
+}

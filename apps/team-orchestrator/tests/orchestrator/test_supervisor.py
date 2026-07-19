@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import os
 import warnings
-from typing import Any
+from typing import Annotated, Any
 from uuid import uuid4
 
 import pytest
@@ -36,6 +36,8 @@ from langchain_core.language_models.fake_chat_models import (  # noqa: E402
 )
 from langchain_core.messages import AIMessage  # noqa: E402
 from langchain_core.runnables import Runnable  # noqa: E402
+from langgraph.graph.message import add_messages  # noqa: E402
+from typing_extensions import TypedDict  # noqa: E402 — langgraph dep; after importorskip
 
 from orchestrator import routing  # noqa: E402
 from orchestrator.agent.schemas.campaign_plan import (  # noqa: E402
@@ -44,6 +46,13 @@ from orchestrator.agent.schemas.campaign_plan import (  # noqa: E402
     CampaignPlanProposed,
 )
 from orchestrator.supervisor import build_supervisor_graph  # noqa: E402
+
+# VT-602's compiled-subgraph wrapper test below defines a local TypedDict state
+# schema inside a test function. Because this module uses `from __future__ import
+# annotations`, TypedDict field annotations are lazily resolved via THIS module's
+# globals (langgraph's `get_type_hints` call), not the enclosing function's
+# locals — so `Annotated` / `add_messages` / `TypedDict` must be importable at
+# module level even though the TypedDict class itself is defined in the test.
 
 # v1.0 discriminated union: ``isinstance`` checks use the concrete
 # variant tuple, since ``CampaignPlan`` is a TypeAlias of
@@ -680,6 +689,93 @@ def test_supervisor_graph_spawn_vs_no_spawn_precedence(
     )
 
 
+# --- VT-484: a raised spawn no longer orphans tool_use / hangs the run --------
+
+
+def test_supervisor_raised_spawn_recovers_no_hang(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """VT-484 (a) — the LAUNCH-BLOCKER robustness fix, at the supervisor seam.
+
+    Reproduces the live win-back hang: the orchestrator fires a spawn tool whose
+    body RAISES (here ``spawn_integration``, whose ``_build_integration_update``
+    raises ``TenantIsolationError`` when ``run_id`` is absent from state — the
+    same class of in-tool raise the live drive hit). Before VT-484 this orphaned
+    the ``spawn_integration`` tool_use → the next Anthropic call would 400 →
+    the run hung at ``status='running'``, never reaching a terminal node.
+
+    With the VT-484 middleware the raised spawn becomes an ERROR ``ToolMessage``
+    (a valid tool_result), so the brain loop continues: the canned follow-up
+    AIMessage (no tool_call) routes to ``orchestrator_terminal`` and the graph
+    REACHES A TERMINAL STATE — proof the run recovered instead of hanging.
+
+    Keyless: a ToolBindableFake drives the model layer; the real
+    build_supervisor_graph / create_agent / ToolNode / VT-484 middleware run.
+    """
+    import orchestrator.supervisor as supervisor_mod
+
+    # Neutralise the DB-backed downstream nodes (parity with _run_supervisor_path);
+    # this test never reaches the specialist on the recovery path, but keep the
+    # graph pure-Python regardless.
+    monkeypatch.setattr(supervisor_mod, "collapse_node", lambda state: {})
+    monkeypatch.setattr(
+        supervisor_mod, "_sales_recovery_node", lambda state: {}
+    )
+
+    canned = [
+        # The orchestrator fires spawn_integration. With run_id ABSENT from
+        # initial state, _build_integration_update raises TenantIsolationError
+        # inside the tool body.
+        AIMessage(
+            content="",
+            tool_calls=[{"name": "spawn_integration", "args": {}, "id": "tc-int"}],
+        ),
+        # After the middleware turns the raise into an error tool_result, the
+        # brain continues; this no-tool_call AIMessage terminates the orchestrator
+        # → route_after_orchestrator returns 'terminal'.
+        AIMessage(content="Couldn't start that — let's try another way."),
+        AIMessage(content="cushion"),
+    ]
+
+    fake = ToolBindableFake(messages=iter(canned))
+    graph = build_supervisor_graph(model=fake)
+
+    trace: list[str] = []
+    final_state: dict[str, Any] = {}
+    # run_id DELIBERATELY OMITTED so the spawn builder raises (the in-tool raise
+    # under test). tenant_id present so the raise is a clean TenantIsolationError.
+    initial = {
+        "messages": [{"role": "user", "content": "connect my data"}],
+        "tenant_id": uuid4(),
+    }
+    for mode, chunk in graph.stream(initial, stream_mode=["updates", "values"]):
+        if mode == "updates":
+            trace.extend(chunk.keys())
+        elif mode == "values":
+            final_state = chunk
+
+    msgs = final_state.get("messages", [])
+    # 1. No orphan: the spawn_integration tool_use got an error tool_result.
+    from langchain_core.messages import ToolMessage
+
+    int_results = [
+        m
+        for m in msgs
+        if isinstance(m, ToolMessage) and getattr(m, "tool_call_id", None) == "tc-int"
+    ]
+    assert int_results, (
+        "spawn_integration raised but produced NO tool_result — tool_use 'tc-int' "
+        f"is orphaned (would 400 + hang). trace={trace}"
+    )
+    assert int_results[0].status == "error"
+    # 2. The run RECOVERED to a terminal node (did not hang). The no-spawn
+    # follow-up routed to orchestrator_terminal.
+    assert "orchestrator_terminal" in trace, (
+        f"run did not reach a terminal node after the raised spawn; trace={trace}"
+    )
+    assert final_state.get("terminated_without_spawn") is True
+
+
 # --- Exec-6.85: Context Composer bundle wire-through (keyless) ----------------
 
 
@@ -784,6 +880,55 @@ def test_sales_recovery_node_passes_bundle_to_agent(
     assert plan.run_id == run_id
 
 
+def test_manager_review_node_uses_observability_context_run_id_not_state_run_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§7D — ``_manager_review_node`` must thread the ACTIVE ObservabilityContext's run_id into
+    ``manager_review(run_id=...)``, NOT ``state['run_id']``. The two diverge for an enforce-loop
+    dispatch (``manager.workflow._dispatch_specialist_step`` enters
+    ``observability_context(run_id=UUID(task_id), ...)`` while ``state['run_id']`` carries the
+    per-attempt ``loop_run_id``) — using the wrong one would produce a ``reasoning_ref`` that never
+    joins to the turn's actual ``orchestrator_agent_turn`` reasoning row (see manager_review's own
+    docstring). This test seeds the two identities to DIFFERENT values to prove the node picks the
+    context one, not state's."""
+    from types import SimpleNamespace
+
+    import orchestrator.manager.review as review_mod
+    import orchestrator.supervisor as supervisor_mod
+    from orchestrator.observability.decorators import observability_context
+
+    captured: dict[str, Any] = {}
+
+    def _fake_manager_review(*a: Any, **kw: Any):  # noqa: ANN002, ANN003, ANN202
+        captured.update(kw)
+        return review_mod.ManagerReviewResult(
+            outcome="continue",
+            specialist_return=None,
+            decision=SimpleNamespace(revised_outcome=None),
+        )
+
+    monkeypatch.setattr(review_mod, "manager_review", _fake_manager_review)
+
+    tenant_id = uuid4()
+    task_id = uuid4()
+    step_id = uuid4()
+    ctx_run_id = uuid4()  # the ACTIVE ObservabilityContext's run_id
+    state_run_id = uuid4()  # a DIFFERENT value in state['run_id'] — the loop's per-attempt id
+
+    state = {
+        "tenant_id": tenant_id,
+        "manager_task_id": task_id,
+        "manager_step_id": step_id,
+        "run_id": state_run_id,
+    }
+
+    with observability_context(run_id=ctx_run_id, tenant_id=tenant_id):
+        supervisor_mod._manager_review_node(state)
+
+    assert captured["run_id"] == ctx_run_id
+    assert captured["run_id"] != state_run_id
+
+
 def test_sales_recovery_node_fails_loud_on_missing_bundle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -799,6 +944,134 @@ def test_sales_recovery_node_fails_loud_on_missing_bundle(
         supervisor_mod._sales_recovery_node(
             {"sales_recovery_context": None}
         )
+
+
+@pytest.mark.parametrize("agent_status", ["invalid", "refused", "terminated"])
+def test_sales_recovery_node_no_output_raises_structured_not_bare(
+    monkeypatch: pytest.MonkeyPatch, agent_status: str
+) -> None:
+    """VT-492 — when the agent terminates with NO usable output (output=None;
+    status in {invalid, refused, terminated} — e.g. a post-REVISE retry emits
+    non-dict terminal text classified ``agent_terminal_no_dict``), the node
+    MUST raise the STRUCTURED ``SpecialistNoOutputError`` (a control signal
+    dispatch_brain converts to a CLEAN 'escalated' terminal) — NOT a bare
+    RuntimeError that would orphan the run at status='running'. The exception
+    carries PII-safe fields only (specialist + terminal status + run/tenant
+    ids). The agent's own _emit_invalid_output FailureRecord already made the
+    invalid output observable, so this does not mask the real bug.
+    """
+    from types import SimpleNamespace
+
+    import orchestrator.supervisor as supervisor_mod
+    from orchestrator.agent.types import AgentResult
+    from orchestrator.supervisor import SpecialistNoOutputError
+
+    tenant_id = uuid4()
+    run_id = uuid4()
+
+    # Keyless / no-DB: the node only reads context.tenant_id + context.run_id
+    # before dispatching; stub the isolation re-query + the adapter + the agent.
+    monkeypatch.setattr(
+        "orchestrator.context_validator.validate_context_isolation",
+        lambda ctx: None,
+    )
+    monkeypatch.setattr(
+        supervisor_mod, "SelfEvaluateAdapter", lambda *, ctx: None
+    )
+    monkeypatch.setattr(
+        supervisor_mod,
+        "run_sales_recovery_agent",
+        lambda context, *, evaluator: AgentResult(
+            status=agent_status, output=None
+        ),
+    )
+
+    bundle = SimpleNamespace(tenant_id=tenant_id, run_id=run_id)
+
+    with pytest.raises(SpecialistNoOutputError) as excinfo:
+        supervisor_mod._sales_recovery_node(
+            {"sales_recovery_context": bundle}
+        )
+
+    exc = excinfo.value
+    assert exc.specialist == "sales_recovery"
+    assert exc.status == agent_status
+    assert exc.run_id == run_id
+    assert exc.tenant_id == tenant_id
+    # SpecialistNoOutputError is a RuntimeError subclass (so existing
+    # broad-except paths still see a RuntimeError) but a DISTINCT type
+    # dispatch_brain can catch specifically.
+    assert isinstance(exc, RuntimeError)
+
+
+def test_sales_recovery_node_parse_failure_resolves_to_clean_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """VT-494 (VT-492 sibling) — when the agent returns a NON-None output that
+    FAILS ``parse_campaign_plan`` (the CL-288 coerced variant dict whose
+    campaign_window / source_kind is invalid — the VT-493 root cause), the node
+    MUST convert the ValidationError into the STRUCTURED
+    ``SpecialistNoOutputError`` (which dispatch_brain maps to a CLEAN
+    'escalated' terminal) instead of letting the bare ValidationError escape
+    graph.invoke → dispatch_brain's catch-all re-raise → the run ORPHANS at
+    status='running' until the VT-481 reaper.
+
+    The output=None path (VT-492) is covered by
+    ``test_sales_recovery_node_no_output_raises_structured_not_bare``; this pins
+    the OTHER no-usable-plan terminal — non-None-but-unparseable. dispatch_brain
+    converting SpecialistNoOutputError → 'escalated' (and 'escalated' ∈
+    support_bot._UNRESOLVED so the owner gets the no-silence ack) is covered by
+    the VT-492 dispatch tests in test_dispatch_classify.py.
+    """
+    from types import SimpleNamespace
+
+    import orchestrator.supervisor as supervisor_mod
+    from orchestrator.agent.types import AgentResult
+    from orchestrator.supervisor import SpecialistNoOutputError
+
+    tenant_id = uuid4()
+    run_id = uuid4()
+
+    monkeypatch.setattr(
+        "orchestrator.context_validator.validate_context_isolation",
+        lambda ctx: None,
+    )
+    monkeypatch.setattr(
+        supervisor_mod, "SelfEvaluateAdapter", lambda *, ctx: None
+    )
+    # A non-None 'proposed' output with a BACKDATED campaign_window (the VT-493
+    # A1 failure) — also missing required proposed fields — so
+    # parse_campaign_plan raises a ValidationError exactly as it does on the
+    # agent's already-routed agent_schema_rejection terminal (status='invalid').
+    bad_output = {
+        "status": "proposed",
+        "campaign_window": {
+            "start": "2020-01-01T09:00:00+00:00",
+            "end": "2020-01-08T09:00:00+00:00",
+        },
+    }
+    monkeypatch.setattr(
+        supervisor_mod,
+        "run_sales_recovery_agent",
+        lambda context, *, evaluator: AgentResult(
+            status="invalid", output=bad_output
+        ),
+    )
+
+    bundle = SimpleNamespace(tenant_id=tenant_id, run_id=run_id)
+
+    with pytest.raises(SpecialistNoOutputError) as excinfo:
+        supervisor_mod._sales_recovery_node(
+            {"sales_recovery_context": bundle}
+        )
+
+    exc = excinfo.value
+    assert exc.specialist == "sales_recovery"
+    # the agent's terminal status is carried through (NOT a bare re-raise).
+    assert exc.status == "invalid"
+    assert exc.run_id == run_id
+    assert exc.tenant_id == tenant_id
+    assert isinstance(exc, RuntimeError)
 
 
 def test_spawn_sales_recovery_attaches_bundle_with_user_request(
@@ -865,3 +1138,190 @@ def test_spawn_sales_recovery_attaches_bundle_with_user_request(
     assert bundle.run_id == run_id
     assert bundle.user_request == USER_TEXT
     assert bundle.trigger_reason == "owner_initiated"
+
+
+# ---------------------------------------------------------------------------
+# VT-602 Part 1 — the structural exception net: ANY exception escaping a
+# ROSTER lane node (marketing/sales/finance/accounting/tech/cost_opt/
+# integration/onboarding_conductor/sales_recovery) converts to LaneNodeError
+# instead of propagating raw into graph.invoke() -> dispatch_brain's generic
+# `except Exception: raise` -> DBOS retries forever -> owner silence.
+# ---------------------------------------------------------------------------
+
+
+def test_wrap_lane_node_exceptions_converts_plain_function_node() -> None:
+    """The wrap_node=True shape (e.g. sales_recovery — a plain function, called
+    directly, never `.invoke`): a raised exception converts to LaneNodeError
+    carrying the lane name + the ORIGINAL exception's type name."""
+    from orchestrator.supervisor import LaneNodeError, _wrap_lane_node_exceptions
+
+    def _raising_node(state: dict) -> dict:
+        raise ValueError("boom in a plain function lane node")
+
+    wrapped = _wrap_lane_node_exceptions(_raising_node, lane="sales_recovery")
+
+    with pytest.raises(LaneNodeError) as excinfo:
+        wrapped({"messages": []})
+
+    assert excinfo.value.lane == "sales_recovery"
+    assert excinfo.value.exc_type == "ValueError"
+    assert isinstance(excinfo.value.__cause__, ValueError)
+
+
+def test_wrap_lane_node_exceptions_converts_compiled_subgraph_node() -> None:
+    """The wrap_node=False shape (e.g. marketing/integration/onboarding_conductor —
+    a REAL CompiledStateGraph sub-graph, called via `.invoke`, never directly
+    callable). Builds a real nested StateGraph (not a mock) so this proves the
+    wrapper actually works against the langgraph type it is meant for — pins the
+    VT-183 workaround (a bare closure, no functools.wraps) actually holds."""
+    from langgraph.graph import END, START, StateGraph
+
+    from orchestrator.supervisor import LaneNodeError, _wrap_lane_node_exceptions
+
+    class _InnerState(TypedDict, total=False):
+        messages: Annotated[list, add_messages]
+
+    def _inner_raises(state: _InnerState) -> dict:
+        raise RuntimeError("boom inside the lane's own sub-graph")
+
+    inner = StateGraph(_InnerState)
+    inner.add_node("only", _inner_raises)
+    inner.add_edge(START, "only")
+    inner.add_edge("only", END)
+    compiled_inner = inner.compile()
+
+    # A CompiledStateGraph is NOT itself callable (verified) — the wrapper must
+    # dispatch through `.invoke`, not `node_callable(state)` directly.
+    assert not callable(compiled_inner)
+
+    wrapped = _wrap_lane_node_exceptions(compiled_inner, lane="marketing")
+
+    with pytest.raises(LaneNodeError) as excinfo:
+        wrapped({"messages": []})
+
+    assert excinfo.value.lane == "marketing"
+    assert excinfo.value.exc_type == "RuntimeError"
+
+
+def test_wrap_lane_node_exceptions_reraises_graph_bubble_up_unchanged() -> None:
+    """The owner-approval interrupt() base class + subgraph-control signals must
+    propagate UNCHANGED — mirrors the VT-484 tool-error middleware's own carve-out.
+    Defense-in-depth: no current lane calls interrupt() itself (only the standalone
+    request_owner_approval gate node does, added OUTSIDE the ROSTER loop)."""
+    from langgraph.errors import GraphBubbleUp
+
+    from orchestrator.supervisor import _wrap_lane_node_exceptions
+
+    class _FakeBubbleUp(GraphBubbleUp):
+        pass
+
+    def _raises_bubble_up(state: dict) -> dict:
+        raise _FakeBubbleUp("subgraph control signal")
+
+    wrapped = _wrap_lane_node_exceptions(_raises_bubble_up, lane="marketing")
+
+    with pytest.raises(_FakeBubbleUp):
+        wrapped({"messages": []})
+
+
+def test_wrap_lane_node_exceptions_reraises_specialist_no_output_error_unchanged() -> None:
+    """SpecialistNoOutputError (VT-492's own typed signal) must pass through
+    UNCHANGED — dispatch_brain's MORE SPECIFIC `except SpecialistNoOutputError`
+    clause reads `.specialist` / `.status` to build a precise reason; re-boxing it
+    into a generic LaneNodeError would lose that precision and change the
+    established VT-492 reason format."""
+    from uuid import uuid4
+
+    from orchestrator.supervisor import SpecialistNoOutputError, _wrap_lane_node_exceptions
+
+    tenant_id, run_id = uuid4(), uuid4()
+
+    def _raises_no_output(state: dict) -> dict:
+        raise SpecialistNoOutputError(
+            specialist="sales_recovery", status="invalid", run_id=run_id, tenant_id=tenant_id
+        )
+
+    wrapped = _wrap_lane_node_exceptions(_raises_no_output, lane="sales_recovery")
+
+    with pytest.raises(SpecialistNoOutputError) as excinfo:
+        wrapped({"messages": []})
+
+    assert excinfo.value.specialist == "sales_recovery"
+    assert excinfo.value.status == "invalid"
+
+
+def test_wrap_lane_node_exceptions_happy_path_passes_through(monkeypatch) -> None:
+    """No exception -> the wrapper is fully transparent (same return value)."""
+    from orchestrator.supervisor import _wrap_lane_node_exceptions
+
+    def _ok_node(state: dict) -> dict:
+        return {"messages": ["ran fine"]}
+
+    wrapped = _wrap_lane_node_exceptions(_ok_node, lane="marketing")
+    assert wrapped({"messages": []}) == {"messages": ["ran fine"]}
+
+
+def test_build_supervisor_graph_lane_exception_converts_to_lane_node_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end: the REAL ``build_supervisor_graph`` wiring (not just the isolated
+    wrapper) converts a lane-node exception into ``LaneNodeError`` instead of letting
+    it propagate raw out of ``graph.invoke()`` — the exact escape hatch VT-602's
+    structural-net Part 1 closes. Drives the spawn path via a ToolBindableFake +
+    monkeypatches ``_sales_recovery_node`` (the roster's wrap_node=True node) to
+    raise, mirroring the neutralisation pattern ``_run_supervisor_path`` already
+    uses for this same node — but here it raises instead of no-op'ing."""
+    import orchestrator.context_builder as context_builder_mod
+    import orchestrator.supervisor as supervisor_mod
+    from orchestrator.supervisor import LaneNodeError
+
+    monkeypatch.setattr(
+        context_builder_mod, "_build_recent_campaigns", lambda tid: ([], False)
+    )
+    monkeypatch.setattr(
+        context_builder_mod, "_build_pending_owner_inputs", lambda tid: ([], False)
+    )
+    monkeypatch.setattr(
+        context_builder_mod,
+        "_build_ledger_summary",
+        lambda tid: (context_builder_mod.LedgerSummary(), True),
+    )
+    monkeypatch.setattr(
+        context_builder_mod,
+        "_build_l3_priors",
+        lambda tid, rid: (context_builder_mod.L3Priors(), False),
+    )
+    monkeypatch.setattr(
+        context_builder_mod,
+        "_build_l4_skills",
+        lambda tid, req: (context_builder_mod.L4Skills(), False),
+    )
+    monkeypatch.setattr(
+        "orchestrator.context_validator.validate_context_isolation", lambda ctx: None
+    )
+
+    def _sales_recovery_raises(state: Any) -> dict:
+        raise ValueError("marketing/sales-lane style crash inside the lane node")
+
+    monkeypatch.setattr(supervisor_mod, "_sales_recovery_node", _sales_recovery_raises)
+
+    spawn_messages = [
+        AIMessage(
+            content="",
+            tool_calls=[{"name": "spawn_sales_recovery", "args": {}, "id": "1"}],
+        ),
+    ]
+    fake = ToolBindableFake(messages=iter(spawn_messages))
+    graph = build_supervisor_graph(model=fake)
+
+    initial = {
+        "messages": [{"role": "user", "content": "recover dormant customers"}],
+        "tenant_id": uuid4(),
+        "run_id": uuid4(),
+    }
+
+    with pytest.raises(LaneNodeError) as excinfo:
+        graph.invoke(initial)
+
+    assert excinfo.value.lane == "sales_recovery"
+    assert excinfo.value.exc_type == "ValueError"

@@ -112,3 +112,161 @@ function _matchesFilters(
   }
   return true
 }
+
+
+// ─── Debug Events ──────────────────────────────────────────────────────────────
+// VT-515: Supabase Realtime subscription for debug_events INSERTs.
+// Mirrors the subscribePipelineSteps pattern above.
+
+export interface DebugEvent {
+  id: string
+  created_at: string
+  tenant_id: string | null
+  trace_id: string | null
+  failure_type: 'exception' | 'timeout' | 'vendor_error' | 'network' | 'validation' | 'crash' | 'silent_degrade'
+  component: string
+  operation: string | null
+  error_message: string | null
+  error_stack: string | null
+  context: unknown
+  severity: 'warning' | 'error' | 'critical'
+  impact: string | null
+  vendor: string | null
+  vendor_status: string | null
+  latency_ms: number | null
+}
+
+export interface DebugEventFilters {
+  /** Exact tenant_id match; null events (pre-tenant) still show when omitted. */
+  tenant_id?: string
+  /** Exact component match (e.g. 'discovery', 'create'). */
+  component?: string
+  /** Exact severity match: 'warning' | 'error' | 'critical'. */
+  severity?: string
+}
+
+export function subscribeDebugEvents(
+  client: SupabaseClient,
+  filters: DebugEventFilters,
+  onEvent: (event: DebugEvent) => void,
+): () => void {
+  const channel = client
+    .channel('ops:debug_events')
+    .on(
+      'postgres_changes' as never,
+      { event: 'INSERT', schema: 'public', table: 'debug_events' },
+      (payload: RealtimePostgresInsertPayload<DebugEvent>) => {
+        const row = payload.new
+        if (!_matchesDebugFilters(row, filters)) return
+        onEvent(row)
+      },
+    )
+    .subscribe()
+  return () => {
+    void client.removeChannel(channel)
+  }
+}
+
+/**
+ * Pure filter predicate — exported for testing.
+ * Returns true when the event passes ALL active filters (absent filter = pass-all).
+ * A null tenant_id on the event (pre-tenant signup failure) only passes a tenant_id
+ * filter if the filter explicitly matches null, which it never does — callers clear
+ * tenant_id filter to see pre-tenant events.
+ */
+export function _matchesDebugFilters(
+  event: DebugEvent,
+  filters: DebugEventFilters,
+): boolean {
+  if (filters.tenant_id !== undefined && event.tenant_id !== filters.tenant_id) return false
+  if (filters.component && event.component !== filters.component) return false
+  if (filters.severity && event.severity !== filters.severity) return false
+  return true
+}
+
+
+// ─── TM Audit Events ────────────────────────────────────────────────────────────
+// VT-516: Supabase Realtime subscription for tm_audit_log INSERTs.
+// Mirrors the subscribeDebugEvents pattern immediately above.
+//
+// Table is public.tm_audit_log (migrations/147_vt514_tm_audit_log.sql). The
+// realtime channel label is arbitrary client-side; the `table` selector MUST be
+// 'tm_audit_log' or the subscription silently receives zero rows. The operator
+// JWT (operator_claim=true) is gated by tm_audit_operator_select (mig 147), the
+// verbatim mirror of pipeline_steps_operator_select (mig 030).
+//
+// JSONB columns (input/decision/reasoning_ref/action/result) are typed `unknown`
+// — they carry redacted structured blobs, not a single scalar shape.
+
+export interface TmAuditEvent {
+  id: string
+  created_at: string
+  tenant_id: string
+  run_id: string | null
+  trace_id: string | null
+  snapshot_id: string | null
+  event_layer: 'knows' | 'gets' | 'decides' | 'does' | 'asks'
+  event_kind: string
+  actor: string
+  summary: string | null
+  input: unknown
+  decision: unknown
+  reasoning_ref: unknown
+  action: unknown
+  result: unknown
+  severity: 'info' | 'warning' | 'error' | 'critical'
+  status: string
+  parent_audit_id: string | null
+}
+
+export interface TmAuditFilters {
+  /** Exact tenant_id; absent = all tenants visible to the operator. */
+  tenant_id?: string
+  /** Filter to a single event_layer (knows/gets/decides/does/asks). */
+  event_layer?: string
+  /** Filter to a single event_kind. */
+  event_kind?: string
+  /** Filter to a single severity. */
+  severity?: string
+  /** Pin to a single run_id. */
+  run_id?: string
+}
+
+export function subscribeTmAuditEvents(
+  client: SupabaseClient,
+  filters: TmAuditFilters,
+  onEvent: (event: TmAuditEvent) => void,
+): () => void {
+  const channel = client
+    .channel('ops:tm_audit_log')
+    .on(
+      'postgres_changes' as never,
+      { event: 'INSERT', schema: 'public', table: 'tm_audit_log' },
+      (payload: RealtimePostgresInsertPayload<TmAuditEvent>) => {
+        const row = payload.new
+        if (!_matchesTmAuditFilters(row, filters)) return
+        onEvent(row)
+      },
+    )
+    .subscribe()
+  return () => {
+    void client.removeChannel(channel)
+  }
+}
+
+/**
+ * Pure filter predicate — exported for testing.
+ * Returns true when the event passes ALL active filters (absent = pass-all).
+ * tenant_id is always pinned by the tenant page, so the feed is never unscoped.
+ */
+export function _matchesTmAuditFilters(
+  event: TmAuditEvent,
+  filters: TmAuditFilters,
+): boolean {
+  if (filters.tenant_id !== undefined && event.tenant_id !== filters.tenant_id) return false
+  if (filters.event_layer && event.event_layer !== filters.event_layer) return false
+  if (filters.event_kind && event.event_kind !== filters.event_kind) return false
+  if (filters.severity && event.severity !== filters.severity) return false
+  if (filters.run_id && event.run_id !== filters.run_id) return false
+  return true
+}

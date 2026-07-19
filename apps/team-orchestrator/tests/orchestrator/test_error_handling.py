@@ -74,6 +74,51 @@ def test_default_strategy_for_each_failure_type(failure_type, expected):
     assert route_failure(_bare_record(failure_type)) == expected
 
 
+def test_vt501_failure_code_gives_actionable_step_name():
+    """VT-501 — the error_envelope alert surfaces ``pipeline_steps.step_name``,
+    falling back to the literal 'unknown' when it is NULL. ``_failure_code`` is the
+    per-row code ``_log_decision`` now writes: a schema rejection reads as
+    'schema_rejection' (distinct from a genuine error), and NOTHING coded reads as
+    'unknown'."""
+    from orchestrator.error_router import _failure_code
+
+    # AGENT_INVALID_OUTPUT lumps four causes; the source refines it.
+    cases = {
+        "agent_schema_rejection": "schema_rejection",
+        "agent_terminal_no_dict": "invalid_output_no_json",
+        "agent_variant_discriminator_invalid": "invalid_variant_discriminator",
+        "self_evaluate_gate": "self_evaluate_seam_error",
+    }
+    for source, code in cases.items():
+        rec = _bare_record(
+            FailureType.AGENT_INVALID_OUTPUT, metadata={"source": source}
+        )
+        assert _failure_code(rec) == code
+
+    # Invalid-output with no / unrecognised source → the base type, still not 'unknown'.
+    assert (
+        _failure_code(_bare_record(FailureType.AGENT_INVALID_OUTPUT, metadata={}))
+        == "agent_invalid_output"
+    )
+    assert (
+        _failure_code(
+            _bare_record(
+                FailureType.AGENT_INVALID_OUTPUT, metadata={"source": "novel_future_src"}
+            )
+        )
+        == "agent_invalid_output"
+    )
+
+    # Genuine errors keep their own self-describing code — a schema miss is
+    # distinguishable from a real DB / unknown failure.
+    assert _failure_code(_bare_record(FailureType.DATABASE_ERROR)) == "database_error"
+    assert _failure_code(_bare_record(FailureType.UNKNOWN_ERROR)) == "unknown_error"
+
+    # No classified failure ever produces the alert's NULL-fallback sentinel.
+    for ftype in FailureType:
+        assert _failure_code(_bare_record(ftype)) != "unknown"
+
+
 def test_unknown_error_always_escalates_even_with_zero_retries():
     """Rule 3: unknown_error short-circuits the retry-count override."""
     # Even with an empty history (retry_count==0 < escalation_threshold==1),
@@ -338,7 +383,7 @@ def test_route_failure_persists_decision_to_pipeline_steps(rls_ctx):
 
     with tenant_connection(tenant_id) as conn:
         row = conn.execute(
-            "SELECT step_kind, output_envelope, error "
+            "SELECT step_kind, step_name, output_envelope, error "
             "FROM pipeline_steps WHERE run_id = %s",
             (run_id,),
         ).fetchone()
@@ -348,3 +393,5 @@ def test_route_failure_persists_decision_to_pipeline_steps(rls_ctx):
     assert row["output_envelope"] == {"strategy": "retry_with_backoff"}
     assert row["error"]["failure_type"] == "tool_call_timeout"
     assert row["error"]["vendor"] == "anthropic"
+    # VT-501: the row carries an actionable code (NULL → the alert's 'unknown').
+    assert row["step_name"] == "tool_call_timeout"

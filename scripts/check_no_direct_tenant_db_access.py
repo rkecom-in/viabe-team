@@ -67,6 +67,12 @@ _ALLOWLIST = frozenset(
         # through tenant-scoped paths (close_attribution / mark_approval_resolved,
         # tenant-predicated). Cross-tenant scan = residual, like the other sweeps.
         "apps/team-orchestrator/src/orchestrator/scheduled_triggers.py",
+        # VT-668 orphan_reaper — the SAME cross-tenant-sweep class as scheduled_triggers
+        # directly above: the stalled/orphaned sweeps scan manager_tasks + close dangling
+        # pending_approvals ACROSS tenants under BYPASSRLS, by design (a sweep cannot run
+        # inside one tenant's RLS scope). The per-row work (redrive, owner notification,
+        # bound-task joins) routes through tenant-predicated task_store/wrapper calls.
+        "apps/team-orchestrator/src/orchestrator/orphan_reaper.py",
         # VT-176 attribution close — by-PK UPDATE of `campaigns` under BYPASSRLS in
         # the scheduled cross-tenant sweep; the id is sourced from the INTERNAL
         # sweep query, never client input (no IDOR surface) (Cowork 20260605T002000Z).
@@ -107,6 +113,15 @@ _ALLOWLIST = frozenset(
         # through `tenant_connection` (RLS), not direct access. Same documented,
         # audited cross-tenant-exception discipline as k_anonymity / l3_construction.
         "apps/team-orchestrator/src/orchestrator/privacy/reconstitution.py",
+        # VT-558 kill-campaign — the operator campaign true-kill runs on the SERVICE pool (the
+        # ops_audit write needs the privileged role; the app_role wrapper cursor has no ops_audit
+        # grant). Two campaigns touches, both un-wrapper-able by construction: (1) _resolve_campaign
+        # _tenant derives the tenant FROM the campaign row before any tenant is known (the VT-293/294
+        # IDOR derive — cross-tenant by necessity); (2) the by-PK UPDATE ... SET status='cancelled'
+        # under BYPASSRLS with WHERE tenant_id (server-derived) AND id AND status IN (proposed,
+        # approved) — no client tenant_id, no cross-tenant write possible. Same audited residual
+        # discipline as attribution_close's by-PK campaigns UPDATE.
+        "apps/team-orchestrator/src/orchestrator/api/ops_run_control.py",
     }
 )
 

@@ -27,7 +27,6 @@ SRC = Path(__file__).resolve().parent.parent / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from orchestrator.auth import twilio_verify  # noqa: E402
 from orchestrator.auth.twilio_verify import (  # noqa: E402
     ChannelGatedError,
     InvalidChannelError,
@@ -43,13 +42,16 @@ _WRONG_OTP = "000000"
 
 @pytest.fixture(autouse=True)
 def _mock_env(monkeypatch):
-    """Force mock mode + a deterministic mock OTP; clear lru_cache state."""
+    """Force mock mode + a deterministic mock OTP.
+
+    VT-559: ``_client()`` is no longer ``@lru_cache``'d (a cached client would
+    freeze a stale dev-guard wrap decision across an env change), so there is no
+    cache to clear here anymore.
+    """
     monkeypatch.setenv("TEAM_TWILIO_VERIFY_MOCK_MODE", "1")
     monkeypatch.setenv("VT250_MOCK_OTP", _CORRECT_OTP)
     monkeypatch.delenv("VT250_SMS_CHANNEL_ENABLED", raising=False)
-    twilio_verify._client.cache_clear()
     yield
-    twilio_verify._client.cache_clear()
 
 
 def test_start_returns_pending():

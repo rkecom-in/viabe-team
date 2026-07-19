@@ -1,0 +1,89 @@
+{
+  "name": "j01_shopify_winback",
+  "notes": "journey-sim-spec.md #1 — D2C fashion brand, Shopify store, full catalog + orders, Hinglish cooperative owner. Arc (starting from ALREADY onboarded+connected — the onboarding/Shopify-connect beats aren't rebuilt here, no scenario content exists yet to chain for them): cohort ask -> win-back plan draft -> approval -> send-completes, all voiced by ONE persona across 3 phases against the SAME tenant, seeded with the deterministic CL-2026-07-10 45-day lapsed window (n=10 seeded -> n_lapsed=8, matching sr_cohort_surfacing_ask_list.json's own hardcoded '8' assert convention). Tier-1 invariants: no fabrication; the approval gate holds (no send before phase 3's explicit approval); count==targeted cohort (phase 2's assert_grounded_count pins the campaign's plan_json cohort_size to the same 8).",
+  "persona": {
+    "business": "a D2C fashion brand running a Shopify store with a full product catalog and order history",
+    "temperament": "cooperative, upbeat, comfortable making quick decisions without much back-and-forth",
+    "style": "hinglish",
+    "backstory": "Aap ek chhoti D2C fashion brand chalate hain, apne Shopify store ke through. Aapko lagta hai ki kuch purane customers ne kaafi time se dobara order nahi kiya hai, aur aap unhe wapas laana chahte hain."
+  },
+  "setup_args": ["--onboarded", "--seed-lapsed-customers", "10"],
+  "phases": [
+    {
+      "name": "cohort ask (persona)",
+      "steps": [
+        {
+          "persona_turn": {
+            "goal": "casually ask, in Hinglish, how many of your customers have stopped ordering / gone quiet recently"
+          },
+          "fallback_message": "kitne customers hain jo kaafi time se order nahi kar rahe?",
+          "assert_no_silent": true,
+          "assert_not_d1": true,
+          "note": "A pure count/cohort ask (not a plan ask yet). Expect a grounded, honest answer against the seeded 10-customer ledger (8 of which are the deterministic 45d-lapsed subset) — never a fabricated figure, never silence, never D1. No assert_contains pinned to an exact number: this is a persona paraphrase, not the scripted sr_cohort_surfacing_ask_list.json wording — manual/judge review verdicts grounding quality."
+        }
+      ],
+      "db_asserts": {
+        "assert_route": {"expect_sr_delegation": false}
+      },
+      "note": "A pure count ask should answer directly (status_query fast-path) without fabricating a campaign/plan — this DB-state check is the honest, structural version of that expectation. FLAG: if this fails on a real run, it's a genuine finding (the manager over-delegated a status ask), not a harness bug — report it, don't silently loosen the assert."
+    },
+    {
+      "name": "win-back plan draft (persona)",
+      "steps": [
+        {
+          "persona_turn": {
+            "goal": "ask the assistant to put together a win-back offer or plan for those lapsed customers, casually, in Hinglish"
+          },
+          "fallback_message": "purane customers ke liye ek accha winback offer/plan bana do please",
+          "assert_no_silent": true,
+          "assert_contains": ["draft"],
+          "assert_route": {"expect_sr_delegation": true, "tenant_wide": true},
+          "assert_side_effects": {
+            "expect_campaign": true, "expect_approval_decision": "pending", "tenant_wide": true
+          },
+          "note": "Expect delegation to Sales-Recovery: an in-chat plan summary + a pending owner-approval, grounded in the real seeded cohort. [VT-633: interim ack allowed; draft asserted against the settled transcript + tenant-wide DB truth, same convention as sr_approved_send_completes_truthfully.json.]"
+        }
+      ],
+      "db_asserts": {
+        "assert_grounded_count": {"expected_count": 8}
+      },
+      "wait_s": 5
+    },
+    {
+      "name": "approve -> arm (persona)",
+      "steps": [
+        {
+          "persona_turn": {
+            "goal": "clearly agree to the drafted offer, in Hinglish — an unambiguous approval"
+          },
+          "fallback_message": "haan theek hai, ye plan approve hai",
+          "assert_no_silent": true,
+          "assert_not_d1": true,
+          "assert_side_effects": {
+            "tenant_wide": true, "expect_sent_count": 0
+          },
+          "note": "ARM-THEN-SEND (VT-615/626, confirmed sales_recovery_executor _try_l3_arm / auto_send_pending): the approval ARMS the batch (auto_send_pending) but does NOT send — the manager asks for an explicit final 'bhej do'. So NO send yet here (expect_sent_count 0). This is a deliberate two-step money gate, NOT a stall — the send completes in the next phase."
+        }
+      ],
+      "wait_s": 8
+    },
+    {
+      "name": "explicit send confirm -> send (persona)",
+      "steps": [
+        {
+          "persona_turn": {
+            "goal": "give the final explicit go-ahead to send it now, in Hinglish — a short, unambiguous send confirmation"
+          },
+          "fallback_message": "haan bhej do abhi",
+          "assert_no_silent": true,
+          "assert_not_d1": true,
+          "assert_side_effects": {
+            "tenant_wide": true, "expect_sent_count_at_least": 1
+          },
+          "note": "The explicit send-confirm completes the arm-then-send: campaign_messages records >=1 sent row (transport-intercepted, never delivered — dev send-guard). wait_s below gives the async send workflow time to settle before the DB read. If the send STILL doesn't land after a clean 'bhej do' + settle, THAT is a genuine Tier-1 money-path finding (report it, don't loosen the assert)."
+        }
+      ],
+      "wait_s": 12
+    }
+  ]
+}

@@ -5,7 +5,7 @@ compares against ``tenant_alert_baselines``; returns a list of
 Trigger objects describing what should fire.
 
 Trigger kinds (8 per VT-202 brief):
-- hard_limit             critical: status='aborted_hard_limit' lands
+- hard_limit             warning : status='aborted_hard_limit' lands (VT-620: budget gate, designed)
 - escalation             critical: status='escalated' lands
 - error_envelope         critical: any error_envelope step_kind
 - cost_anomaly           warning : single-run cost > 2× p95
@@ -48,13 +48,23 @@ TriggerKind = Literal[
     "reconstitution_sla_breach",  # P0 — opted-out customer un-reconstituted past 8d
     # VT-307 KG-events outbox-drain straggler (nightly drain sweep, warning).
     "kg_drain_straggler",  # an outbox event the immediate + nightly drain failed to project
+    # VT-529 (B6): a manager_task stranded active with no runnable step, reaped to 'blocked'.
+    "orphaned_task",  # the B2 stalled-task reaper flipped a task → blocked
+    # VT-552 (B1 part-2b): a run reached terminal with no outcome + no effect + no owner contact.
+    "silent_terminal",  # the detector opened a silent-terminal incident
+    # VT-557 (B6): a manager_task exhausted its retry budget → dead_letter (operator must redrive).
+    "dead_letter_task",  # the retry-ladder reaper dead-lettered a chronically-stalled task
 ]
 
 Severity = Literal["critical", "warning"]
 
 # Severity per trigger kind (Cowork brief locks).
 _SEVERITY_BY_KIND: dict[TriggerKind, Severity] = {
-    "hard_limit": "critical",
+    # VT-620: a hard-limit abort is a budget/quality GATE working as designed (the run hit
+    # its ₹/token/tool-call ceiling and stopped) — not a crash. At most a warning, never a page.
+    "hard_limit": "warning",
+    # VT-620: LEFT critical on purpose — a genuine human-operator escalation may warrant a page
+    # (Fazal policy call). Revisit if escalation volume proves this too noisy.
     "escalation": "critical",
     "error_envelope": "critical",
     "privacy_audit_event": "critical",
@@ -70,7 +80,32 @@ _SEVERITY_BY_KIND: dict[TriggerKind, Severity] = {
     "reconstitution_sla_breach": "critical",
     # VT-307 KG-drain straggler — reliability backstop signal (batched digest).
     "kg_drain_straggler": "warning",
+    # VT-529 — a stalled/orphaned task needs attention but isn't a customer-facing critical.
+    "orphaned_task": "warning",
+    # VT-552 — a silent terminal (owner never heard) is a real reliability failure → warning.
+    "silent_terminal": "warning",
+    # VT-557 — a dead-lettered task is stuck until an operator redrives → ops-actionable warning.
+    "dead_letter_task": "warning",
 }
+
+# VT-620 — error-envelope subtypes that are a correctness/quality GATE working as designed
+# (agent rejected its own bad draft / hit a budget ceiling / asked for clarification). At most
+# 'warning', never a page. Anything NOT listed stays 'critical'. Values = _failure_code() step_name
+# strings (error_router.py:70-94 + failures.py FailureType).
+_ERROR_SUBTYPE_WARNING = frozenset({
+    "self_eval_rejected", "schema_rejection", "invalid_output_no_json",
+    "invalid_variant_discriminator", "self_evaluate_seam_error", "agent_invalid_output",
+    "model_output_conflict", "agent_hard_limit_breach", "agent_refusal",
+    "owner_clarification_required",
+})
+
+
+def _error_envelope_severity(step_name: str | None) -> Severity:
+    """VT-620 — downgrade a 'designed gate' error envelope to 'warning'; everything else stays
+    'critical' (a genuine crash / DB / data error must still page). ``step_name`` = the row's
+    ``_failure_code()`` value already SELECTed on the error row."""
+    return "warning" if (step_name or "") in _ERROR_SUBTYPE_WARNING else "critical"
+
 
 # VT-79 Detector-3: DSR request-rate threshold (Phase-1 fixed value; cohort
 # baselines need real traffic — flagged for tuning, gate-live posture).
@@ -102,15 +137,100 @@ def _make_trigger(
     *,
     run_id: UUID | None = None,
     payload: dict[str, Any] | None = None,
+    severity: Severity | None = None,
 ) -> Trigger:
+    # VT-620: an explicit ``severity`` override (e.g. per-error-envelope subtype) wins;
+    # otherwise fall back to the per-kind default. Every existing call omits it → unchanged.
     return Trigger(
         tenant_id=tenant_id,
         trigger_kind=kind,
-        severity=_SEVERITY_BY_KIND[kind],
+        severity=severity or _SEVERITY_BY_KIND[kind],
         message_text=message,
         run_id=run_id,
         payload=payload or {},
     )
+
+
+# VT-476 dev_send_guard mock-SID marker. A mocked dev send returns a SID with
+# this prefix instead of a real Twilio ``SM…`` SID (utils/dev_send_guard._MockMessage).
+_MOCK_SID_PREFIX = "MKDEV"
+# The two outbound-send ledger tables (mig 049) that carry the resolved message_sid.
+_SEND_LEDGER_TABLES = ("send_idempotency_keys", "campaign_messages")
+_VOLUME_WINDOW = "1 hour"
+
+
+def _volume_is_mock_only(tenant_id: UUID) -> bool:
+    """VT-489 (b): True when the tenant's outbound sends in the volume window were
+    ALL mocked (VT-476 ``MKDEV…`` SIDs) — i.e. ZERO real sends landed.
+
+    A mocked send is not a real send (no customer was messaged), so a run-volume
+    spike whose entire outbound activity was mocked is a dev/test artifact, not a
+    real-send volume alarm. The send ledger (mig 049) carries ``message_sid`` +
+    ``send_status``; we count REAL successful sends (``send_status='sent'`` /
+    ``'template_sent'`` AND a non-MKDEV SID) in the same window as the run count.
+
+    Returns True (suppress) ONLY when there is at least one mocked send AND zero
+    real sends in the window. FAIL-SAFE: returns False (do NOT suppress → alert)
+    when uncertain — no mocked sends found, or any read error — so a real prod
+    spike is never silenced by this guard.
+    """
+    pool = get_pool()
+    real_sends = 0
+    mock_sends = 0
+    try:
+        with pool.connection() as conn, conn.cursor() as cur:
+            for table in _SEND_LEDGER_TABLES:
+                cur.execute(
+                    f"""
+                    SELECT
+                        COUNT(*) FILTER (
+                            WHERE message_sid IS NOT NULL
+                              AND message_sid NOT LIKE %s
+                              AND send_status IN ('sent', 'template_sent')
+                        ) AS real_n,
+                        COUNT(*) FILTER (
+                            WHERE message_sid LIKE %s
+                        ) AS mock_n
+                    FROM {table}
+                    WHERE tenant_id = %s
+                      AND created_at > now() - interval '{_VOLUME_WINDOW}'
+                    """,  # noqa: S608 — table name from a fixed module constant, never user input
+                    (f"{_MOCK_SID_PREFIX}%", f"{_MOCK_SID_PREFIX}%", str(tenant_id)),
+                )
+                r = cur.fetchone()
+                rd = (dict(r) if not isinstance(r, dict) else r) if r is not None else {}
+                real_sends += int(rd.get("real_n") or 0)
+                mock_sends += int(rd.get("mock_n") or 0)
+    except Exception:  # noqa: BLE001 — fail-safe: an unreadable ledger must NOT suppress a real spike
+        logger.warning(
+            "VT-489: mock-only volume check failed for tenant %s; NOT suppressing "
+            "(fail-safe — prefer to alert)", tenant_id, exc_info=True,
+        )
+        return False
+    # Suppress ONLY when the window had mocked send(s) and not a single real send.
+    return mock_sends > 0 and real_sends == 0
+
+
+# VT-620 — synthetic convo-harness tenants (the e2e/canary harness names every tenant it creates
+# ``convo-harness-…``). Their runs/steps are test artifacts, so alerts on them are pure ops noise.
+_TEST_TENANT_NAME_PREFIX = "convo-harness-"  # the harness enforces this on every tenant it creates
+
+
+def _is_test_tenant(tenant_id: UUID, *, conn: Any = None) -> bool:
+    """True for a synthetic convo-harness tenant (VT-620). FAIL-SAFE: False on any read error."""
+    def _q(c) -> bool:
+        with c.cursor() as cur:
+            cur.execute("SELECT 1 FROM tenants WHERE id = %s AND business_name LIKE %s LIMIT 1",
+                        (str(tenant_id), f"{_TEST_TENANT_NAME_PREFIX}%"))
+            return cur.fetchone() is not None
+    try:
+        if conn is not None:
+            return _q(conn)
+        with get_pool().connection() as c:
+            return _q(c)
+    except Exception:  # noqa: BLE001 — fail-safe: never suppress a real alert on a read error
+        logger.warning("VT-620: _is_test_tenant check failed for %s; NOT suppressing", tenant_id, exc_info=True)
+        return False
 
 
 def detect_critical_for_run(run_id: UUID) -> list[Trigger]:
@@ -132,6 +252,10 @@ def detect_critical_for_run(run_id: UUID) -> list[Trigger]:
         return []
     row = dict(raw) if not isinstance(raw, dict) else raw
     tenant_id = UUID(str(row["tenant_id"]))
+    # VT-620: never alert on a synthetic convo-harness tenant (test artifact = ops noise).
+    # Detector is unwired today but gate it anyway. FAIL-SAFE: a read error returns False → alert.
+    if _is_test_tenant(tenant_id):
+        return []
     status = row["status"]
     triggers: list[Trigger] = []
     if status == "aborted_hard_limit":
@@ -157,6 +281,10 @@ def detect_slow_triggers(tenant_id: UUID) -> list[Trigger]:
     Called by the 5-min DBOS scheduler. Returns the slow-trigger set
     (cost / latency / volume / privacy / error_envelope).
     """
+    # VT-620: a synthetic convo-harness tenant produces only test-artifact runs/steps — its
+    # whole slow-trigger set is ops noise. FAIL-SAFE: a read error returns False → we still sweep.
+    if _is_test_tenant(tenant_id):
+        return []
     pool = get_pool()
     triggers: list[Trigger] = []
 
@@ -214,6 +342,17 @@ def detect_slow_triggers(tenant_id: UUID) -> list[Trigger]:
             ))
 
     # Volume spike — last-hour count vs baseline.
+    #
+    # VT-489 (b): the volume_spike metric is a REAL-SEND volume alarm. A dev
+    # mocked send (VT-476 dev_send_guard → ``MKDEV…`` SID) is NOT a real send and
+    # must not trip it. The metric counts inbound ``pipeline_runs`` (one per
+    # webhook), which are decoupled from the outbound send ledger — so a mocked
+    # send never increments the run-count directly. But a re-drive burst inflates
+    # the inbound-run count while its OUTBOUND sends are all mocked (the dev guard
+    # mocks every non-allowlisted dev send). So we gate on real-send presence:
+    # if the tenant produced ZERO real (non-``MKDEV``) outbound sends in the
+    # window, the run-volume is a dev/test artifact (mocked-only) — do NOT fire.
+    # FAIL-SAFE: if the ledger read errors, we DON'T suppress (prefer to alert).
     with pool.connection() as conn, conn.cursor() as cur:
         cur.execute(
             "SELECT COUNT(*) AS n FROM pipeline_runs "
@@ -226,11 +365,18 @@ def detect_slow_triggers(tenant_id: UUID) -> list[Trigger]:
         observed = int(vdict.get("n") or 0)
         baseline_vol = base.get("volume_per_hour") or 0
         if baseline_vol and observed > 3 * baseline_vol:
-            triggers.append(_make_trigger(
-                tenant_id, "volume_spike",
-                f"Tenant {tenant_id} hourly volume {observed} exceeds 3× baseline ({baseline_vol})",
-                payload={"observed": observed, "baseline": baseline_vol},
-            ))
+            if _volume_is_mock_only(tenant_id):
+                logger.info(
+                    "VT-489: volume_spike for tenant %s suppressed — all outbound "
+                    "sends in the window were mocked (MKDEV); not a real-send spike",
+                    tenant_id,
+                )
+            else:
+                triggers.append(_make_trigger(
+                    tenant_id, "volume_spike",
+                    f"Tenant {tenant_id} hourly volume {observed} exceeds 3× baseline ({baseline_vol})",
+                    payload={"observed": observed, "baseline": baseline_vol},
+                ))
 
     # Error envelope sweep — recent pipeline_steps with the canonical
     # 'error' step_kind (the VT-179 step_kind for error envelopes —
@@ -250,11 +396,16 @@ def detect_slow_triggers(tenant_id: UUID) -> list[Trigger]:
     for r in errors:
         rd = dict(r) if not isinstance(r, dict) else r
         run_id = UUID(str(rd["run_id"]))
+        # VT-620: the actionable subtype lives in step_name (=_failure_code). A 'designed gate'
+        # subtype (self-eval reject / budget ceiling / clarification) downgrades to 'warning';
+        # anything unrecognised stays 'critical' so a genuine crash/DB error still pages.
+        step_name = rd.get("step_name")
         triggers.append(_make_trigger(
             tenant_id, "error_envelope",
-            f"Error envelope on run {run_id}: {rd.get('step_name') or 'unknown'}",
+            f"Error envelope on run {run_id}: {step_name or 'unknown'}",
             run_id=run_id,
-            payload={"step_name": rd.get("step_name")},
+            payload={"step_name": step_name},
+            severity=_error_envelope_severity(step_name),
         ))
 
     # VT-79 Detector-1 — tenant-isolation breach (P0). The RLS guard
@@ -311,6 +462,16 @@ def detect_pii_in_logs(tenant_id: UUID, *, lookback_hours: int = 24) -> list[Tri
     boundary (VT-144). Any payload that STILL matches a PII pattern is a leak →
     critical. Reuses the alert pii_scrub patterns (one PII-pattern source).
 
+    VT-379: the scan was envelope-only — ``pipeline_steps.error`` (jsonb, the
+    three direct-INSERT writers: error_router / self_evaluate_gate / collapse)
+    plus ``decision_rationale`` (text) and ``tool_calls`` (jsonb) were never
+    swept, so an exception string carrying a phone or a customer name landed
+    in an UNswept column. All four free-text-bearing columns are now scanned
+    in the same pass (find_pii operates on the stringified blob, so jsonb /
+    text are uniformly co-scannable). ``input_envelope`` / ``output_envelope``
+    remain in the blob — the redacting writer covers them, but Detector-5 is
+    the backstop, not the gate.
+
     The detection logic ships now (+ canary); the nightly DBOS.scheduled
     registration is a fast-follow (VT-305) — same app_version posture as VT-304.
     """
@@ -321,7 +482,8 @@ def detect_pii_in_logs(tenant_id: UUID, *, lookback_hours: int = 24) -> list[Tri
     with pool.connection() as conn, conn.cursor() as cur:
         cur.execute(
             """
-            SELECT id, run_id, input_envelope, output_envelope
+            SELECT id, run_id, input_envelope, output_envelope,
+                   error, decision_rationale, tool_calls
             FROM pipeline_steps
             WHERE tenant_id = %s
               AND started_at > now() - make_interval(hours => %s)
@@ -332,7 +494,19 @@ def detect_pii_in_logs(tenant_id: UUID, *, lookback_hours: int = 24) -> list[Tri
         rows = cur.fetchall()
     for r in rows:
         rd = dict(r) if not isinstance(r, dict) else r
-        blob = f"{rd.get('input_envelope')!s} {rd.get('output_envelope')!s}"
+        # VT-379: scan envelopes AND the three previously-unswept free-text
+        # columns (error / decision_rationale / tool_calls). NULLs stringify
+        # to "None" which find_pii treats as clean, so unset columns no-op.
+        blob = " ".join(
+            str(rd.get(col))
+            for col in (
+                "input_envelope",
+                "output_envelope",
+                "error",
+                "decision_rationale",
+                "tool_calls",
+            )
+        )
         matches = find_pii(blob)
         if matches:
             triggers.append(_make_trigger(
@@ -349,9 +523,14 @@ def all_active_tenant_ids() -> list[UUID]:
     """Tenants with at least one terminal pipeline_run in last 30 days."""
     pool = get_pool()
     with pool.connection() as conn, conn.cursor() as cur:
+        # VT-620: skip synthetic convo-harness tenants up-front (efficiency — the per-detector
+        # _is_test_tenant check stays as the fail-safe backstop if a harness tenant slips through).
         cur.execute(
             "SELECT DISTINCT tenant_id FROM pipeline_runs "
-            "WHERE started_at > now() - interval '30 days'"
+            "WHERE started_at > now() - interval '30 days' "
+            "  AND NOT EXISTS (SELECT 1 FROM tenants t "
+            "                  WHERE t.id = pipeline_runs.tenant_id "
+            "                    AND t.business_name LIKE 'convo-harness-%')"
         )
         rows = cur.fetchall()
     out: list[UUID] = []

@@ -45,10 +45,13 @@ from orchestrator.agent.self_evaluate import (  # noqa: E402
     FakeSelfEvaluator,
     GateAction,
     GateConfig,
+    GradeTier,
     SelfEvaluateFeedback,
     SelfEvaluateGate,
     SelfEvaluateOutcome,
     SelfEvaluateVerdict,
+    _filter_arrr_only,
+    _is_arrr_critique,
 )
 from orchestrator.failures import HardLimitAxis  # noqa: E402
 
@@ -102,6 +105,43 @@ def _valid_plan_dict(*, tenant_id: str, run_id: str) -> dict[str, Any]:
         "exclusion_list": [],
         "exclusion_reasons": {},
         "escalation_conditions": [],
+    }
+
+
+def _insufficient_data_dict(*, tenant_id: str, run_id: str) -> dict[str, Any]:
+    """A v1.0-valid CampaignPlanInsufficientData dict — the legal
+    "in-scope but not enough context" terminal SR emits when data is
+    genuinely missing (VT-491 regression for runs 44f12ad2 / 0844b0ff)."""
+    now = datetime.now(UTC)
+    return {
+        "version": "1.0",
+        "status": "insufficient_data",
+        "tenant_id": tenant_id,
+        "run_id": run_id,
+        "generated_at": now.isoformat(),
+        "self_evaluate_status": "not_yet_evaluated",
+        "missing_data": [
+            {
+                "category": "dormant_cohort",
+                "description": "no dormant customers in the order history yet",
+                "suggested_remediation": "connect POS / wait for orders to land",
+            },
+        ],
+    }
+
+
+def _out_of_scope_dict(*, tenant_id: str, run_id: str) -> dict[str, Any]:
+    """A v1.0-valid CampaignPlanOutOfScope dict — the sibling
+    non-proposed terminal (same VT-491 bug class)."""
+    now = datetime.now(UTC)
+    return {
+        "version": "1.0",
+        "status": "out_of_scope",
+        "tenant_id": tenant_id,
+        "run_id": run_id,
+        "generated_at": now.isoformat(),
+        "self_evaluate_status": "not_yet_evaluated",
+        "out_of_scope_reason": "request is a reputation issue, not sales recovery",
     }
 
 
@@ -496,9 +536,612 @@ def test_hard_limit_fires_before_gate_when_already_at_cap(monkeypatch):
     assert ctx.cancelled_by is HardLimitAxis.TOOL_CALLS
 
 
+# ---------- VT-491: non-proposed variants short-circuit (no LLM grade) --------
+
+
+def _gate_with_raising_seam() -> tuple[SelfEvaluateGate, FakeSelfEvaluator, ToolCounter]:
+    """A gate whose seam ASSERTS if consulted — the determinism crux.
+    If the gate ever calls the LLM seam on a non-proposed variant, the
+    AssertionError surfaces and the test fails. calls==0 proves the seam
+    was never reached."""
+    ctx = CancellationContext()
+    counter = ToolCounter(ctx)
+    evaluator = FakeSelfEvaluator(
+        raise_on_call=AssertionError("self_evaluate seam must NOT be called "
+                                     "on a non-proposed variant")
+    )
+    gate = SelfEvaluateGate(
+        evaluator=evaluator,
+        ctx=ctx,
+        tool_counter=counter,
+        config=GateConfig(max_revisions=2),
+    )
+    return gate, evaluator, counter
+
+
+def test_insufficient_data_short_circuits_accept_without_grading():
+    """VT-491 regression (runs 44f12ad2 / 0844b0ff): an
+    insufficient_data terminal is ACCEPTED (SHIP) deterministically —
+    the LLM seam is NEVER consulted (calls==0, the determinism proof),
+    no tool-budget slot is charged (counter stays 0), no grading attempt
+    (attempt_number==0). The plan flows on UNCHANGED to the downstream
+    data-remediation terminal."""
+    from orchestrator.agent.schemas.campaign_plan import parse_campaign_plan
+
+    gate, evaluator, counter = _gate_with_raising_seam()
+    tenant_id, run_id = _ctx_ids()
+    draft = parse_campaign_plan(
+        _insufficient_data_dict(tenant_id=tenant_id, run_id=run_id)
+    )
+
+    outcome = gate.run(draft)
+
+    assert outcome.action is GateAction.SHIP
+    assert evaluator.calls == 0          # the seam was NEVER consulted
+    assert counter.count == 0            # no record_dispatch → no budget charged
+    assert gate.evaluator_calls == 0
+    assert outcome.attempt_number == 0
+    assert outcome.outcome is None
+    # status field is cosmetic for this variant (record_terminal_verdict
+    # never reads it); left at the GateOutcome default.
+    assert outcome.self_evaluate_status is SelfEvaluateStatus.NOT_YET_EVALUATED
+
+
+def test_out_of_scope_short_circuits_accept_without_grading():
+    """VT-491 sibling case: out_of_scope (also non-proposed) takes the
+    same deterministic short-circuit — seam not called, no budget."""
+    from orchestrator.agent.schemas.campaign_plan import parse_campaign_plan
+
+    gate, evaluator, counter = _gate_with_raising_seam()
+    tenant_id, run_id = _ctx_ids()
+    draft = parse_campaign_plan(
+        _out_of_scope_dict(tenant_id=tenant_id, run_id=run_id)
+    )
+
+    outcome = gate.run(draft)
+
+    assert outcome.action is GateAction.SHIP
+    assert evaluator.calls == 0
+    assert counter.count == 0
+    assert outcome.attempt_number == 0
+
+
+def test_proposed_plan_is_still_fully_graded():
+    """The gate is NOT weakened: a real proposed plan STILL goes to the
+    LLM seam (calls==1), gets a verdict, and one tool-budget slot is
+    charged. Short-circuit applies to non-proposed variants only."""
+    from orchestrator.agent.schemas.campaign_plan import parse_campaign_plan
+
+    ctx = CancellationContext()
+    counter = ToolCounter(ctx)
+    evaluator = FakeSelfEvaluator(verdicts=[_verdict(SelfEvaluateOutcome.PASS)])
+    gate = SelfEvaluateGate(
+        evaluator=evaluator,
+        ctx=ctx,
+        tool_counter=counter,
+        config=GateConfig(max_revisions=2),
+    )
+    tenant_id, run_id = _ctx_ids()
+    draft = parse_campaign_plan(_valid_plan_dict(tenant_id=tenant_id, run_id=run_id))
+
+    outcome = gate.run(draft)
+
+    assert outcome.action is GateAction.SHIP
+    assert outcome.self_evaluate_status is SelfEvaluateStatus.PASSED
+    assert evaluator.calls == 1          # the seam WAS consulted
+    assert counter.count == 1            # one dispatch charged
+    assert outcome.attempt_number == 1
+
+
+def test_thin_proposed_plan_is_still_rejected():
+    """The gate is NOT weakened: a proposed plan that the seam REVISEs
+    twice STILL gets REJECTED (calls==2) — the short-circuit does not
+    let a bad proposed plan skip the grade."""
+    from orchestrator.agent.schemas.campaign_plan import parse_campaign_plan
+
+    ctx = CancellationContext()
+    counter = ToolCounter(ctx)
+    evaluator = FakeSelfEvaluator(
+        verdicts=[
+            _verdict(SelfEvaluateOutcome.REVISE, pillar=["invented number"]),
+            _verdict(SelfEvaluateOutcome.REVISE, legal=["pressure language"]),
+        ]
+    )
+    gate = SelfEvaluateGate(
+        evaluator=evaluator,
+        ctx=ctx,
+        tool_counter=counter,
+        config=GateConfig(max_revisions=2),
+    )
+    tenant_id, run_id = _ctx_ids()
+    draft = parse_campaign_plan(_valid_plan_dict(tenant_id=tenant_id, run_id=run_id))
+
+    # First REVISE → RETRY; caller re-runs the gate with the next draft.
+    first = gate.run(draft)
+    assert first.action is GateAction.RETRY
+    second = gate.run(draft)
+
+    assert second.action is GateAction.REJECTED
+    assert second.self_evaluate_status is SelfEvaluateStatus.FAILED_AFTER_REVISIONS
+    assert evaluator.calls == 2
+
+
+def test_run_sales_recovery_insufficient_data_completes_no_escalation(monkeypatch):
+    """Integration (gate-on, mocked Anthropic): the model emits an
+    insufficient_data terminal; the gate is wired with a raise-on-call
+    seam. The run COMPLETES deterministically — output preserves
+    insufficient_data + missing_data verbatim; the seam is never called
+    (calls==0); NO SELF_EVAL_REJECTED and NO AGENT_INVALID_OUTPUT routed
+    (router untouched). This is the end-to-end VT-491 fix: a legitimate
+    "not enough data" terminal no longer coin-flips into a Fazal page."""
+    router = _patch_router(monkeypatch)
+    tenant_id, run_id = _ctx_ids()
+    _patch_anthropic(
+        monkeypatch, [_insufficient_data_dict(tenant_id=tenant_id, run_id=run_id)]
+    )
+    monkeypatch.setenv("VIABE_ENV", "test")
+
+    evaluator = FakeSelfEvaluator(
+        raise_on_call=AssertionError("seam must not be called on insufficient_data")
+    )
+    result = run_sales_recovery_agent(
+        SalesRecoveryContext(
+            tenant_id=tenant_id, run_id=run_id, user_request="test request"
+        ),
+        evaluator=evaluator,
+    )
+
+    assert result.status == "completed"
+    assert result.output is not None
+    assert result.output["status"] == "insufficient_data"
+    assert result.output["missing_data"][0]["category"] == "dormant_cohort"
+    assert evaluator.calls == 0          # the seam was never consulted
+    # No escalation, no invalid-output routing — the run landed cleanly.
+    router.assert_not_called()
+
+
 # ---------- Sanity: evaluation criteria are the four documented --------------
 
 
 def test_evaluation_criteria_are_the_four_documented():
     """Lock the four-criteria contract — Fazal sign-off on these."""
     assert EVALUATION_CRITERIA == ["schema", "pillar", "consistency", "legal"]
+
+
+# ============================================================================
+# VT-500 — calibrate the grounding gate to CLAIMS + SCALE (adversarial-verify)
+# ============================================================================
+#
+# The calibration RELAXES exactly ONE axis — the ``expected_arrr`` ROI/ARRR
+# business-justification — and ONLY on the narrow SIMPLE lane (allow-listed
+# ``team_winback_simple``, non-money-bearing, cohort <= L3_AUTO_MAX_BATCH). The
+# adversarial proof below is that the relaxation is PROVABLY one-directional: a
+# fabrication / PII / cohort-grounding / legal critique is NEVER stripped on the
+# simple tier, the strict (offer/large/disabled/unresolved) path is unchanged,
+# and the threshold + kill-switch bite. No real LLM: a FakeSelfEvaluator injects
+# the exact critique sets so the GATE's deterministic filter is what's tested.
+
+
+def _winback_plan_dict(
+    *,
+    tenant_id: str,
+    run_id: str,
+    template_id: str = "team_winback_simple",
+    cohort_size: int = 5,
+) -> dict[str, Any]:
+    """A v1.0-valid CampaignPlanProposed dict with a parametrised
+    ``message_plan.template_id`` + cohort size (cohort_size == len(customer_ids),
+    the schema invariant). Marker consistency holds (E1 in both prose fields)."""
+    now = datetime.now(UTC)
+    cids = [str(uuid4()) for _ in range(cohort_size)]
+    return {
+        "version": "1.0",
+        "status": "proposed",
+        "tenant_id": tenant_id,
+        "run_id": run_id,
+        "generated_at": now.isoformat(),
+        "self_evaluate_status": "not_yet_evaluated",
+        "campaign_window": {
+            "start": (now + timedelta(hours=1)).isoformat(),
+            "end": (now + timedelta(days=7)).isoformat(),
+        },
+        "target_cohort": {
+            "customer_ids": cids,
+            "cohort_label": "60-90 day dormants",
+            "cohort_size": cohort_size,
+            "selection_reason": "genuinely-lapsed dormant cohort [E1].",
+        },
+        "expected_arrr": {
+            "low_paise": 1000000,
+            "high_paise": 3000000,
+            "confidence": "medium",
+            "basis": "prior winback yields [E1].",
+        },
+        "evidence_refs": [
+            {"claim_id": "E1", "source_kind": "tool_call", "source_id": "t", "note": None},
+        ],
+        "message_plan": {
+            "template_id": template_id,
+            "template_params": {"customer_name": "Owner", "business_name": "Cafe"},
+            "language": "en",
+            "personalization": "owner-first-name.",
+        },
+        "exclusion_list": [],
+        "exclusion_reasons": {},
+        "escalation_conditions": [],
+    }
+
+
+def _simple_tier_gate(
+    evaluator: FakeSelfEvaluator,
+    *,
+    enabled: bool = True,
+    templates: tuple[str, ...] = ("team_winback_simple",),
+    max_revisions: int = 2,
+) -> tuple[SelfEvaluateGate, ToolCounter]:
+    ctx = CancellationContext()
+    counter = ToolCounter(ctx)
+    gate = SelfEvaluateGate(
+        evaluator=evaluator,
+        ctx=ctx,
+        tool_counter=counter,
+        config=GateConfig(
+            max_revisions=max_revisions,
+            simple_tier_enabled=enabled,
+            simple_templates=templates,
+        ),
+    )
+    return gate, counter
+
+
+def _winback_draft(
+    *, template_id: str = "team_winback_simple", cohort_size: int = 5
+) -> Any:
+    from orchestrator.agent.schemas.campaign_plan import parse_campaign_plan
+
+    tenant_id, run_id = _ctx_ids()
+    return parse_campaign_plan(
+        _winback_plan_dict(
+            tenant_id=tenant_id,
+            run_id=run_id,
+            template_id=template_id,
+            cohort_size=cohort_size,
+        )
+    )
+
+
+# ---- Case 0: the relaxation WORKS — ARRR-only REVISE on simple → SHIPS -------
+
+
+def test_simple_winback_weak_arrr_only_ships():
+    """A genuinely-lapsed, grounded simple win-back whose ONLY critique is on
+    the ``expected_arrr`` axis SHIPS: the gate drops the ARRR critique, nothing
+    else fails it → REVISE collapses to PASS. This is the calibration's point."""
+    evaluator = FakeSelfEvaluator(
+        verdicts=[
+            _verdict(
+                SelfEvaluateOutcome.REVISE,
+                pillar=[
+                    "expected_arrr.basis overstates confidence: claims it 'will "
+                    "recover ₹50K' rather than citing the low/high range."
+                ],
+                consistency=[
+                    "expected_arrr.high_paise=3000000 is implausibly large for "
+                    "target_cohort.cohort_size=5."
+                ],
+            ),
+        ]
+    )
+    gate, counter = _simple_tier_gate(evaluator)
+    outcome = gate.run(_winback_draft(cohort_size=5))
+
+    assert outcome.action is GateAction.SHIP
+    assert outcome.self_evaluate_status is SelfEvaluateStatus.PASSED
+    assert outcome.outcome is SelfEvaluateOutcome.PASS
+    assert evaluator.last_tier is GradeTier.SIMPLE  # classified simple
+    assert evaluator.calls == 1
+    assert counter.count == 1  # one dispatch charged — the grade still ran
+
+
+# ---- Case 1: fabricated customer fact on simple → STILL REJECTED -------------
+
+
+def test_simple_winback_fabricated_fact_still_rejected():
+    """Anti-fabrication fires on the SIMPLE tier — the ARRR filter does NOT
+    save a fabricated customer fact. Two REVISE verdicts each carrying a
+    ``pillar`` invented-number critique (path ``target_cohort.selection_reason``,
+    NOT expected_arrr) → first RETRY, second REJECTED. The fabrication critique
+    survives the filter end-to-end onto the rejection feedback."""
+    fab = (
+        "target_cohort.selection_reason cites 'cafés have a 30% return rate' — "
+        "invented per-vertical number, not in the bundle."
+    )
+    evaluator = FakeSelfEvaluator(
+        verdicts=[
+            _verdict(SelfEvaluateOutcome.REVISE, pillar=[fab]),
+            _verdict(SelfEvaluateOutcome.REVISE, pillar=[fab]),
+        ]
+    )
+    gate, _ = _simple_tier_gate(evaluator)
+    draft = _winback_draft(cohort_size=5)
+
+    first = gate.run(draft)
+    assert first.action is GateAction.RETRY  # NOT shipped — fabrication survived
+    assert evaluator.last_tier is GradeTier.SIMPLE
+    # The surviving critique is in the retry feedback (not stripped):
+    assert any("invented per-vertical" in m["content"] for m in first.feedback_messages)
+
+    second = gate.run(draft)
+    assert second.action is GateAction.REJECTED
+    assert second.self_evaluate_status is SelfEvaluateStatus.FAILED_AFTER_REVISIONS
+    assert second.rejection_feedback is not None
+    assert second.rejection_feedback.pillar == [fab]  # carried, not dropped
+
+
+# ---- Case 2: PII leak on simple → critique survives the ARRR filter ----------
+
+
+def test_simple_winback_pii_leak_critique_survives_filter():
+    """A PII-leak critique (literal phone in template_params, path
+    ``message_plan.template_params`` under ``legal``) is NOT an expected_arrr
+    path → the ARRR-drop does NOT strip it → the draft still fails on simple."""
+    pii = (
+        "message_plan.template_params contains the literal '+919321553267' — "
+        "phone PII leaked into template params."
+    )
+    evaluator = FakeSelfEvaluator(
+        verdicts=[
+            # Mix a droppable ARRR critique alongside the PII one: only the ARRR
+            # entry should vanish; the PII entry must still fail the draft.
+            _verdict(
+                SelfEvaluateOutcome.REVISE,
+                legal=[pii],
+                pillar=["expected_arrr.basis overstates confidence."],
+            ),
+        ]
+    )
+    gate, _ = _simple_tier_gate(evaluator)
+    first = gate.run(_winback_draft(cohort_size=3))
+
+    assert first.action is GateAction.RETRY  # PII critique survived → not shipped
+    rendered = "\n".join(m["content"] for m in first.feedback_messages)
+    assert "+919321553267" in rendered  # PII critique present
+    assert "expected_arrr.basis" not in rendered  # ARRR critique dropped
+
+
+# ---- Case 3: ungrounded cohort on simple → consistency-grounding still bites -
+
+
+def test_simple_winback_ungrounded_cohort_still_revises():
+    """The cohort-grounding sub-rule of ``consistency`` (NOT the ARRR sub-rule)
+    survives the relaxation: targeting a bucket with zero real customers still
+    REVISEs on simple."""
+    crit = (
+        "target_cohort.cohort_label '90-180 day dormants' but context_summary "
+        "shows 0 customers in that bucket."
+    )
+    evaluator = FakeSelfEvaluator(
+        verdicts=[_verdict(SelfEvaluateOutcome.REVISE, consistency=[crit])]
+    )
+    gate, _ = _simple_tier_gate(evaluator)
+    first = gate.run(_winback_draft(cohort_size=4))
+
+    assert first.action is GateAction.RETRY  # grounding critique survived
+    assert evaluator.last_tier is GradeTier.SIMPLE
+
+
+# ---- Case 4: THE one-directionality proof (direct filter unit test) ----------
+
+
+def test_arrr_filter_is_provably_one_directional():
+    """PROVE (don't assert) one-directionality: feed a MIXED critique set
+    {expected_arrr.x, target_cohort.y, message_plan.z, legal.w} through the
+    filter → ONLY the expected_arrr entry is dropped; the other 3 survive."""
+    arrr = "expected_arrr.high_paise implausibly large for the cohort."
+    cohort = "target_cohort.selection_reason cites an invented '30% return rate'."
+    msg = "message_plan.template_params contains 'last chance' — pressure language."
+    legal = "legal: misleading 'guaranteed savings' claim."  # legal-category, no path prefix
+
+    fb = SelfEvaluateFeedback(
+        schema=["evidence_refs not cited by any prose marker: ['E2']"],
+        pillar=[arrr, cohort],
+        consistency=[arrr],
+        legal=[msg, legal],
+    )
+    out = _filter_arrr_only(fb)
+
+    # The expected_arrr entries are the ONLY ones removed:
+    assert out.pillar == [cohort]          # arrr dropped, cohort kept
+    assert out.consistency is None         # was ARRR-only → empties to None
+    assert out.legal == [msg, legal]       # neither is an expected_arrr path
+    assert out.schema == fb.schema         # untouched
+    assert not out.is_empty()              # 4 non-ARRR critiques remain
+
+    # And the predicate itself: ONLY expected_arrr-leading strings match.
+    assert _is_arrr_critique(arrr) is True
+    assert _is_arrr_critique("expected_arrr.basis overstates confidence.") is True
+    assert _is_arrr_critique("`expected_arrr.low_paise` too low.") is True
+    assert _is_arrr_critique(cohort) is False
+    assert _is_arrr_critique(msg) is False
+    assert _is_arrr_critique(legal) is False
+    # A critique that merely MENTIONS expected_arrr mid-sentence but cites a
+    # different leading path is NOT dropped (the path is the leading token):
+    assert (
+        _is_arrr_critique(
+            "target_cohort.cohort_size too small to justify expected_arrr.high_paise."
+        )
+        is False
+    )
+
+
+def test_simple_tier_mixed_revise_keeps_non_arrr_through_gate():
+    """End-to-end through gate.run: a mixed REVISE on the simple tier surfaces
+    the 3 non-ARRR critiques on RETRY and drops only the ARRR one."""
+    evaluator = FakeSelfEvaluator(
+        verdicts=[
+            _verdict(
+                SelfEvaluateOutcome.REVISE,
+                pillar=[
+                    "expected_arrr.basis overstates confidence.",
+                    "target_cohort.selection_reason invented '30% return rate'.",
+                ],
+                consistency=["target_cohort.cohort_label mismatches the snapshot."],
+                legal=["message_plan.template_params leaked '+9199...' PII."],
+            )
+        ]
+    )
+    gate, _ = _simple_tier_gate(evaluator)
+    first = gate.run(_winback_draft(cohort_size=6))
+
+    assert first.action is GateAction.RETRY
+    rendered = "\n".join(m["content"] for m in first.feedback_messages)
+    assert "expected_arrr.basis" not in rendered
+    assert "target_cohort.selection_reason invented" in rendered
+    assert "target_cohort.cohort_label mismatches" in rendered
+    assert "message_plan.template_params leaked" in rendered
+
+
+# ---- Case 5: OFFER template (money_bearing) → strict, never the simple lane --
+
+
+def test_offer_template_uses_strict_grade_and_rejects_thin():
+    """``team_winback_offer`` is money_bearing → STRICT regardless of size. An
+    ARRR-only REVISE is NOT dropped (strict) → the thin/fabricated offer
+    REVISEs, then REJECTs. It NEVER enters the simple lane."""
+    arrr = "expected_arrr.basis overstates confidence."
+    evaluator = FakeSelfEvaluator(
+        verdicts=[
+            _verdict(SelfEvaluateOutcome.REVISE, pillar=[arrr]),
+            _verdict(SelfEvaluateOutcome.REVISE, pillar=[arrr]),
+        ]
+    )
+    # Allow-list BOTH templates so the offer passes the name check and the
+    # money_bearing clause is what forces strict (defence-in-depth proof).
+    gate, _ = _simple_tier_gate(
+        evaluator, templates=("team_winback_simple", "team_winback_offer")
+    )
+    draft = _winback_draft(template_id="team_winback_offer", cohort_size=5)
+
+    first = gate.run(draft)
+    assert first.action is GateAction.RETRY  # ARRR NOT dropped → strict
+    assert evaluator.last_tier is GradeTier.STRICT  # money_bearing forced strict
+    second = gate.run(draft)
+    assert second.action is GateAction.REJECTED
+
+
+# ---- Case 6: cohort > L3_AUTO_MAX_BATCH (>20) on simple template → strict ----
+
+
+def test_simple_template_large_cohort_falls_to_strict():
+    """A ``team_winback_simple`` draft with cohort_size=21 (> L3_AUTO_MAX_BATCH)
+    falls to STRICT — the ARRR critique is NOT dropped, the draft REVISEs. The
+    threshold bites; a 20-cohort would have shipped."""
+    from orchestrator.agents.autonomy import L3_AUTO_MAX_BATCH
+
+    arrr = "expected_arrr.high_paise implausibly large for the cohort."
+    evaluator = FakeSelfEvaluator(
+        verdicts=[_verdict(SelfEvaluateOutcome.REVISE, consistency=[arrr])]
+    )
+    gate, _ = _simple_tier_gate(evaluator)
+    first = gate.run(_winback_draft(cohort_size=L3_AUTO_MAX_BATCH + 1))
+
+    assert first.action is GateAction.RETRY  # strict — ARRR survived
+    assert evaluator.last_tier is GradeTier.STRICT
+
+
+def test_cohort_ceiling_boundary_is_l3_auto_max_batch():
+    """Boundary: exactly L3_AUTO_MAX_BATCH ⇒ SIMPLE; one over ⇒ STRICT.
+    The ceiling is the imported constant, not a hardcoded 20."""
+    from orchestrator.agents.autonomy import L3_AUTO_MAX_BATCH
+
+    gate, _ = _simple_tier_gate(FakeSelfEvaluator(verdicts=[]))
+    at_ceiling = _winback_draft(cohort_size=L3_AUTO_MAX_BATCH)
+    over_ceiling = _winback_draft(cohort_size=L3_AUTO_MAX_BATCH + 1)
+    assert gate._classify_tier(at_ceiling) is GradeTier.SIMPLE
+    assert gate._classify_tier(over_ceiling) is GradeTier.STRICT
+
+
+# ---- Case 7: money_bearing-resolve error / registry drift → fail-closed ------
+
+
+def test_unresolvable_template_fails_closed_to_strict():
+    """An allow-listed template name that the registry cannot resolve (drift /
+    typo / retired) → ``_resolve_money_bearing`` fail-closes to money-bearing →
+    STRICT. The ARRR critique is NOT dropped. A drifted template can NEVER reach
+    the relaxed lane."""
+    arrr = "expected_arrr.basis overstates confidence."
+    evaluator = FakeSelfEvaluator(
+        verdicts=[_verdict(SelfEvaluateOutcome.REVISE, pillar=[arrr])]
+    )
+    # Put a GHOST template (not in the registry yaml) in the allow-list so it
+    # passes the name check but fails the registry resolve.
+    gate, _ = _simple_tier_gate(evaluator, templates=("team_winback_ghost_xyz",))
+    draft = _winback_draft(template_id="team_winback_ghost_xyz", cohort_size=3)
+
+    first = gate.run(draft)
+    assert first.action is GateAction.RETRY  # fail-closed strict — ARRR survived
+    assert evaluator.last_tier is GradeTier.STRICT
+
+
+# ---- Case 8: kill-switch (simple_tier.enabled=false) → all-strict ------------
+
+
+def test_kill_switch_off_forces_strict_for_every_draft():
+    """``simple_tier_enabled=False`` reverts the gate to all-strict: even a
+    canonical simple win-back (small cohort, non-money-bearing) takes the FULL
+    grade and the ARRR critique is NOT dropped. A clean one-line revert."""
+    arrr = "expected_arrr.basis overstates confidence."
+    evaluator = FakeSelfEvaluator(
+        verdicts=[_verdict(SelfEvaluateOutcome.REVISE, pillar=[arrr])]
+    )
+    gate, _ = _simple_tier_gate(evaluator, enabled=False)
+    first = gate.run(_winback_draft(cohort_size=3))
+
+    assert first.action is GateAction.RETRY  # strict — ARRR survived
+    assert evaluator.last_tier is GradeTier.STRICT
+
+
+# ---- Classification matrix + config wiring ----------------------------------
+
+
+def test_classify_tier_matrix():
+    """The full predicate matrix in one place."""
+    gate, _ = _simple_tier_gate(FakeSelfEvaluator(verdicts=[]))
+    assert (
+        gate._classify_tier(_winback_draft(template_id="team_winback_simple", cohort_size=20))
+        is GradeTier.SIMPLE
+    )
+    # Non-allow-listed template → strict.
+    assert (
+        gate._classify_tier(_winback_draft(template_id="team_winback_v1", cohort_size=5))
+        is GradeTier.STRICT
+    )
+    # Offer (money_bearing) — not in this gate's allow-list → strict.
+    assert (
+        gate._classify_tier(_winback_draft(template_id="team_winback_offer", cohort_size=5))
+        is GradeTier.STRICT
+    )
+
+
+def test_gate_config_loads_simple_tier_block_from_yaml():
+    """Production wiring: GateConfig.load() reads the simple_tier block, and the
+    allow-list is pinned to the executor's WINBACK_TEMPLATE_NAME (no drift)."""
+    from orchestrator.agents.sales_recovery_executor import WINBACK_TEMPLATE_NAME
+
+    cfg = GateConfig.load()
+    assert cfg.simple_tier_enabled is True
+    assert WINBACK_TEMPLATE_NAME in cfg.simple_templates
+
+
+def test_strict_path_untouched_for_legacy_template():
+    """STRICT proof: a legacy ``team_winback_v1`` draft (the existing-test
+    fixture template) is graded STRICT and an ARRR-only REVISE is NOT dropped —
+    the calibration only ADDS the simple lane; it never widens the legacy one."""
+    arrr = "expected_arrr.basis overstates confidence."
+    evaluator = FakeSelfEvaluator(
+        verdicts=[_verdict(SelfEvaluateOutcome.REVISE, pillar=[arrr])]
+    )
+    gate, _ = _simple_tier_gate(evaluator)
+    first = gate.run(_winback_draft(template_id="team_winback_v1", cohort_size=5))
+    assert first.action is GateAction.RETRY  # not dropped → strict
+    assert evaluator.last_tier is GradeTier.STRICT

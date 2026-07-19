@@ -1,0 +1,23 @@
+{
+  "name": "onboarding_resume_after_interruption_deferred",
+  "domain": "onboarding",
+  "critical": true,
+  "setup_args": ["--onboarded", "--flow", "deferred"],
+  "expected_fail": false,
+  "notes": "Owner previously declined the paced post-profile flow (journey.py's __flow__='deferred' — paused but resumable on a clear connect-intent) and returns after a real-life gap. _resolve_deferred_intent's connect-intent floor ('connect'/'ready'/'start'/etc, including Hinglish 'shuru') re-engages WITHOUT restarting onboarding from scratch. Distinct from stop_resume.json (which covers a natural-language STOP over the deterministic opt-out gate at the ready_asked beat) — this exercises the DEFERRED flow state specifically. Setup: `setup --onboarded --flow deferred` then `script <tenant> onboarding_resume_after_interruption_deferred.json`.",
+  "steps": [
+    {
+      "message": "sorry yaar, ek family emergency ho gaya tha, ab free hoon",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "note": "Owner explains the gap without a clear connect-intent token yet. Expect an understanding, non-judgmental acknowledgement — not a restart of onboarding from scratch."
+    },
+    {
+      "message": "haan chalo ab shuru karte hain, data connect karte hain",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_not_contains": ["what is your business name", "what do you sell", "which city", "tell us a little about your business"],
+      "note": "Clear resume/connect intent. Expect the paced flow to pick back up from where it paused (e.g. offering the next integration step) WITHOUT re-asking any already-known profile basics."
+    }
+  ]
+}

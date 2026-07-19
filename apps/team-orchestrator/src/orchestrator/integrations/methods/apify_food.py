@@ -45,6 +45,7 @@ from anthropic import Anthropic
 
 from orchestrator.integrations.methods._image_adapter import IngestionSummary
 from orchestrator.knowledge.l1 import upsert_business_profile
+from orchestrator.security.prompt_quarantine import FRAMING, fence
 
 logger = logging.getLogger(__name__)
 
@@ -52,10 +53,13 @@ _MODELS_YAML = Path(__file__).resolve().parents[4] / "config" / "models.yaml"
 _THEME_PROMPT = (
     Path(__file__).resolve().parents[2] / "agent" / "prompts" / "zomato_themes_v1.md"
 )
-_SWIGGY_ACTOR = "infoweaver~my-actor"
+_SWIGGY_ACTOR = "thirdwatch~swiggy-scraper"  # VT-110: the account's real Swiggy actor (infoweaver~my-actor was a wrong/generic id → fail-soft EMPTY context)
 _ZOMATO_ACTOR = "easyapi~zomato-restaurant-reviews-scraper"
 _TOKEN_ENV = "APIFY_API_TOKEN"
 _MAX_OUTPUT_TOKENS = 1024
+# VT-636: attacker-writable (Zomato reviewText is public, third-party-authored). Ingestion-time
+# cap (defense-in-depth); the theme-LLM consumption site fences + caps again (fence(..., max_len=500)).
+_REVIEW_TEXT_MAX_LEN = 1000
 
 # (actor_id, run_input, token) -> dataset items.
 FetchFn = Callable[[str, dict[str, Any], str], list[dict[str, Any]]]
@@ -64,14 +68,11 @@ ThemeFn = Callable[[list[str]], list[dict[str, Any]]]
 
 
 def _default_fetch(actor: str, run_input: dict[str, Any], token: str) -> list[dict[str, Any]]:
-    """Real Apify call (run-sync-get-dataset-items REST endpoint, httpx)."""
-    import httpx
+    """Real Apify call via the shared async start-poll-fetch client (VT-364 — replaces the blocking
+    run-sync 120s call that ReadTimeout'd on slow actors like Zomato)."""
+    from orchestrator.integrations.methods.apify_client import run_actor
 
-    url = f"https://api.apify.com/v2/acts/{actor}/run-sync-get-dataset-items"
-    resp = httpx.post(url, params={"token": token}, json=run_input, timeout=120.0)
-    resp.raise_for_status()
-    data = resp.json()
-    return data if isinstance(data, list) else []
+    return run_actor(actor, run_input, token)
 
 
 def _read_profile(tenant_id: UUID | str) -> dict[str, Any]:
@@ -106,14 +107,16 @@ def _query_input(business_name: str | None, locality: str | None, place_url: str
 # --- Swiggy (listing, no PII) -------------------------------------------------
 
 def _swiggy_aggregate(item: dict[str, Any]) -> dict[str, Any]:
-    """Allowlist — listing fields only (no PII present in Swiggy listings)."""
+    """Allowlist — listing fields only (no PII present in Swiggy listings). Reads BOTH the
+    thirdwatch~swiggy-scraper snake_case keys (VT-110, the real account actor) and the legacy
+    camelCase keys, so a parser shape change can't silently drop a field (the fail-soft trap)."""
     return {
-        "rating": item.get("rating") or item.get("avgRating"),
-        "cuisines": item.get("cuisines"),
-        "cost_for_two": item.get("costForTwo") or item.get("price"),
-        "delivery_time": item.get("deliveryTime") or item.get("sla"),
-        "offer": item.get("offer") or item.get("aggregatedDiscountInfo"),
-        "is_advertisement": bool(item.get("isAdvertisement", False)),
+        "rating": item.get("rating") or item.get("avgRating") or item.get("google_rating"),
+        "cuisines": item.get("cuisines") or item.get("cuisine"),
+        "cost_for_two": item.get("costForTwo") or item.get("price") or item.get("cost_for_two") or item.get("cost_for_two_rupees"),
+        "delivery_time": item.get("deliveryTime") or item.get("sla") or item.get("delivery_time") or item.get("delivery_time_minutes"),
+        "offer": item.get("offer") or item.get("aggregatedDiscountInfo") or item.get("offers"),
+        "is_advertisement": bool(item.get("isAdvertisement", item.get("is_promoted", False))),
     }
 
 
@@ -191,12 +194,43 @@ def _sentiment_distribution(ratings: list[float]) -> dict[str, int]:
     return {"positive": pos, "neutral": neu, "negative": neg}
 
 
+def _zomato_review_rating(item: dict[str, Any]) -> float:
+    """Extract a review's numeric star rating. VT-110 live canary: easyapi~zomato puts the number
+    in ``ratingV2`` (a STRING like '5'); ``rating`` is a dict (``{'entities': [...]}``) — NOT a
+    number, so the old ``float(item['rating'])`` read silently yielded 0 → overall_rating None +
+    all-zero sentiment. Try ratingV2 first, then the legacy numeric ``rating``/``reviewRating``.
+    Returns 0.0 if unparseable (drops to no-rating, never crashes)."""
+    for v in (item.get("ratingV2"), item.get("rating"), item.get("reviewRating")):
+        try:
+            f = float(v)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            continue
+        if f > 0:
+            return f
+    return 0.0
+
+
 def _resolve_theme_model() -> str:
     env = os.environ.get("VIABE_ENV", "test").lower()
     slot = "production" if env == "production" else "test"
     with open(_MODELS_YAML) as f:
         config = yaml.safe_load(f)
     return cast(str, config["zomato_theme_extraction"][slot])
+
+
+def _build_theme_prompt(base: str, review_texts: list[str]) -> str:
+    """Render the theme-clustering user-content text.
+
+    VT-636: ``review_texts`` is attacker-writable (public Zomato reviewText — any third party
+    can post one). Each review is fenced individually before joining; ``FRAMING`` is added ONCE
+    at the top of this (self-contained) prompt. The theme-clustering instruction text (``base``
+    / the "REVIEW TEXTS:" label) stays OUTSIDE the fence — only the reviews themselves are
+    untrusted data.
+    """
+    fenced = "\n".join(
+        f"- {fence(t, source='review_text', max_len=500)}" for t in review_texts if t
+    )
+    return f"{FRAMING}\n\n{base}\n\nREVIEW TEXTS:\n{fenced}\n"
 
 
 def _default_themes(review_texts: list[str]) -> list[dict[str, Any]]:
@@ -206,11 +240,10 @@ def _default_themes(review_texts: list[str]) -> list[dict[str, Any]]:
     client = Anthropic()
     model = _resolve_theme_model()
     base = _THEME_PROMPT.read_text(encoding="utf-8")
-    joined = "\n".join(f"- {t}" for t in review_texts if t)
+    text = _build_theme_prompt(base, review_texts)
     resp = client.messages.create(
         model=model, max_tokens=_MAX_OUTPUT_TOKENS,
-        messages=[{"role": "user", "content": [
-            {"type": "text", "text": f"{base}\n\nREVIEW TEXTS:\n{joined}\n"}]}],
+        messages=[{"role": "user", "content": [{"type": "text", "text": text}]}],
     )
     raw = "".join(
         getattr(b, "text", "") for b in resp.content if getattr(b, "type", "") == "text"
@@ -269,13 +302,10 @@ def ingest_zomato(
     ratings: list[float] = []
     texts: list[str] = []
     for it in items:
-        try:
-            ratings.append(float(it.get("rating") or it.get("reviewRating") or 0) or 0.0)
-        except (TypeError, ValueError):
-            ratings.append(0.0)
+        ratings.append(_zomato_review_rating(it))
         txt = it.get("reviewText") or it.get("text") or it.get("review")
         if txt:
-            texts.append(str(txt))
+            texts.append(str(txt)[:_REVIEW_TEXT_MAX_LEN])
 
     rated = [r for r in ratings if r > 0]
     overall_rating = round(sum(rated) / len(rated), 2) if rated else None

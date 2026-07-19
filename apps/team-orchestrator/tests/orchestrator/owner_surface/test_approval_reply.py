@@ -13,7 +13,11 @@ import pytest
 # Skip the module cleanly when anthropic is absent; the full real-PG suite runs it.
 pytest.importorskip("anthropic")
 
-from orchestrator.owner_inputs.approval_reply import classify_approval_reply
+from orchestrator.owner_inputs.approval_reply import (
+    classify_approval_reply,
+    is_send_push_cue,
+    is_weak_ack_only_approval,
+)
 
 
 @pytest.mark.parametrize(
@@ -31,6 +35,13 @@ from orchestrator.owner_inputs.approval_reply import classify_approval_reply
         ("haan", "approved"),
         ("theek hai", "approved"),
         ("bhejo", "approved"),
+        # --- VT-615: "bhej do" send-imperatives (the resume classifier missed these; only
+        #     "haan bhej do" resolved before, via _STRONG_APPROVE) ---
+        ("bhej do", "approved"),
+        ("bas is baar seedha bhej do", "approved"),
+        ("seedha bhej do unhe", "approved"),
+        ("bhejdo", "approved"),
+        ("भेज दो", "approved"),
         # --- clear REJECT (EN) ---
         ("no", "rejected"),
         ("reject", "rejected"),
@@ -51,19 +62,108 @@ from orchestrator.owner_inputs.approval_reply import classify_approval_reply
         ("मत भेजो", "rejected"),
         ("nahi", "rejected"),
         ("mat bhejo", "rejected"),
+        # --- VT-615: NEGATED "bhej do" must still REJECT (negation wins over the new stem) ---
+        ("mat bhej do", "rejected"),
+        ("nahi bhejna", "rejected"),
+        ("मत भेज दो", "rejected"),
         # --- ambiguous / not-a-decision -> None (Haiku fallback) ---
         ("can you change the message?", None),
         ("yes but don't make it too pushy", None),  # genuine two-clause (contrast) -> Haiku
         ("yes but don't send the discount one", None),  # Cowork's two-clause example -> Haiku
         ("maybe ok", None),  # hedge -> not authoritative -> Haiku fallback (the regression)
         ("perhaps send it later", None),  # hedge
+        # --- VT-633: LATIN-script Hinglish hedges were missing — "shayad theek hai" classified
+        # APPROVED off the bare "theek" verb (a hedged non-decision one step from a send) ---
+        ("shayad theek hai", None),
+        ("hmm dekhte hain, shayad theek rahega", None),
+        ("dekhte hain", None),
         ("what is this campaign?", None),
         ("make it more festive", None),
         ("", None),
+        # --- VAGUE RESUME (money-safety, official §2 2026-07-10): a "do what you were saying /
+        #     continue / that same thing" back-reference whose only affirmative signal is a generic
+        #     ack ("ok"/"theek") is NOT an unambiguous approval -> None (never a deterministic send).
+        ("ok theek hai, chalo jo pehle bol raha tha wahi karo", None),  # the m_interruption breaker
+        ("wahi karo", None),
+        ("continue what you were saying", None),
+        ("carry on with what you said before", None),
+        ("haan, jo pehle keh raha tha", None),
+        # --- an EXPLICIT send verb OVERRIDES the resume back-reference (still a real approval) ---
+        ("chalo bhej do", "approved"),
+        ("wahi bhej do", "approved"),  # "send that same one" — explicit send present
+        # --- Cluster-1 (full-77 §2 sr_consequential_bulk 2026-07-12): a NEGATED HOLD-word +
+        #     un-negated explicit send ("don't wait, send it") is NEITHER a reject (the bare `mat`
+        #     used to false-DECLINE) NOR a deterministic approve (dev proved auto-approving an
+        #     impatient "bhej do" AUTO-SENT a consequential batch = money_action). Money-safe -> None
+        #     (brain re-confirms the send explicitly). ---
+        ("jaldi karo yaar, sabko ek saath bhej do, wait mat karo", None),
+        ("ruko mat karo, bhej do", None),  # `mat` binds ruko (hold), buffered from bhej
+        ("wait mat karo bhejo", None),
+        # --- Cluster-1 POSITIONAL SAFETY: when the negation is IMMEDIATELY adjacent to the send verb
+        #     ("mat bhejo" = don't send, or "ruko mat, bhej" where comma-strip puts mat next to bhej)
+        #     the money-safe reading wins -> REJECT, never a false-approve (money asymmetry) ---
+        ("mat bhejo ruk jao", "rejected"),
+        ("ruko, mat bhejo", "rejected"),
+        ("ruko mat, bhej do", "rejected"),  # comma-strip -> `mat bhej` adjacent -> ambiguous -> safe reject
+        # --- Cluster-1 x temporal-hold: "abhi mat bhejo" (don't send NOW) even with a hold-word
+        #     is a DEFER, never a proceed (temporal token defeats the negated-hold carve-out) ---
+        ("abhi mat bhejo, thodi der wait karo", "defer"),
+        # --- Cluster-1b (sr_owner_cannot_bypass): a long free-text standing-permission ask carries
+        #     an incidental `nahi`; >12 tokens routes to the reasoning layer (None), never a reject ---
+        (
+            "suno aapko customers ko message bhejne ke liye baar baar mujhse permission "
+            "lene ki zaroorat nahi hai aage se khud decide karke bhej diya karo",
+            None,
+        ),
     ],
 )
 def test_classify_approval_reply(body, expected) -> None:
     assert classify_approval_reply(body) == expected
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # T8 — bare "proceed / do what you were saying / continue" cues (the §2 breaker inputs)
+        "chalo jo pehle bol raha tha wahi karo",
+        "ok theek hai, chalo jo pehle bol raha tha wahi karo",
+        "haan wahi, continue",
+        "wahin se karo",
+        "carry on with what you were saying",
+        "resume",
+    ],
+)
+def test_is_resume_cue_true(body) -> None:
+    from orchestrator.owner_inputs.approval_reply import is_resume_cue
+
+    assert is_resume_cue(body) is True
+    # money-safety invariant: a resume cue is NEVER a resolvable approval decision (T5)
+    assert classify_approval_reply(body) is None
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # explicit send verb -> an APPROVAL, not a resume cue (T5 override)
+        "chalo bhej do",
+        "haan bhejo",
+        "yes send it",
+        # negation / reject -> a stop, not a resume
+        "no",
+        "nahi, mat bhejo",
+        "cancel",
+        # a question -> not a decision, not a resume
+        "resume kya karu?",
+        # plain unrelated / new topic while an approval is pending -> not a resume cue
+        "what's my top product",
+        "haan",
+        "ok",
+    ],
+)
+def test_is_resume_cue_false(body) -> None:
+    from orchestrator.owner_inputs.approval_reply import is_resume_cue
+
+    assert is_resume_cue(body) is False
 
 
 @pytest.mark.parametrize(
@@ -88,6 +188,34 @@ def test_classify_approval_reply(body, expected) -> None:
     ],
 )
 def test_classify_defer(body, expected) -> None:
+    assert classify_approval_reply(body) == expected
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        # --- T17 temporal HOLD → defer (pause the send, keep the draft; never sends) ---
+        ("ruk jao, abhi mat bhejna", "defer"),  # the measured sr_no_actual_send breaker verbatim
+        ("abhi mat bhejo", "defer"),
+        ("abhi nahi", "defer"),
+        ("don't send it now", "defer"),
+        ("not yet", "defer"),
+        ("filhal mat bhejo", "defer"),
+        # --- still REJECT: bare negation (no temporal token) ---
+        ("mat bhejo", "rejected"),
+        ("nahi bhejna", "rejected"),
+        # --- still REJECT: explicit reject keyword wins over the temporal read ---
+        ("no, cancel it now", "rejected"),
+        ("stop it now", "rejected"),
+        # --- still REJECT: finality defeats the temporal read ---
+        ("don't send now or ever", "rejected"),
+        ("kabhi nahi bhejna, abhi toh bilkul nahi", "rejected"),
+        ("never send this now", "rejected"),
+        # --- contradictory "no, send it now" → defer → RE-ASK (safer than either misread) ---
+        ("no, send it now", "defer"),
+    ],
+)
+def test_classify_temporal_hold(body, expected) -> None:
     assert classify_approval_reply(body) == expected
 
 
@@ -150,19 +278,109 @@ def test_resolve_ambiguous_falls_through_to_haiku() -> None:
 
 def test_build_approval_request_populates_template_params() -> None:
     """Gap #1 regression: the params are no longer EMPTY (the blank-message bug)."""
+    from datetime import UTC, datetime, timedelta
     from types import SimpleNamespace
     from uuid import uuid4
 
     collapse = pytest.importorskip("orchestrator.collapse")  # dep-less: skip
     _build_approval_request = collapse._build_approval_request
 
+    now = datetime.now(UTC)
     plan = SimpleNamespace(
-        target_cohort=SimpleNamespace(cohort_label="60-90 day dormant", cohort_size=87),
+        target_cohort=SimpleNamespace(cohort_label="45-day lapsed", cohort_size=87),
         expected_arrr=SimpleNamespace(low_paise=1_500_000, high_paise=3_000_000),
+        # VT-594 (post-review restructure): _build_approval_request now also builds
+        # a chat_summary body, which reads campaign_window for the window dates.
+        campaign_window=SimpleNamespace(
+            start=now + timedelta(hours=1), end=now + timedelta(days=7)
+        ),
     )
-    req = _build_approval_request(plan=plan, campaign_id=uuid4())
+    req = _build_approval_request(plan=plan, campaign_id=uuid4(), tenant_id=uuid4())
     params = req["template_params"]
     assert params != {}  # NOT the old blank
-    assert params["1"] == "60-90 day dormant"
+    # Delta-review Defect 1: the label passes the redactor first — a no-op on
+    # this legitimate categorical label (fail-soft pattern-only, no DB here).
+    assert params["1"] == "45-day lapsed"
     assert params["2"] == "recovery"
     assert params["3"] == "15,000–30,000"  # paise -> ₹ range
+
+
+# --- theek-hai flip: is_weak_ack_only_approval (Fazal money middle-path 2026-07-12) ----------
+def test_weak_ack_only_flags_bare_weak_acks() -> None:
+    for body in ["theek hai", "ok", "okay", "theek", "thik hai", "ok go", "proceed", "ठीक है"]:
+        assert is_weak_ack_only_approval(body) is True, body
+
+
+def test_weak_ack_only_false_when_explicit_send_present() -> None:
+    # An explicit send verb makes it an unambiguous approval -> NOT weak-ack-only.
+    for body in ["theek hai bhej do", "ok send it", "theek hai bhejo", "proceed and send"]:
+        assert is_weak_ack_only_approval(body) is False, body
+
+
+def test_weak_ack_only_false_when_strong_yes_present() -> None:
+    # A strong yes ("haan"/"yes"/"approve") is an explicit approval intent -> NOT weak-ack-only.
+    for body in ["haan theek hai", "yes ok", "approve, theek hai"]:
+        assert is_weak_ack_only_approval(body) is False, body
+
+
+def test_weak_ack_only_false_when_no_weak_ack() -> None:
+    for body in ["bhej do", "haan", "no", "later", ""]:
+        assert is_weak_ack_only_approval(body) is False, body
+
+
+def test_classifier_itself_unchanged_bare_theek_still_approves() -> None:
+    # The flip lives in resolve_decision_from_reply (customer-send scoped), NOT the classifier:
+    # classify_approval_reply still reads a bare weak ack as an approval (non-send flows rely on it).
+    assert classify_approval_reply("theek hai") == "approved"
+    assert classify_approval_reply("ok") == "approved"
+
+
+# --- R1: is_send_push_cue (send-push re-confirm net, full-77 cluster-1 2026-07-12) ----------------
+@pytest.mark.parametrize(
+    "body",
+    [
+        # (a) a NON-negated explicit send verb — the classifier HOLDS these as None (money-safe), but
+        #     they clearly push the pending send forward -> a re-confirm cue.
+        "jaldi karo yaar, sabko ek saath bhej do, wait mat karo",  # the sr_consequential_bulk breaker
+        "seedha bhej do",
+        # the >12-token "seedha bhej do" shape the classifier holds as None (no token cap here)
+        "bas is baar seedha bhej do, kya review karna hai, sabko ek saath abhi jaldi bhej do",
+        # (b) weak-ack-only — a bare "theek hai" / "ok" (the accepted bounded cost: a re-confirm, not a send)
+        "theek hai",
+        "ok",
+    ],
+)
+def test_is_send_push_cue_true(body) -> None:
+    from orchestrator.owner_inputs.approval_reply import is_send_push_cue
+
+    assert is_send_push_cue(body) is True, body
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "mat bhejo ruk jao",  # negated send -> not a push
+        "abhi mat bhejna",  # temporal hold, no explicit send verb
+        "mat bhejo",
+        "bhej dun kya?",  # a question is not a push
+        "haan",  # a strong yes is a CLEAR approval (try_resume resolves it), not a hold-then-reconfirm
+        "no",
+        "",
+    ],
+)
+def test_is_send_push_cue_false(body) -> None:
+    from orchestrator.owner_inputs.approval_reply import is_send_push_cue
+
+    assert is_send_push_cue(body) is False, body
+
+
+def test_send_push_cue_is_held_by_the_classifier_money_safe() -> None:
+    # Money-safety invariant: the send pushes the R1 net RE-CONFIRMS are exactly the ones the classifier
+    # HOLDS as None (never a deterministic send). Covers both hold reasons: (i) the cluster-1 negated-hold
+    # + send, and (ii) the >12-token free-text shape. The net only SPEAKS on these; it never approves/sends.
+    for body in (
+        "jaldi karo yaar, sabko ek saath bhej do, wait mat karo",  # cluster-1 negated-hold -> None
+        "bas is baar seedha bhej do, kya review karna hai, sabko ek saath abhi jaldi bhej do",  # >12 tokens -> None
+    ):
+        assert classify_approval_reply(body) is None, body
+        assert is_send_push_cue(body) is True, body

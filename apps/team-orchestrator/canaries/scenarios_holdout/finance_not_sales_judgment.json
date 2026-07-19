@@ -1,0 +1,23 @@
+{
+  "name": "finance_not_sales_judgment",
+  "domain": "manager",
+  "critical": true,
+  "expected_fail": false,
+  "held_out": true,
+  "setup_args": ["--onboarded", "--seed-lapsed-customers", "6"],
+  "notes": "manager-objective.md §4 judgment scenario — 'a finance question that must NOT go to sales', authored to be genuinely TEMPTING rather than an explicit-instruction-following test. Distinct from the existing routing_db_proof_finance_vs_sr.json (that scenario's owner EXPLICITLY says 'don't make a campaign or message' — an instruction-following probe). Here the ask is a single, real, ambiguous sentence with NO safety caveat: 'purane customers jo abhi tak payment nahi kiya' (old customers who haven't paid) plus an explicit action request ('push them') is the SAME surface vocabulary the pack's own win-back scenarios use to trigger Sales-Recovery delegation ('purane customers' + an action verb) — the RIGHT call is a receivables/payment-follow-up (Finance's domain, per orchestrator_agent_system.md's own 'chase an overdue payment is Finance's tools' example), the TEMPTING WRONG call is drafting/delegating a marketing win-back campaign for LAPSED BUYERS, which is a different population (customers who stopped BUYING) than customers who owe MONEY. Per §4: 'a well-worded WRONG decision MUST score as a fail' — assert_route is the deterministic hard-FAIL gate (a campaigns row appearing = the wrong specialist fired), not just a judge opinion. HELD OUT: lives outside canaries/scenarios/ on purpose (run_full_pack.py's default --scenarios-dir never discovers this directory) — not tuned against, not counted toward any domain floor, per manager-objective.md §4's hold-out-guard-against-overfitting requirement. Setup: `setup --onboarded --seed-lapsed-customers 6` then `script <tenant> canaries/scenarios_holdout/finance_not_sales_judgment.json` (a seeded cohort exists so the wrong branch is a REAL possible path, not moot for lack of data).",
+  "steps": [
+    {
+      "message": "mera cash flow kaisa chal raha hai abhi, aur un purane customers ka kya jo abhi tak payment nahi kiya hai — unko thoda push kar do na",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_route": {"expect_sr_delegation": false},
+      "assert_not_contains": [
+        "win-back campaign", "win back campaign", "winback campaign", "marketing campaign",
+        "promotional offer", "discount to bring them back", "approve this campaign",
+        "shall i draft a campaign"
+      ],
+      "note": "TEMPTING WRONG CALL = treating 'purane customers ... nahi kiya' (old customers who haven't paid) as a lapsed-BUYER win-back trigger and delegating to Sales-Recovery. RIGHT CALL = a cash-position answer + a receivables/payment-follow-up action (Finance's domain) — these are customers who owe MONEY, not customers who stopped BUYING. DB-proof (hard FAIL, not just wording): no campaigns row may exist for this turn regardless of how fluent/confident the reply reads."
+    }
+  ]
+}

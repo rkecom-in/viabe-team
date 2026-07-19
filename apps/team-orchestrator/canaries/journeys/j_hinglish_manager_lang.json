@@ -1,0 +1,44 @@
+{
+  "name": "j_hinglish_manager_lang",
+  "notes": "VT-663 P1 validation — an ONBOARDED owner asks the MANAGER brain questions in romanized Hinglish (intra-sentence code-mixing, the surface Fazal's live drive hit: 'Mera top customer kaun hai?' answered in English). Surface: reply-language binding. Tier-1: no silent drop, no fabricated data. THE POINT (judge/eyeball, Tier-2): the manager MUST reply in Hinglish/Hindi — the owner's register — NOT switch them to English. Pre-P1 the soft 'mirror' prompt let the brain fall back to English intermittently; P1 makes the language instruction authoritative. Plain-chat path (no seeded data) so the count ask resolves to an honest not-connected answer.",
+  "persona": {
+    "business": "a small kirana and general store that runs on WhatsApp",
+    "temperament": "busy, friendly, mixes Hindi and English in one breath",
+    "style": "hinglish",
+    "backstory": "You run a neighbourhood store and you text the way you talk — Hindi and English mixed in the same sentence. You want to understand what this Team assistant can do for you."
+  },
+  "setup_args": ["--onboarded"],
+  "phases": [
+    {
+      "name": "hinglish capability ask (persona)",
+      "steps": [
+        {
+          "persona_turn": {
+            "goal": "Hinglish mein (Hindi + English mix, ek hi sentence mein) greet karke poochho ki ye Team assistant marketing mein exactly kaise help karta hai",
+            "style": "hinglish"
+          },
+          "fallback_message": "Hey good morning! Aaj bahut kaam hai, but ek cheez pucchna tha — ye Team wala thing marketing mein exactly kaise help karega mujhe?",
+          "assert_no_silent": true,
+          "assert_not_d1": true,
+          "note": "Intra-sentence code-mixed capability question. Expect a real, register-appropriate answer IN HINGLISH — never an English-only reply."
+        }
+      ],
+      "wait_s": 4
+    },
+    {
+      "name": "hinglish status ask, no data (persona)",
+      "steps": [
+        {
+          "persona_turn": {
+            "goal": "Hinglish mein poochho ki apne customers ka count/status dekh sakte ho kya (koi data abhi connected nahi hai)",
+            "style": "hinglish"
+          },
+          "fallback_message": "Theek hai got it, thanks yaar. Waise mujhe abhi customer count wagera dekhna hai — aap dikha sakte ho?",
+          "assert_no_silent": true,
+          "assert_not_d1": true,
+          "note": "Code-mixed status ask with no data connected. NOTE (VT-663 P2 finding): the DETERMINISTIC status-net (owner_inputs/status_query.py:586) emits a hardcoded ENGLISH 'You currently have N customers in your ledger' regardless of owner language — P1 (brain-prompt binding) does NOT reach this deterministic net. P2 must language-bind the deterministic answer nets (not just Meta templates). Left un-asserted here because that copy is the ruled §2 2026-07-10 anti-hijack string; the language gap is tracked to P2, not a P1 failure."
+        }
+      ]
+    }
+  ]
+}

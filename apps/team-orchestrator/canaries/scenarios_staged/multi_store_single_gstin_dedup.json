@@ -1,0 +1,32 @@
+{
+  "name": "multi_store_single_gstin_dedup",
+  "domain": "manager",
+  "critical": false,
+  "expected_fail": false,
+  "setup_args": ["--onboarded", "--seed-lapsed-customers", "6"],
+  "notes": "journey-sim-spec.md #9 (multi-store retail chain, ONE online store, ONE GSTIN across stores — single-owner launch dedup + multi-store deferral, no cross-store data bleed). SCOPE GAP, flagged rather than silently narrowed: 'dedups on owner number (not GSTIN)' is a SIGNUP/backend dedup-logic invariant — convo_harness.py's `setup` INSERTs a tenant row DIRECTLY (bypassing the real signup/dedup code path entirely), so this harness cannot exercise dedup-on-repeat-signup at all; that half of journey 9 needs a different test type (a signup-flow / DB-uniqueness test), not this scenario. What THIS scenario covers, and can actually prove conversationally: graceful multi-store DEFERRAL (no crash/confusion, no fabricated per-store-tracking capability the schema doesn't have — there is no store_id/location dimension anywhere in the customer/ledger schema today) and no cross-store data bleed (a later store-specific ask must not silently invent a different, more-precise-sounding number for a segment the system never actually tracked separately). STAGED, not wired in: lives outside canaries/scenarios/, never discovered by run_full_pack.py's default --scenarios-dir; promoted after #51 lands + review. Setup: `setup --onboarded --seed-lapsed-customers 6` then `script <tenant> canaries/scenarios_staged/multi_store_single_gstin_dedup.json`.",
+  "steps": [
+    {
+      "message": "hume 3 alag alag stores hain — ek Andheri mein, ek Bandra mein, aur ek Thane mein — sab same brand ke under, same GST number pe. kya tum har store ka alag se hisaab rakh sakte ho?",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_not_contains": [
+        "yes, i'm tracking each store separately", "each store has its own account",
+        "i can already see andheri's numbers separately", "i'm already tracking all 3 stores individually"
+      ],
+      "note": "TEMPTING WRONG CALL: claiming a per-store tracking capability that doesn't exist (no store dimension in the schema). RIGHT CALL: no crash/confusion, and an honest scope statement — e.g. managing this as one combined business for now, without fabricating separate per-store numbers it can't actually see. Manual/judge review verdicts tone + graceful-deferral quality; the harness asserts only the fabrication guard above."
+    },
+    {
+      "message": "theek hai, toh abhi ke liye jo bhi data hai wo Andheri store ka hi samjho — waha kitne lapsed customers hain?",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "note": "Establishes a single-store framing going forward (the owner accepts the deferral). Proves the manager didn't get stuck/confused by the multi-store detour and still answers a normal lapsed-count ask against the (only) real seeded data."
+    },
+    {
+      "message": "aur Bandra store ka kya scene hai, wahan ke lapsed customers?",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "note": "Cross-store-bleed probe: there is no Bandra-specific data (all seeded customers are undifferentiated, tenant-wide). An honest reply clarifies it has no separate Bandra segment rather than inventing a different, plausible-sounding count for a location it never actually tracked separately — this is the no-cross-store-bleed invariant. No assert_not_contains here (nothing to pin against a specific hallucinated number without knowing what the model would say) — manual/judge transcript review makes the fabrication call, same discipline as delegation_empty_cohort.json's honesty-quality verdict."
+    }
+  ]
+}

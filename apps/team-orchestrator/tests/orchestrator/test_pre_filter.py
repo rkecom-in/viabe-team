@@ -118,6 +118,23 @@ def test_opt_out_keyword_hi_routes_and_sets_flag(gate):
     assert row == (True,)
 
 
+def test_cd6_global_stop_routes_to_opt_out_handler(gate):
+    """R5 / CD6 — a Hinglish GLOBAL send-stop the keyword list misses ("bas ab message mat bhejo")
+    routes to the authoritative opt_out_handler (Rule a leg). A PER-CUSTOMER stop must NOT — it falls
+    through to the brain (the edge-router exclusion path), never a tenant opt-out (Fazal CD6)."""
+    tenant_id = _new_tenant(gate.dsn)
+    sub = _state(gate, tenant_id)
+
+    result = gate.pre_filter(_inbound(gate, "bas ab message mat bhejo"), sub)
+    assert isinstance(result, gate.t.RouteToDirectHandler)
+    assert result.handler_name == "opt_out_handler"
+
+    # per-customer stop ("Rajesh ko …") + a bare send-negation reply stay OUT of the opt-out leg
+    for body in ("Rajesh ko message mat bhejo", "us customer ko mat bhejo", "mat bhejo"):
+        r = gate.pre_filter(_inbound(gate, body), sub)
+        assert isinstance(r, gate.t.RouteToBrain), body
+
+
 # --- VT-303 data-inputs ENABLE (opt-in) + brain consent gate -----------------
 
 
@@ -143,7 +160,16 @@ def test_data_inputs_enable_handler_sets_owner_inputs_true(gate, monkeypatch):
     h = importlib.import_module(
         "orchestrator.direct_handlers.data_inputs_enable_handler"
     )
-    monkeypatch.setattr(h, "send_freeform_message", lambda body, phone: "SMfake")
+    sent: dict[str, object] = {}
+
+    def _capture(body: str, phone: str, **kwargs: object) -> str:
+        # VT-611 Package H0: the handler now passes tenant_id + surface='system' so this confirm
+        # lands in the lifetime conversation_log (was bare -> no-op'd).
+        sent["body"], sent["phone"] = body, phone
+        sent["tenant_id"], sent["surface"] = kwargs.get("tenant_id"), kwargs.get("surface")
+        return "SMfake"
+
+    monkeypatch.setattr(h, "send_freeform_message", _capture)
     tenant_id = _new_tenant(gate.dsn)
     sub = _state(gate, tenant_id)
     outcome = h.data_inputs_enable_handler(_inbound(gate, "ACTIVATE TEAM"), sub)
@@ -153,6 +179,8 @@ def test_data_inputs_enable_handler_sets_owner_inputs_true(gate, monkeypatch):
             "SELECT owner_inputs FROM tenants WHERE id = %s", (tenant_id,)
         ).fetchone()
     assert row == (True,)
+    assert sent["tenant_id"] == UUID(tenant_id)
+    assert sent["surface"] == "system"
 
 
 def test_consent_required_handler_sends_prompt_no_transmit(gate, monkeypatch):
@@ -163,8 +191,11 @@ def test_consent_required_handler_sends_prompt_no_transmit(gate, monkeypatch):
     )
     sent: dict[str, str] = {}
 
-    def _capture(body: str, phone: str) -> str:
+    def _capture(body: str, phone: str, **kwargs: object) -> str:
+        # VT-583: the handler now passes tenant_id + surface='system' so the ask is recorded as the
+        # lifetime-log consent marker (the runner gate keys the follow-up affirm off it).
         sent["body"], sent["phone"] = body, phone
+        sent["surface"] = str(kwargs.get("surface"))
         return "SMfake"
 
     monkeypatch.setattr(h, "send_freeform_message", _capture)
@@ -174,6 +205,28 @@ def test_consent_required_handler_sends_prompt_no_transmit(gate, monkeypatch):
     assert outcome["consent_prompt_sent"] is True
     # The prompt tells the owner exactly which phrase enables data inputs.
     assert "ACTIVATE TEAM" in sent["body"]
+    assert sent["surface"] == "system"  # recorded as the consent-ask marker
+
+
+def test_consent_required_handler_acknowledges_decline(gate, monkeypatch):
+    # cluster-5 (sr_consent_decline_then_explicit): an explicit decline ("no thanks, not right now")
+    # is ACKNOWLEDGED, not re-pushed verbatim — but the full prompt (incl. ACTIVATE TEAM) still ships
+    # so the exact-keyword floor still works on the next turn.
+    import importlib
+
+    h = importlib.import_module("orchestrator.direct_handlers.consent_required_handler")
+    sent: dict[str, str] = {}
+
+    def _capture(body: str, phone: str, **kwargs: object) -> str:
+        sent["body"] = body
+        return "SMfake"
+
+    monkeypatch.setattr(h, "send_freeform_message", _capture)
+    sub = _state(gate, _new_tenant(gate.dsn))
+    outcome = h.consent_required_handler(_inbound(gate, "no thanks, not right now"), sub)
+    assert outcome["consent_prompt_sent"] is True
+    assert sent["body"].startswith(h._DECLINE_ACK)  # decline acknowledged, not verbatim repeat
+    assert "ACTIVATE TEAM" in sent["body"]  # exact-keyword floor still available
 
 
 def test_brain_owner_inputs_ok_fail_closed_on_error(gate, monkeypatch):
@@ -195,7 +248,7 @@ def test_brain_owner_inputs_ok_true_after_enable(gate, monkeypatch):
     h = importlib.import_module(
         "orchestrator.direct_handlers.data_inputs_enable_handler"
     )
-    monkeypatch.setattr(h, "send_freeform_message", lambda body, phone: "SMfake")
+    monkeypatch.setattr(h, "send_freeform_message", lambda body, phone, **kw: "SMfake")
     tenant_id = _new_tenant(gate.dsn)
     # Default owner_inputs is FALSE -> gate would divert to consent_required.
     assert runner_mod._brain_owner_inputs_ok(tenant_id) is False
@@ -260,10 +313,13 @@ def test_hinglish_opt_out_routes(gate):
         assert result.handler_name == "opt_out_handler"
 
 
-def test_status_callback_delivered_is_rejected(gate):
-    result = gate.pre_filter(_callback(gate, "delivered"), _state(gate, uuid4()))
-    assert isinstance(result, gate.t.Reject)
-    assert "observability" in result.reason
+@pytest.mark.parametrize("cb_state", ["delivered", "read", "undelivered"])
+def test_status_callback_delivery_routes_to_reconciler(gate, cb_state):
+    """VT-564: delivered/read/undelivered callbacks now route to the customer-send delivery
+    reconciler (was: delivered/read Rejected, undelivered → brain)."""
+    result = gate.pre_filter(_callback(gate, cb_state), _state(gate, uuid4()))
+    assert isinstance(result, gate.t.RouteToDirectHandler)
+    assert result.handler_name == "customer_send_delivery_handler"
 
 
 def test_status_callback_failed_routes_to_template_error_handler(gate):
@@ -272,16 +328,62 @@ def test_status_callback_failed_routes_to_template_error_handler(gate):
     assert result.handler_name == "template_error_handler"
 
 
-def test_status_ping_routes_to_status_ping_handler(gate):
+def test_status_query_converses_via_brain_by_default(gate):
+    """VT-583 (CL-2026-07-03-conversing-surfaces): a genuine STATUS query now CONVERSES — it routes to
+    the brain (query tools + conversation window) instead of the canned status_ping template. Default ON."""
+    result = gate.pre_filter(_inbound(gate, "any update?"), _state(gate, uuid4()))
+    assert isinstance(result, gate.t.RouteToBrain)
+    assert "status_query" in (result.reason or "")
+
+
+def test_status_ping_falls_back_to_handler_when_converse_off(gate, monkeypatch):
+    """VT-583: with CONVERSE_STATUS_QUERIES turned off, the deterministic status_ping_handler is the
+    fail-soft fallback (unchanged truthful send). VT-464 D2: a genuine status query still matches Rule f."""
+    monkeypatch.setenv("CONVERSE_STATUS_QUERIES", "0")
     tenant_id = _new_tenant(gate.dsn)
     sub = _state(gate, tenant_id)
-    result = gate.pre_filter(_inbound(gate, "hi"), sub)
+    result = gate.pre_filter(_inbound(gate, "any update?"), sub)
     assert isinstance(result, gate.t.RouteToDirectHandler)
     assert result.handler_name == "status_ping_handler"
 
-    outcome = gate.HANDLERS["status_ping_handler"](_inbound(gate, "hi"), sub)
+    outcome = gate.HANDLERS["status_ping_handler"](_inbound(gate, "any update?"), sub)
     assert outcome["send_result"]["success"] is True  # VT-3.3c: honest send
     assert "trial" in outcome["status_text"]  # accurate phase, no fabrication
+
+
+@pytest.mark.parametrize("greeting", ["Hi", "Hello", "Hey", "hey there", "namaste"])
+def test_bare_greeting_falls_through_to_brain(gate, greeting):
+    """VT-464 D2 (HEADLINE): a bare greeting must reach the brain, NOT
+    status_ping. The old _STATUS_PING regex swallowed hi/hello/hey into
+    status_ping_handler BEFORE the brain ran, bypassing the rebuilt
+    Team-Manager's 'Hi → business-manager, not customer-service' greeting +
+    onboarding. DPDP routing (opt-out/DSR/consent) is unchanged."""
+    result = gate.pre_filter(_inbound(gate, greeting), _state(gate, uuid4()))
+    assert isinstance(result, gate.t.RouteToBrain), (
+        f"bare greeting {greeting!r} must route to the brain, got {result!r}"
+    )
+
+
+@pytest.mark.parametrize(
+    "query", ["any update?", "any updates", "what's the status", "kya hua"]
+)
+def test_status_query_matches_rule_f_and_converses(gate, query):
+    """VT-464 D2 + VT-583: genuine status-intent phrases still match Rule f, and now converse via the
+    brain by default (CONVERSE_STATUS_QUERIES on)."""
+    result = gate.pre_filter(_inbound(gate, query), _state(gate, uuid4()))
+    assert isinstance(result, gate.t.RouteToBrain)
+    assert "status_query" in (result.reason or "")
+
+
+@pytest.mark.parametrize(
+    "query", ["any update?", "any updates", "what's the status", "kya hua"]
+)
+def test_status_query_falls_back_to_handler_when_converse_off(gate, monkeypatch, query):
+    """VT-583: the same phrases route to the deterministic status_ping_handler when converse is off."""
+    monkeypatch.setenv("CONVERSE_STATUS_QUERIES", "0")
+    result = gate.pre_filter(_inbound(gate, query), _state(gate, uuid4()))
+    assert isinstance(result, gate.t.RouteToDirectHandler)
+    assert result.handler_name == "status_ping_handler"
 
 
 def test_substantive_message_routes_to_brain(gate):

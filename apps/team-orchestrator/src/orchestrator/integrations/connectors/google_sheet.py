@@ -24,7 +24,7 @@ from uuid import UUID
 
 import httpx
 
-from orchestrator.graph import get_pool
+from orchestrator.db import tenant_connection
 from orchestrator.integrations.connectors.base import ConnectorBase
 from orchestrator.integrations.registry import get_connector
 from orchestrator.integrations.schemas import ConnectorSpec
@@ -50,8 +50,19 @@ _SCOPE = f"{_SCOPE_SHEETS} {_SCOPE_DRIVE_METADATA}"
 
 _DRIVE_WATCH_URL = "https://www.googleapis.com/drive/v3/files/{file_id}/watch"
 _DRIVE_STOP_URL = "https://www.googleapis.com/drive/v3/channels/stop"
+_DRIVE_FILES_LIST_URL = "https://www.googleapis.com/drive/v3/files"  # VT-608 picker discovery
 _DRIVE_CHANNEL_TTL = timedelta(days=7)  # Drive max
 _DRIVE_RENEW_WINDOW = timedelta(hours=48)
+
+
+def _escape_a1_sheet_name(name: str) -> str:
+    """VT-608 fix round MINOR 3 — quote a sheet-tab name for A1-range notation per Google's own
+    grammar: a name embedded in single quotes must have any LITERAL single quote DOUBLED
+    (``Bob's Data`` -> ``'Bob''s Data'``). Without this, a tab name containing an apostrophe (or
+    an adversarially-crafted value) breaks — or manipulates — the range Google's Sheets API
+    actually parses. Only ever called with an already-quoted wrapper (``f"'{_escape_a1_sheet_name(name)}'!..."``,
+    used at both call sites below) — this function itself only escapes, never adds the quotes."""
+    return name.replace("'", "''")
 
 
 @dataclass(frozen=True)
@@ -177,8 +188,9 @@ class GoogleSheetConnector(ConnectorBase):
         push_secret = secrets.token_urlsafe(32)
         expires_at = datetime.now(UTC) + timedelta(seconds=expires_in)
 
-        pool = get_pool()
-        with pool.connection() as conn:
+        # VT-608 raw-pool sweep (mirrors VT-603's own swap): RLS-scoped write keyed on the tenant
+        # this method was CALLED with — tenant_oauth_tokens has RLS enabled+forced (mig 033).
+        with tenant_connection(tenant_id) as conn:
             conn.execute(
                 """
                 INSERT INTO tenant_oauth_tokens (
@@ -205,14 +217,12 @@ class GoogleSheetConnector(ConnectorBase):
         }
 
     def _load_refresh_token(self, tenant_id: UUID) -> str:
-        pool = get_pool()
-        with pool.connection() as conn, conn.cursor() as cur:
-            cur.execute(
+        with tenant_connection(tenant_id) as conn:
+            raw = conn.execute(
                 "SELECT refresh_token_encrypted FROM tenant_oauth_tokens "
                 "WHERE tenant_id = %s AND connector_id = %s",
                 (str(tenant_id), self.connector_id),
-            )
-            raw = cur.fetchone()
+            ).fetchone()
         if raw is None:
             raise RuntimeError(
                 f"no OAuth token for tenant {tenant_id} / {self.connector_id}"
@@ -245,6 +255,49 @@ class GoogleSheetConnector(ConnectorBase):
             raise RuntimeError("Google OAuth refresh response missing access_token")
         return str(access_token)
 
+    # ---------- DISCOVERY (VT-608, the Sheets picker's own backend) ----------
+
+    def list_spreadsheets(self, tenant_id: UUID, *, limit: int = 25) -> list[dict[str, str]]:
+        """List the owner's Google Sheets spreadsheets (Drive ``files.list``, scoped to
+        ``mimeType='application/vnd.google-apps.spreadsheet'`` — the ``drive.metadata.readonly``
+        scope already granted covers this). Returns ``[{"id": ..., "name": ...}, ...]`` — the
+        team-web picker page's own data source; no sheet CONTENT is read here."""
+        access_token = self.get_access_token(tenant_id)
+        resp = httpx.get(
+            _DRIVE_FILES_LIST_URL,
+            headers={"Authorization": f"Bearer {access_token}"},
+            params={
+                "q": "mimeType='application/vnd.google-apps.spreadsheet' and trashed=false",
+                "fields": "files(id,name)",
+                "pageSize": limit,
+                "orderBy": "modifiedTime desc",
+            },
+            timeout=15.0,
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"Drive files.list failed: HTTP {resp.status_code} body={resp.text[:200]}"
+            )
+        files = resp.json().get("files", [])
+        return [{"id": str(f["id"]), "name": str(f.get("name", ""))} for f in files]
+
+    def list_tabs(self, tenant_id: UUID, spreadsheet_id: str) -> list[str]:
+        """List a spreadsheet's tab (sheet) names via Sheets ``spreadsheets.get`` — metadata only
+        (``fields=sheets.properties.title``), never cell content."""
+        access_token = self.get_access_token(tenant_id)
+        resp = httpx.get(
+            f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}",
+            headers={"Authorization": f"Bearer {access_token}"},
+            params={"fields": "sheets.properties.title"},
+            timeout=15.0,
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"Sheets spreadsheets.get failed: HTTP {resp.status_code} body={resp.text[:200]}"
+            )
+        sheets = resp.json().get("sheets", [])
+        return [str(s["properties"]["title"]) for s in sheets if s.get("properties", {}).get("title")]
+
     # ---------- PULL ----------
 
     def pull_sample(
@@ -252,14 +305,23 @@ class GoogleSheetConnector(ConnectorBase):
         tenant_id: UUID,
         spreadsheet_id: str = "",
         range_a1: str = "A1:Z50",
+        *,
+        tab_name: str = "",
     ) -> list[dict[str, Any]]:
-        """Fetch first ~50 rows for field-mapping."""
+        """Fetch first ~50 rows for field-mapping.
+
+        VT-608 — ``tab_name`` (the owner's picker selection, RULING 2) scopes the range to a
+        SPECIFIC sheet tab (``'{tab_name}'!A1:Z50``); omitted (the pre-VT-608 default) reads
+        whichever tab Sheets' bare-range notation resolves to (its first/active sheet) —
+        every existing caller that never passed a tab keeps that exact behavior.
+        """
         if not spreadsheet_id:
             raise ValueError("pull_sample: spreadsheet_id required")
         access_token = self.get_access_token(tenant_id)
+        effective_range = f"'{_escape_a1_sheet_name(tab_name)}'!{range_a1}" if tab_name else range_a1
         url = (
             f"https://sheets.googleapis.com/v4/spreadsheets/"
-            f"{spreadsheet_id}/values/{range_a1}"
+            f"{spreadsheet_id}/values/{effective_range}"
         )
         resp = httpx.get(
             url,
@@ -288,18 +350,51 @@ class GoogleSheetConnector(ConnectorBase):
         tenant_id: UUID,
         spreadsheet_id: str = "",
         since_row_index: int = 0,
-    ) -> list[CanonicalRow]:
+        *,
+        since: datetime | None = None,  # base-contract alias; ignored (row-index cursor)
+        tab_name: str = "",
+    ) -> list[dict[str, Any]]:
         """Incremental pull from ``since_row_index`` to end.
 
         Row-index cursor strategy per Q5 Option A. Assumes append-only;
         mid-sheet deletes shift indices and may re-ingest rows
         (dedupe via phone_hash handles duplicate inserts).
+
+        VT-417 PR-2: returns the actual ``{column -> cell}`` row dicts (header row
+        zipped with each data row) so the Drive-pull / scheduler paths can map them
+        to ``CanonicalRow`` via ``ingest.sheet_row_to_canonical``. Previously this
+        returned data-LESS ``CanonicalRow(source_row_index=...)`` envelopes — the
+        cell values were discarded, so the pull lineage could never ingest a
+        customer. ``since`` (the ``ConnectorBase`` datetime cursor) is accepted for
+        signature uniformity but ignored — this connector cursors by ROW INDEX, not
+        time (the scheduler's google_sheet path is a known gap: it has no
+        spreadsheet_id / row-index cursor — the Drive poll path carries the
+        resource_id and is the real sheet-pull driver).
+
+        VT-608 — ``tab_name`` (the owner's picker selection, RULING 2) scopes both the header
+        fetch and the data range to that SPECIFIC tab; omitted (every pre-VT-608 caller) keeps
+        the exact prior bare-range behavior.
         """
         if not spreadsheet_id:
             raise ValueError("pull_full: spreadsheet_id required")
         access_token = self.get_access_token(tenant_id)
+        tab_prefix = f"'{_escape_a1_sheet_name(tab_name)}'!" if tab_name else ""
+        # Header (row 1) is needed to label cells — pull_full's old range
+        # (A{start}:Z) skipped it, leaving rows un-labellable.
+        header_resp = httpx.get(
+            f"https://sheets.googleapis.com/v4/spreadsheets/{spreadsheet_id}/values/{tab_prefix}A1:Z1",
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=30.0,
+        )
+        if header_resp.status_code != 200:
+            raise RuntimeError(
+                f"Sheets pull_full header fetch failed: HTTP {header_resp.status_code}"
+            )
+        header_values = header_resp.json().get("values", [])
+        headers = [str(h) for h in header_values[0]] if header_values else []
+
         start_row = max(2, since_row_index + 1)
-        range_a1 = f"A{start_row}:Z"
+        range_a1 = f"{tab_prefix}A{start_row}:Z"
         url = (
             f"https://sheets.googleapis.com/v4/spreadsheets/"
             f"{spreadsheet_id}/values/{range_a1}"
@@ -314,10 +409,13 @@ class GoogleSheetConnector(ConnectorBase):
                 f"Sheets pull_full failed: HTTP {resp.status_code}"
             )
         values = resp.json().get("values", [])
-        return [
-            CanonicalRow(source_row_index=since_row_index + i + 1)
-            for i, _ in enumerate(values)
-        ]
+        rows: list[dict[str, Any]] = []
+        for row_data in values:
+            row: dict[str, Any] = {}
+            for i, h in enumerate(headers):
+                row[h] = row_data[i] if i < len(row_data) else None
+            rows.append(row)
+        return rows
 
     def verify_push_signature(
         self, body: bytes, headers: dict[str, str], push_secret: str
@@ -370,14 +468,12 @@ class GoogleSheetConnector(ConnectorBase):
             render_apps_script,
         )
 
-        pool = get_pool()
-        with pool.connection() as conn, conn.cursor() as cur:
-            cur.execute(
+        with tenant_connection(tenant_id) as conn:
+            raw = conn.execute(
                 "SELECT push_secret FROM tenant_oauth_tokens "
                 "WHERE tenant_id = %s AND connector_id = %s",
                 (str(tenant_id), self.connector_id),
-            )
-            raw = cur.fetchone()
+            ).fetchone()
         row = cast("dict[str, Any] | None", raw)
         if row is None or not row["push_secret"]:
             raise RuntimeError(
@@ -455,8 +551,8 @@ class GoogleSheetConnector(ConnectorBase):
                 int(resp_body["expiration"]) / 1000, tz=UTC
             )
 
-        pool = get_pool()
-        with pool.connection() as conn:
+        # tenant_drive_channels has RLS enabled (mig 040).
+        with tenant_connection(tenant_id) as conn:
             conn.execute(
                 """
                 INSERT INTO tenant_drive_channels
@@ -480,26 +576,18 @@ class GoogleSheetConnector(ConnectorBase):
         }
 
     def unregister_drive_push_channel(
-        self, channel_id: str, resource_id: str
+        self, tenant_id: UUID, channel_id: str, resource_id: str
     ) -> None:
         """Stop a Drive Push channel via Drive ``channels.stop``.
 
         Removes the matching row from ``tenant_drive_channels``.
         Idempotent: missing channel raises silently (already stopped).
+
+        VT-608 raw-pool sweep: ``tenant_id`` is now a REQUIRED param (its only caller,
+        ``renew_drive_push_channel``, already has it from the channel row it read) rather than
+        looking it up via a privileged pool read keyed on the opaque ``channel_id`` — every DB
+        touch here is now RLS-scoped to a tenant the caller already resolved.
         """
-        # Look up the tenant for token resolution
-        pool = get_pool()
-        with pool.connection() as conn, conn.cursor() as cur:
-            cur.execute(
-                "SELECT tenant_id FROM tenant_drive_channels WHERE channel_id = %s",
-                (channel_id,),
-            )
-            row = cur.fetchone()
-        if row is None:
-            return  # already stopped or never existed
-        tenant_id = UUID(
-            row["tenant_id"] if isinstance(row, dict) else row[0]
-        )
         access_token = self.get_access_token(tenant_id)
 
         resp = httpx.post(
@@ -520,10 +608,10 @@ class GoogleSheetConnector(ConnectorBase):
                 resp.text[:200],
             )
 
-        with pool.connection() as conn:
+        with tenant_connection(tenant_id) as conn:
             conn.execute(
-                "DELETE FROM tenant_drive_channels WHERE channel_id = %s",
-                (channel_id,),
+                "DELETE FROM tenant_drive_channels WHERE tenant_id = %s AND channel_id = %s",
+                (str(tenant_id), channel_id),
             )
 
     def renew_drive_push_channel(
@@ -542,7 +630,7 @@ class GoogleSheetConnector(ConnectorBase):
 
         new = self.register_drive_push_channel(tenant_id, spreadsheet_id)
         try:
-            self.unregister_drive_push_channel(old_channel_id, old_resource_id)
+            self.unregister_drive_push_channel(tenant_id, old_channel_id, old_resource_id)
         except Exception:  # noqa: BLE001 — never block renewal on stop failure
             logger.exception(
                 "Drive channel renewal: stopping old channel %s failed; "

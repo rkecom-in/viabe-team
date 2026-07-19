@@ -61,8 +61,21 @@ REGISTRY: dict[str, ConnectorSpec] = {
         connector_id="shopify",
         display_name="Shopify",
         category="digital",
-        auth_flow="api_key",
-        auth_scopes=["read_orders", "read_customers", "read_products"],
+        # VT-422 GAP-4: OAuth-install is the CANONICAL public-app path; client_credentials
+        # is the dev/own-store test fallback only. auth_flow declares the canonical path.
+        # (The schema Literal exposes "oauth2" — Shopify's install IS an OAuth2
+        # authorization-code flow — not a bare "oauth"; "oauth2" is the correct value.)
+        auth_flow="oauth2",
+        # VT-422 GAP-0: read + WRITE scopes (single source mirrors connectors/shopify.py
+        # _REQUIRED_SCOPES). write_orders = e2e backdated-seed unblock; write_customers =
+        # future write-agent (Fazal decision pending: both vs write_orders-only).
+        auth_scopes=[
+            "read_orders",
+            "read_customers",
+            "read_products",
+            "write_orders",
+            "write_customers",
+        ],
         auth_walkthrough_url="https://help.shopify.com/en/manual/apps/app-types/custom-apps",
         sample_pull=SamplePullSpec(
             method="rest_paginated",
@@ -324,4 +337,34 @@ def list_connectors(
     return [s for s in items if s.category == category]
 
 
-__all__ = ["REGISTRY", "get_connector", "list_connectors"]
+# VT-604 Package 1 — the OWNER-VISIBLE connector catalogue. The full REGISTRY above stays the
+# complete spec catalogue (16 entries incl. placeholders like Amazon Seller Central / GA4 /
+# WooCommerce / the manual VT-6 family — other code, tests, and future implementation rows may
+# still reference any entry by id). But every OWNER-FACING presentation surface — the Integration
+# Agent's connector listing tool + its system-prompt catalogue block, the Tech lane's setup-advice
+# tool — must filter through THIS allowlist: only the two connectors with a real, shipped
+# implementation (google_sheet = VT-207, shopify = VT-208) are offered as something the owner can
+# actually connect today. A placeholder is a documented SEAM, not a promise; presenting it as
+# actionable ("connect Amazon" implying a walkthrough is coming) is dishonest until it ships.
+OWNER_VISIBLE_CONNECTOR_IDS: frozenset[str] = frozenset({"google_sheet", "shopify"})
+
+
+def list_owner_visible_connectors(
+    category: CategoryKind | None = None,
+) -> list[ConnectorSpec]:
+    """The connector catalogue an owner may actually be offered (Package 1 filter).
+
+    A strict subset of ``list_connectors``: only entries in ``OWNER_VISIBLE_CONNECTOR_IDS``.
+    Use this at every OWNER-FACING presentation surface; use ``list_connectors`` only for
+    internal/registry-wide purposes (schema validation, future-row bookkeeping).
+    """
+    return [s for s in list_connectors(category=category) if s.connector_id in OWNER_VISIBLE_CONNECTOR_IDS]
+
+
+__all__ = [
+    "REGISTRY",
+    "OWNER_VISIBLE_CONNECTOR_IDS",
+    "get_connector",
+    "list_connectors",
+    "list_owner_visible_connectors",
+]

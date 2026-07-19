@@ -1,0 +1,23 @@
+{
+  "name": "readiness_ask_then_proceed",
+  "domain": "onboarding",
+  "critical": false,
+  "setup_args": ["--onboarded", "--flow", "ready_asked"],
+  "expected_fail": false,
+  "notes": "Journey COMPLETE with __flow__='ready_asked' (the readiness ask was just sent, journey.py _FLOW_READY_ASKED). An unambiguous affirm token ('haan'/'chalo' are in the deterministic _FLOW_AFFIRM floor set) short-circuits to _flow_offer_next_integration WITHOUT hitting the deferred/decline path. Setup: `setup --onboarded --flow ready_asked` then `script <tenant> readiness_ask_then_proceed.json`.",
+  "steps": [
+    {
+      "message": "Haan chalo, connect kar dete hain",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_not_contains": ["I'll hold off", "hold off"],
+      "note": "Unambiguous affirm to the readiness ask. Expect the flow to proceed toward connecting a data source (offer the easiest integration), NEVER the defer/hold-off message."
+    },
+    {
+      "message": "ye ab turant ho jayega ya mujhe kuch karna padega",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "note": "Owner asks what happens next / what they need to do. Expect a substantive answer that keeps the connect flow moving, not a stall."
+    }
+  ]
+}

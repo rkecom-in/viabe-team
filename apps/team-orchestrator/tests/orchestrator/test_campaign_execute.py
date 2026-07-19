@@ -35,6 +35,25 @@ pytest.importorskip("langchain")
 # Helpers
 # ---------------------------------------------------------------------------
 
+
+@pytest.fixture(autouse=True)
+def _allow_customer_send_pregate(monkeypatch: pytest.MonkeyPatch) -> None:
+    """VT-460: execute_approved_campaign now runs the SHARED onboarded + WABA-live pre-gate
+    (``assert_customer_send_allowed``) before the send loop. These are MagicMock-conn UNIT tests of
+    the send-loop bookkeeping, NOT the pre-gate (its own fail-closed behavior is proven in
+    tests/agent/test_rail_harness_nonbypassability.py against a real DB). Patch the pre-gate to
+    ALLOW so the loop logic is exercised. The dispatch-guard (phase) tests are unaffected — that
+    guard short-circuits BEFORE the pre-gate. Patches the SOURCE module (execute.py imports the
+    symbol lazily inside the function, so the source attribute is what binds at call time)."""
+    from orchestrator.agents import customer_send_choke
+
+    monkeypatch.setattr(
+        customer_send_choke,
+        "assert_customer_send_allowed",
+        lambda *a, **k: customer_send_choke.CustomerSendGate(allowed=True),
+    )
+
+
 _TENANT_ID = "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11"
 _CAMPAIGN_ID = "b0eebc99-9c0b-4ef8-bb6d-6bb9bd380a22"
 _CUSTOMER_1 = "c0eebc99-9c0b-4ef8-bb6d-6bb9bd380a33"
@@ -97,16 +116,20 @@ def _make_conn(
     campaign_row: dict | None = None,
     recipients: list[dict] | None = None,
     phase: str = "paid_active",
-    refunded_at: Any = None,
+    opt_out: bool = False,
 ) -> Any:
     """Build a MagicMock conn that returns controlled SELECT results.
 
     Query order:
-      0. tenants phase SELECT (fetchone) — VT-328 dispatch guard
+      0. tenants phase+opt_out SELECT (fetchone) — VT-328 dispatch guard + T13b opt-out gate
       1. campaigns SELECT (fetchone)
       2. campaign_recipients JOIN customers (fetchall)
       3. send_idempotency_keys INSERT (no return value)
       4. campaigns UPDATE (no return value)
+
+    VT-365: the dispatch guard reads ONLY `phase` now (the refunded_at column +
+    the graceful-exit window are deleted with the refund subsystem).
+    T13b: the guard SELECT also reads `opt_out` (owner consent-withdrawal gate).
     """
     conn = MagicMock()
     execute_calls: list[tuple[str, Any]] = []
@@ -114,8 +137,8 @@ def _make_conn(
     def _execute(sql: str, params: tuple | None = None) -> MagicMock:
         execute_calls.append((sql.strip(), params))
         result = MagicMock()
-        if "FROM tenants" in sql:  # VT-328: the dispatch guard reads phase + refunded_at
-            result.fetchone.return_value = {"phase": phase, "refunded_at": refunded_at}
+        if "FROM tenants" in sql:  # VT-328/VT-365 phase + T13b opt_out: the dispatch guard
+            result.fetchone.return_value = {"phase": phase, "opt_out": opt_out}
             result.fetchall.return_value = []
         elif "FROM campaigns" in sql:  # VT-306: wrapper SELECT * FROM campaigns WHERE tenant_id AND id
             result.fetchone.return_value = campaign_row
@@ -452,6 +475,7 @@ def test_empty_cohort_status_still_advanced() -> None:
         "skipped_opt_out": 0,
         "skipped_complaint_freeze": 0,
         "failed": 0,
+        "killed": 0,  # VT-558: campaign true-kill counter (0 = not killed)
     }
     send_fn.assert_not_called()
 
@@ -462,19 +486,44 @@ def test_empty_cohort_status_still_advanced() -> None:
     assert len(update_calls) == 1
 
 
+def test_cancelled_campaign_killed_before_start() -> None:
+    """VT-558 campaign true-kill: a campaign an operator cancelled before this run started aborts
+    the fan-out — nothing sent, NOT advanced to 'sent', remaining recipients counted ``killed``."""
+    from orchestrator.campaign.execute import execute_approved_campaign
+
+    row = _campaign_row()
+    row["status"] = "cancelled"  # operator killed it via ops/run-control/kill-campaign
+    conn = _make_conn(
+        campaign_row=row,
+        recipients=[{"customer_id": _CUSTOMER_1, "opt_out_status": None, "complaint_status": None}],
+    )
+    send_fn = MagicMock(return_value=_ok_send_result())
+
+    summary = execute_approved_campaign(
+        _TENANT_ID, _CAMPAIGN_ID, conn=conn, send_template_fn=send_fn
+    )
+
+    assert summary["killed"] == 1
+    send_fn.assert_not_called()  # no recipient contacted
+    # a killed campaign is NOT advanced to 'sent' (no UPDATE campaigns).
+    update_calls = [sql for sql, _ in conn._execute_calls if "UPDATE campaigns" in sql]
+    assert update_calls == []
+
+
 # ---------------------------------------------------------------------------
-# VT-328 — refunded/cancelled dispatch guard (the single chokepoint)
+# VT-328 / VT-365 — lapsed/cancelled dispatch guard (the single chokepoint)
 # ---------------------------------------------------------------------------
 
-def test_dispatch_blocked_refunded() -> None:
-    """VT-328: a refunded tenant's campaign is blocked INSIDE execute_approved_campaign —
-    short-circuits BEFORE loading the campaign/recipients or calling send_fn (zero sends)."""
+def test_dispatch_blocked_lapsed() -> None:
+    """VT-328/VT-365: a `lapsed` tenant (30-day trial expired without subscribe — dormant, no
+    active subscription) is blocked INSIDE execute_approved_campaign — short-circuits BEFORE
+    loading the campaign/recipients or calling send_fn (zero sends). (`refunded` is GONE.)"""
     from orchestrator.campaign.execute import execute_approved_campaign
 
     conn = _make_conn(
         campaign_row=_campaign_row(),
         recipients=[_recipient(_CUSTOMER_1)],
-        phase="refunded",
+        phase="lapsed",
     )
     send_fn = MagicMock(return_value=_ok_send_result())
 
@@ -517,16 +566,59 @@ def test_dispatch_allowed_active_sends_normally() -> None:
     assert summary["sent"] == 1 and send_fn.call_count == 1
 
 
+def test_opt_out_blocks_campaign() -> None:
+    """T13b (full-77 sr_stop_then_resume): a tenant that has OPTED OUT (owner consent withdrawal)
+    is blocked INSIDE execute_approved_campaign — the same single Pillar-8 chokepoint — even when
+    the phase is otherwise dispatchable. This kills the money_action where an approval armed BEFORE
+    the opt-out gets resolved by a later "haan bhej do" and fires a send over the withdrawal.
+    Short-circuits BEFORE loading the campaign/recipients (zero sends)."""
+    from orchestrator.campaign.execute import execute_approved_campaign
+
+    conn = _make_conn(
+        campaign_row=_campaign_row(),
+        recipients=[_recipient(_CUSTOMER_1)],
+        phase="paid_active",  # phase is fine — ONLY opt_out blocks here
+        opt_out=True,
+    )
+    send_fn = MagicMock(return_value=_ok_send_result())
+
+    summary = execute_approved_campaign(
+        _TENANT_ID, _CAMPAIGN_ID, conn=conn, send_template_fn=send_fn
+    )
+
+    assert summary["opt_out_blocked"] == 1 and summary["sent"] == 0
+    assert send_fn.call_count == 0  # ZERO sends over an opt-out
+    # short-circuit: never loaded the campaign (no fan-out path reached)
+    assert not any("FROM campaigns" in sql for sql, _ in conn._execute_calls)
+
+
+def test_opt_out_false_sends_normally() -> None:
+    """T13b: opt_out=False (the default) does NOT block — the gate doesn't over-reach a live tenant."""
+    from orchestrator.campaign.execute import execute_approved_campaign
+
+    conn = _make_conn(
+        campaign_row=_campaign_row(), recipients=[_recipient(_CUSTOMER_1)], opt_out=False
+    )
+    send_fn = MagicMock(return_value=_ok_send_result())
+    summary = execute_approved_campaign(
+        _TENANT_ID, _CAMPAIGN_ID, conn=conn, send_template_fn=send_fn
+    )
+    assert "opt_out_blocked" not in summary
+    assert summary["sent"] == 1 and send_fn.call_count == 1
+
+
 def test_dispatch_allowed_rule_pure() -> None:
-    """VT-328: dispatch_allowed is window-INDEPENDENT — refunded/cancelled block outbound
-    regardless of refunded_at; active/trial allow it."""
+    """VT-328/VT-365: dispatch_allowed blocks the dormant/terminal phases {lapsed, cancelled}
+    and is window-INDEPENDENT (the second positional arg is now unused — the refund/graceful-exit
+    window is deleted). `refunded` no longer exists; `trial`/active/at_risk all dispatch."""
     from datetime import datetime, timedelta, timezone
 
     from orchestrator.billing.graceful_exit import dispatch_allowed
 
     long_ago = datetime.now(timezone.utc) - timedelta(days=90)
-    assert dispatch_allowed("refunded", long_ago) is False  # even past the 30d window
-    assert dispatch_allowed("refunded", None) is False
+    # lapsed = dormant, no active subscription → blocked (the new VT-365 block).
+    assert dispatch_allowed("lapsed", long_ago) is False  # unused window arg ignored
+    assert dispatch_allowed("lapsed", None) is False
     assert dispatch_allowed("cancelled", None) is False
     assert dispatch_allowed("paid_active", None) is True
     assert dispatch_allowed("trial", None) is True
@@ -535,9 +627,62 @@ def test_dispatch_allowed_rule_pure() -> None:
 
 def test_inbound_dsr_detection_is_phase_agnostic() -> None:
     """VT-328 canary 5: the inbound DSR/opt-out gate takes NO phase — it cannot consult the
-    dispatch guard, so a refunded tenant's DSR/opt-out still routes (the guard lives ONLY in the
-    outbound execute_approved_campaign chokepoint)."""
+    dispatch guard, so a lapsed/cancelled tenant's DSR/opt-out still routes (the guard lives ONLY
+    in the outbound execute_approved_campaign chokepoint)."""
     from orchestrator.pre_filter_gate import matches_opt_out_or_dsr
 
     assert matches_opt_out_or_dsr("please delete my data") is True
     assert matches_opt_out_or_dsr("STOP") is True
+
+
+# ---------------------------------------------------------------------------
+# VT-562 follow-up (review F2): post-send bookkeeping failures must not
+# discard the summary — the sends already happened and the owner-outcome
+# report reads only the summary.
+# ---------------------------------------------------------------------------
+
+def test_status_advance_failure_still_returns_summary(monkeypatch) -> None:
+    """A status-advance/KG-emit failure AFTER real sends returns the honest summary
+    (flagged status_advance_failed) instead of raising it away."""
+    import orchestrator.campaign.execute as execute_mod
+    from orchestrator.campaign.execute import execute_approved_campaign
+
+    recipients = [_recipient(_CUSTOMER_1), _recipient(_CUSTOMER_2)]
+    conn = _make_conn(campaign_row=_campaign_row(), recipients=recipients)
+    send_fn = MagicMock(return_value=_ok_send_result())
+
+    def _boom(*_a: Any, **_k: Any) -> None:
+        raise RuntimeError("advance failed")
+
+    monkeypatch.setattr(execute_mod, "_advance_campaign_status", _boom)
+
+    summary = execute_approved_campaign(
+        _TENANT_ID, _CAMPAIGN_ID, conn=conn, send_template_fn=send_fn
+    )
+
+    assert summary["sent"] == 2
+    assert summary["status_advance_failed"] is True
+    assert send_fn.call_count == 2
+
+
+def test_kg_drain_failure_still_returns_clean_summary(monkeypatch) -> None:
+    """A post-commit KG drain failure is observability-only: summary returned WITHOUT
+    the status_advance_failed flag (the status DID advance; the outbox drain retries)."""
+    import orchestrator.knowledge.kg_emit as kg_emit_mod
+    from orchestrator.campaign.execute import execute_approved_campaign
+
+    recipients = [_recipient(_CUSTOMER_1)]
+    conn = _make_conn(campaign_row=_campaign_row(), recipients=recipients)
+    send_fn = MagicMock(return_value=_ok_send_result())
+
+    def _boom(*_a: Any, **_k: Any) -> None:
+        raise RuntimeError("drain failed")
+
+    monkeypatch.setattr(kg_emit_mod, "drain_kg_events", _boom)
+
+    summary = execute_approved_campaign(
+        _TENANT_ID, _CAMPAIGN_ID, conn=conn, send_template_fn=send_fn
+    )
+
+    assert summary["sent"] == 1
+    assert "status_advance_failed" not in summary

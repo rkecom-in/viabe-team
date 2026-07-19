@@ -75,6 +75,69 @@ def test_template_error_routes_to_dispatchresult(monkeypatch) -> None:
     assert out is not None and out.reason == "edge_case:template_error"
 
 
+def test_template_error_with_open_campaign_approval_routes_to_revision(monkeypatch) -> None:
+    """VT-667 fix-4: in enforce mode, a 'this message is wrong' report while an OPEN campaign_send
+    approval is pending is a CORRECTION of the pending draft, not a delivered-template failure — it
+    routes to the campaign REVISION (edge_case:campaign_revision), NEVER the Fazal-review deflection
+    (handle_template_error must not fire), and the honest 'reworking it' ack is sent to the owner."""
+    import orchestrator.edge_cases_router as r
+
+    sent: dict[str, object] = {}
+    monkeypatch.setattr(r, "_send_edge_ack", lambda tid, phone, text: sent.update(text=text))
+    monkeypatch.setattr("orchestrator.manager.loop_mode.is_enforce", lambda *a, **k: True)
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(
+        "orchestrator.manager.triage_seam.revise_pending_campaign",
+        lambda tid, body, sid: seen.update(body=body, sid=sid) or "REWORKING IT",
+    )
+    monkeypatch.setattr(
+        "orchestrator.owner_inputs.template_error.handle_template_error",
+        lambda tid, body: (_ for _ in ()).throw(AssertionError("must NOT deflect to Fazal-review")),
+    )
+
+    ev = SimpleNamespace(
+        body="this isn't the Diwali offer I asked for — redo it with the festive vibe",
+        sender_phone="+910000000000",
+        twilio_message_sid="SMcorr",
+    )
+    out = r.route_edge_case(
+        tenant_id="t",
+        event=ev,
+        classify_fn=lambda b: SimpleNamespace(classification="template_error_followup"),
+    )
+    assert out is not None and out.reason == "edge_case:campaign_revision"
+    assert sent.get("text") == "REWORKING IT"
+    assert seen.get("sid") == "SMcorr" and "festive vibe" in str(seen.get("body"))
+
+
+def test_template_error_without_open_campaign_keeps_deflection_path(monkeypatch) -> None:
+    """No pending campaign_send approval (revise_pending_campaign returns None) → the genuine
+    template-error path is byte-unchanged: handle_template_error fires, reason=edge_case:template_error."""
+    import orchestrator.edge_cases_router as r
+
+    monkeypatch.setattr(r, "_send_edge_ack", lambda tid, phone, text: None)
+    monkeypatch.setattr("orchestrator.manager.loop_mode.is_enforce", lambda *a, **k: True)
+    monkeypatch.setattr(
+        "orchestrator.manager.triage_seam.revise_pending_campaign", lambda tid, body, sid: None
+    )
+    fired = {"n": 0}
+    monkeypatch.setattr(
+        "orchestrator.owner_inputs.template_error.handle_template_error",
+        lambda tid, body: fired.__setitem__("n", 1)
+        or SimpleNamespace(report_id=uuid4(), recent_template_id="X", response_text="ok"),
+    )
+    ev = SimpleNamespace(
+        body="the message you sent rendered wrong", sender_phone="+910000000000",
+        twilio_message_sid="SMte",
+    )
+    out = r.route_edge_case(
+        tenant_id="t", event=ev,
+        classify_fn=lambda b: SimpleNamespace(classification="template_error_followup"),
+    )
+    assert fired["n"] == 1
+    assert out is not None and out.reason == "edge_case:template_error"
+
+
 def test_purge_order_includes_template_error_after_founding() -> None:
     from orchestrator import dsr_purge
 

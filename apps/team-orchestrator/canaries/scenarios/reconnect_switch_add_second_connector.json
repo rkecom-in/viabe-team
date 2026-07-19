@@ -1,0 +1,26 @@
+{
+  "name": "reconnect_switch_add_second_connector",
+  "domain": "integration",
+  "critical": false,
+  "setup_args": ["--onboarded", "--seed-lapsed-customers", "6"],
+  "expected_fail": false,
+  "notes": "RE-connect / add-a-SECOND-connector beat, distinct from the FIRST-connect decline/pivot in i_sheets_shopify_decline_pivot_to_sheets.json (which is a fresh tenant declining the Shopify offer and pivoting to Sheets). Here the tenant already has a live data source: --seed-lapsed-customers writes a real tenant_connector_status row (connector_id='google_sheet', enabled=TRUE, last_status='ok') — the same 'already-connected source' substrate reconnect_broken_sync_honesty.json and recurring_pull_cadence_change.json use. No --flow, so the completed journey has no __flow__ sentinel and an owner-initiated request reaches the integration agent directly (verify_connector reads the seeded google_sheet status; there is no shopify state, so start_oauth for Shopify is a genuine NEW connect). The owner asks to ALSO add Shopify. Exercises the agent starting a real new Shopify connect (offer / ask-for-domain / mint) WITHOUT (a) fabricating that Shopify is already connected, or (b) claiming the existing Google Sheet was removed/replaced. Setup: `setup --onboarded --seed-lapsed-customers 6` then `script <tenant> reconnect_switch_to_supported_connector.json`.",
+  "steps": [
+    {
+      "message": "you've already got my Google Sheet hooked up — now I also want to connect my Shopify store, add that too",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_contains": ["shopify"],
+      "assert_not_contains": ["shopify is connected", "i've connected your shopify", "your shopify store is now connected", "shopify is now set up"],
+      "note": "Add a SECOND connector while one is already live. Expect the agent to start a genuine new Shopify connect (ask for the store address / offer the link) that names Shopify — never a fabricated claim that Shopify is already connected."
+    },
+    {
+      "message": "sure, my Shopify address is sundaram-sweets.myshopify.com",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_contains": ["shopify"],
+      "assert_not_contains": ["shopify is connected", "your google sheet is now disconnected", "removed your google sheet", "replaced your sheet", "your sheet has been removed"],
+      "note": "Owner supplies the store address. Expect the connect to proceed (a real authorize link-out / tap-this-link instructions) with no fabricated 'already connected' status and no claim the existing Google Sheet was dropped or replaced by adding Shopify."
+    }
+  ]
+}

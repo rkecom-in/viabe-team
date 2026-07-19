@@ -200,7 +200,8 @@ def test_route_field_uses_shared_thresholds(conf, expected):
 
 def test_resolve_model_production_is_sonnet(monkeypatch):
     monkeypatch.setenv("VIABE_ENV", "production")
-    assert _resolve_vision_model() == "claude-sonnet-4-6"
+    # VT-596: production vision tier bumped sonnet-4-6 → sonnet-5.
+    assert _resolve_vision_model() == "claude-sonnet-5"
 
 
 def test_resolve_model_default_is_haiku(monkeypatch):

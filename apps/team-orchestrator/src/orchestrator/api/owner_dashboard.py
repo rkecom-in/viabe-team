@@ -20,6 +20,7 @@ from typing import Any
 from fastapi import APIRouter, Header, HTTPException, Query
 from pydantic import BaseModel
 
+from orchestrator.billing.trial_evaluator import trial_days
 from orchestrator.db.wrappers import CampaignsWrapper, CustomersWrapper
 
 # VT-341: year_month must be YYYY-MM (no path traversal into another tenant / object).
@@ -80,6 +81,26 @@ def dashboard_summary(
             for r in recent
         ],
     }
+
+
+@router.get("/api/orchestrator/owner/agent-usage")
+def agent_usage(
+    tenant_id: str = Query(...),
+    x_internal_secret: str | None = Header(default=None, alias="X-Internal-Secret"),
+) -> dict[str, Any]:
+    """VT-619 — per-agent current-month token/API-call usage vs caps for the ops surface. Tracked-
+    UNBILLED agents (billed=false — setup agents integration/onboarding_conductor) come through so
+    the page can show them separately. Read-only, tenant-scoped (RLS via tenant_connection); the
+    counters are aggregate meters (no customer PII), so no masking needed."""
+    if not _verify_internal_secret(x_internal_secret):
+        raise HTTPException(status_code=403, detail="X-Internal-Secret mismatch")
+    try:
+        from orchestrator.agent.usage_meter import get_agent_usage_breakdown
+
+        agents = get_agent_usage_breakdown(tenant_id)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail="agent-usage read failed") from exc
+    return {"agents": agents}
 
 
 _MAX_PAGE_SIZE = 100
@@ -177,7 +198,7 @@ def dashboard_settings(
         profile = get_business_profile(GetBusinessProfileInput(tenant_id=tenant_id))
         with tenant_connection(tenant_id) as conn:
             row = conn.execute(
-                "SELECT plan_tier, phase, trial_started_at, trial_extension_count, "
+                "SELECT plan_tier, phase, trial_started_at, "
                 "       preferred_language FROM tenants WHERE id = %s",
                 (tenant_id,),
             ).fetchone()
@@ -186,7 +207,9 @@ def dashboard_settings(
 
     plan = dict(row) if row else {}
     trial_started = plan.get("trial_started_at")
-    trial_ends = (trial_started + timedelta(days=14)) if trial_started else None
+    # VT-632 cleanup: read the canonical trial length (config/trial.yaml), never a hardcoded 30 —
+    # a wrong owner-facing trial-end date if the configured trial_days ever changes (VT-371 class).
+    trial_ends = (trial_started + timedelta(days=trial_days())) if trial_started else None
     return {
         "business": (
             {
@@ -204,7 +227,6 @@ def dashboard_settings(
             "phase": plan.get("phase"),
             "trial_started_at": str(trial_started) if trial_started else None,
             "trial_ends_at": str(trial_ends) if trial_ends else None,
-            "trial_extension_count": plan.get("trial_extension_count"),
             "preferred_language": plan.get("preferred_language"),
         },
     }

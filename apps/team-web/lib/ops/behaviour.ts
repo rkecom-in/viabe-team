@@ -1,5 +1,5 @@
 /**
- * VT-294 — Behaviour & Training: measure VTR decision quality from ops_audit (CL-426).
+ * VT-294 — Decision Audit: measure VTR decision quality from ops_audit (CL-426).
  *
  * Reads the ops_audit trail (VT-292 substrate). A VTR sees their OWN decision activity; a
  * VTAdmin sees all operators' (to measure VTRs). Metrics = action counts over a window +

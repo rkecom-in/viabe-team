@@ -1,0 +1,30 @@
+{
+  "name": "happy_path_profile_collection",
+  "domain": "onboarding",
+  "critical": false,
+  "setup_args": ["--owner-inputs", "true", "--journey", "--draft-type", "electronics", "--draft-city", "Pune"],
+  "expected_fail": false,
+  "notes": "Straight-line happy path: fresh tenant lazy-starts the journey (VT-582 --journey seeds a business_profile_draft + ACTIVE onboarding_journey with a 2-entry queue: confirm business_type='electronics' + gap 'about'), owner supplies the profile, confirms, then asks what the assistant will actually do. Setup: `setup --owner-inputs true --journey --draft-type electronics --draft-city Pune` then `script <tenant> happy_path_profile_collection.json`.",
+  "steps": [
+    {
+      "message": "Complete Setup",
+      "assert_no_silent": true,
+      "note": "COMPLETE_SETUP entry tap against a non-empty pre-seeded queue — lands as the reply to the pre-seeded business_type confirm, not a lazy-start trigger. Load-bearing check is simply that a reply comes back."
+    },
+    {
+      "message": "We're Sharma Electronics, a mobile and electronics repair shop in Pune",
+      "assert_no_silent": true,
+      "note": "Owner supplies the business profile in their own words. Expect the journey to acknowledge and move toward confirming or completing the profile."
+    },
+    {
+      "message": "yes that's correct",
+      "assert_no_silent": true,
+      "note": "Confirm the profile. Expect a 'ready' / next-step acknowledgement, not a re-ask of anything already given."
+    },
+    {
+      "message": "what will you actually do for my shop",
+      "assert_no_silent": true,
+      "note": "Expect a substantive capability answer (e.g. tracking sales / recovering lapsed customers), not a canned deflection."
+    }
+  ]
+}

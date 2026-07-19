@@ -148,7 +148,14 @@ def test_phone_vpa_credit_attributes_and_records_link(db_ctx):
         link = conn.execute(
             "SELECT count(*) AS n FROM upi_vpa_resolutions WHERE vpa = %s",
             (f"{phone}@oksbi",)).fetchone()["n"]
+        # VT-417 PR-3: the promoted credit MUST land entry_type='sale' (a UPI
+        # credit is a sale), so the Sales-Recovery detector — which counts ONLY
+        # entry_type='sale' — sees it. 'payment' made every UPI sale invisible to
+        # win-back targeting.
+        entry_type = conn.execute(
+            "SELECT entry_type FROM customer_ledger_entries").fetchone()["entry_type"]
     assert link == 1  # VPA→customer link recorded for next time
+    assert entry_type == "sale"  # feeds win-back detection (not 'payment')
 
 
 @_DB

@@ -145,12 +145,29 @@ def test_charged_increments_fees_dedup_no_double_count(_dbpool, _transitions) ->
 
 @pytest.mark.integration
 def test_captured_trial_converts(_dbpool, _transitions) -> None:
+    """VT-365: payment.captured on a TRIAL tenant requests the `subscribe` event (was
+    `card_captured`). A capture can only follow an explicit owner subscribe (no card in
+    trial → nothing to auto-charge), so this is that subscribe completing."""
     tid = uuid4()
     sub = f"sub_{tid.hex[:12]}"
     _seed(_dbpool, tid, sub, phase="trial")
     out = _post("evt_cap_1", "payment.captured", _by_sub(sub))
     assert out["action"] == "converting_to_paid"
-    assert (str(tid), "card_captured") in _transitions  # transition requested
+    assert (str(tid), "subscribe") in _transitions  # VT-365 subscribe (NOT card_captured)
+    # The retired event must never be requested anymore.
+    assert all(ev != "card_captured" for _t, ev in _transitions)
+
+
+@pytest.mark.integration
+def test_captured_lapsed_converts(_dbpool, _transitions) -> None:
+    """VT-365: the capture→subscribe conversion phase set is now {trial, lapsed} — a LAPSED
+    (30-day-expired, dormant) owner who subscribes converts straight to paid_active too."""
+    tid = uuid4()
+    sub = f"sub_{tid.hex[:12]}"
+    _seed(_dbpool, tid, sub, phase="lapsed")
+    out = _post("evt_cap_lapsed", "payment.captured", _by_sub(sub))
+    assert out["action"] == "converting_to_paid"
+    assert (str(tid), "subscribe") in _transitions
 
 
 @pytest.mark.integration
@@ -241,10 +258,11 @@ def test_charged_non_int_amount_records_drop_not_500(_dbpool, _transitions, monk
     """VT-330 poison-pill: a charged event with a NON-INT amount is RECORDED
     (dropped_parse_error, RAW committed) + Fazal-alerted + 200(drop), NOT a 500-loop."""
     alerts: list[str] = []
-    # F3: un-mock _alert_fazal_safe — mock the INNER _alert_fazal so the REAL wrapper runs
-    # (exercises the persist-in-txn → alert-after ordering).
+    # F3: un-mock _alert_fazal_safe — mock the INNER alert_fazal so the REAL wrapper runs
+    # (exercises the persist-in-txn → alert-after ordering). VT-365 removed refund_executor;
+    # the alert seam is now orchestrator.alerts.clients.alert_fazal (lazily imported by the wrapper).
     monkeypatch.setattr(
-        "orchestrator.billing.refund_executor._alert_fazal", lambda m: alerts.append(m)
+        "orchestrator.alerts.clients.alert_fazal", lambda m: alerts.append(m)
     )
     tid, sub = uuid4(), "sub_pp"
     _seed(_dbpool, tid, sub)
@@ -288,7 +306,7 @@ def test_charged_parse_drop_infra_failure_still_500(monkeypatch) -> None:
 @pytest.mark.integration
 def test_charged_amount_zero_alerts_under_count(_dbpool, _transitions, monkeypatch) -> None:
     """VT-330: a charged event resolving amount==0 alerts Fazal (a real charge is never 0 →
-    under-count → under-refund). Fees unchanged (+0), event still processed."""
+    revenue under-count). Fees unchanged (+0), event still processed."""
     import orchestrator.api.razorpay_ingress as ri
 
     alerts: list[str] = []
@@ -336,7 +354,7 @@ def test_drop_then_replay_applies_fee(_dbpool, _transitions, monkeypatch) -> Non
     """VT-352 F1: a dropped charged event (non-int amount), REPLAYED with the corrected amount
     (same event_id), re-processes PAST the dedup → the fee IS applied (pre-VT-352 it hit the dedup
     and was silently lost) + the dead-letter row flips pending→replayed."""
-    monkeypatch.setattr("orchestrator.billing.refund_executor._alert_fazal", lambda m: None)
+    monkeypatch.setattr("orchestrator.alerts.clients.alert_fazal", lambda m: None)
     tid, sub = uuid4(), "sub_dl_replay"
     _seed(_dbpool, tid, sub)
 
@@ -363,7 +381,7 @@ def test_atomic_replay_failure_leaves_unprocessed(_dbpool, _transitions, monkeyp
     """VT-352 F1 ATOMIC (Cowork sharpening): if the apply RAISES mid-replay, the whole txn rolls
     back to the un-applied drop — marker intact, fee not applied, dead-letter still pending →
     re-replayable, never half-applied."""
-    monkeypatch.setattr("orchestrator.billing.refund_executor._alert_fazal", lambda m: None)
+    monkeypatch.setattr("orchestrator.alerts.clients.alert_fazal", lambda m: None)
     tid, sub = uuid4(), "sub_dl_atomic"
     _seed(_dbpool, tid, sub)
     assert _post("evt_dl_atomic", "subscription.charged", _charged(sub, "abc"))["status"] == "dropped_parse_error"
@@ -391,7 +409,7 @@ def test_replay_apply_ignored_422_re_replayable(_dbpool, _transitions, monkeypat
     """VT-352 F1 (Cowork bounce): a replay whose apply does NOT apply a fee (unknown/typo'd
     subscription_id → 'ignored') is rejected 422 and the drop stays RE-REPLAYABLE with its
     original payload — an operator typo must never record phantom success or destroy evidence."""
-    monkeypatch.setattr("orchestrator.billing.refund_executor._alert_fazal", lambda m: None)
+    monkeypatch.setattr("orchestrator.alerts.clients.alert_fazal", lambda m: None)
     tid, sub = uuid4(), "sub_dl_ignored"
     _seed(_dbpool, tid, sub)
     assert _post("evt_dl_ignored", "subscription.charged", _charged(sub, "abc"))["status"] == "dropped_parse_error"
@@ -413,7 +431,7 @@ def test_dead_letter_replay_wrong_sub_rejected(_dbpool, _transitions, monkeypatc
     """VT-352 F2 (Cowork bounce): dead_letter.replay() refuses a corrected payload whose
     subscription_id != the dead-letter row's original — no cross-tenant fee application. The DL row
     stays pending; the original payload is intact."""
-    monkeypatch.setattr("orchestrator.billing.refund_executor._alert_fazal", lambda m: None)
+    monkeypatch.setattr("orchestrator.alerts.clients.alert_fazal", lambda m: None)
     from orchestrator.billing import dead_letter
 
     tid, sub = uuid4(), "sub_dl_wrongsub"
@@ -431,7 +449,7 @@ def test_dead_letter_replay_wrong_sub_rejected(_dbpool, _transitions, monkeypatc
 def test_dead_letter_replay_correct_sub_applies_fee(_dbpool, _transitions, monkeypatch) -> None:
     """VT-352: dead_letter.replay() with the CORRECT subscription_id re-applies the fee (the F2
     cross-check passes) — proves the guard doesn't block a legitimate replay."""
-    monkeypatch.setattr("orchestrator.billing.refund_executor._alert_fazal", lambda m: None)
+    monkeypatch.setattr("orchestrator.alerts.clients.alert_fazal", lambda m: None)
     from orchestrator.billing import dead_letter
 
     tid, sub = uuid4(), "sub_dl_correctsub"
@@ -441,3 +459,43 @@ def test_dead_letter_replay_correct_sub_applies_fee(_dbpool, _transitions, monke
     assert out["status"] == "processed" and out["action"] == "fees_incremented"
     assert _sub_state(_dbpool, tid)[0] == 499900
     assert _dead_letter(_dbpool, f"{_RUN}_evt_dl_correctsub")["status"] == "replayed"
+
+
+# --- VT-440 — dead-letter retry sweep premise: count_pending + exactly-once on re-retry ----------
+@pytest.mark.integration
+def test_count_pending_and_replay_exactly_once(_dbpool, _transitions, monkeypatch) -> None:
+    """VT-440 MONEY-SAFETY PROOF (real PG): the dead-letter retry is exactly-once.
+
+    1. A parse-dropped charge → count_pending() rises by 1 (the sweep's metric).
+    2. dead_letter.replay() applies the fee ONCE (the operator-driven retry) and clears
+       the pending row → count_pending() drops back.
+    3. RETRYING THE SAME EVENT AGAIN (re-feed the corrected payload) is a genuine
+       DUPLICATE — NO second fee, NO second dead-letter, NO double-charge. This is the
+       razorpay_ingress event_id dedup keystone the VT-440 sweep relies on: re-processing
+       an already-processed event is exactly-once.
+    """
+    monkeypatch.setattr("orchestrator.alerts.clients.alert_fazal", lambda m: None)
+    from orchestrator.billing import dead_letter
+
+    tid, sub = uuid4(), "sub_dl_count440"
+    _seed(_dbpool, tid, sub)
+    eid = f"{_RUN}_evt_dl_count440"
+
+    before = dead_letter.count_pending()
+    # 1. drop → a pending dead-letter; count rises by exactly 1.
+    assert _post("evt_dl_count440", "subscription.charged", _charged(sub, "abc"))["status"] == "dropped_parse_error"
+    assert dead_letter.count_pending() == before + 1
+    assert _dead_letter(_dbpool, eid)["status"] == "pending"
+
+    # 2. operator-driven retry (replay) applies the fee ONCE + clears the pending row.
+    out = dead_letter.replay(eid, _charged(sub, 499900))
+    assert out["status"] == "processed" and out["action"] == "fees_incremented"
+    assert _sub_state(_dbpool, tid)[0] == 499900  # fee applied exactly once
+    assert _dead_letter(_dbpool, eid)["status"] == "replayed"
+    assert dead_letter.count_pending() == before  # no longer pending
+
+    # 3. RE-RETRY the SAME corrected event → genuine duplicate, EXACTLY-ONCE held:
+    #    no double-fee, no new pending dead-letter. (The keystone the sweep depends on.)
+    assert _post("evt_dl_count440", "subscription.charged", _charged(sub, 499900))["status"] == "duplicate"
+    assert _sub_state(_dbpool, tid)[0] == 499900  # STILL single — no double-charge
+    assert dead_letter.count_pending() == before  # still cleared — no resurrected pending row

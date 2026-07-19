@@ -1,0 +1,24 @@
+{
+  "name": "i_sheets_mapping_confirm_happy_path",
+  "domain": "integration",
+  "critical": false,
+  "setup_args": ["--onboarded"],
+  "expected_fail": false,
+  "notes": "Happy-path smoke: the owner volunteers clean, unambiguous column names (Customer Name, Phone Number, Order Amount, Order Date, Address — every one a high-confidence exact/fuzzy hit in canonical_fields.GLOBAL_FIELD_HINTS) up front. Expect a smooth forward-moving reply (the real next step is start_oauth's authorize_url — nothing to map until OAuth + the sheet are picked) rather than unnecessary clarification loops over fields that are already unambiguous. Setup: `setup --onboarded` then `script <tenant> i_sheets_mapping_confirm_happy_path.json`.",
+  "steps": [
+    {
+      "message": "I use a Google Sheet to track my shop — columns are Customer Name, Phone Number, Order Amount, Order Date, and Address. Can we get this connected?",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_contains": ["http"],
+      "assert_not_contains": ["what do you mean by", "can you clarify what", "not sure what that column"],
+      "note": "Every named column is an obvious canonical-field match — expect the agent to move straight to minting the connect link, not stall on clarifying obviously-clear fields."
+    },
+    {
+      "message": "Done, I've connected it",
+      "assert_no_silent": true,
+      "assert_contains": ["don't see the connection"],
+      "note": "No real OAuth token lands in this harness — the deterministic auth-wait gate's honest not-yet-connected line must fire, never a fabricated 'connected' + mapping-confirmed leap."
+    }
+  ]
+}

@@ -36,10 +36,15 @@ _STALE_PUSH_THRESHOLD = timedelta(minutes=30)
 def pull_sheet_delta_workflow(
     tenant_id: str, connector_id: str, resource_id: str
 ) -> dict[str, object]:
-    """Pull rows since the channel's last_notification_at.
+    """Pull rows since the channel's last_notification_at and LAND them.
 
-    Routes through VT-209 field-mapping + VT-184 phone-hash dedupe.
-    Writes to the customers table tagged ``acquired_via='google_sheet'``.
+    VT-417 PR-2: the pulled rows are now mapped (``ingest.sheet_row_to_canonical``)
+    and persisted via ``ingest_customer_rows(acquired_via='drive_sheet')`` — real
+    ``customers`` + ``sale`` ledger rows. Previously this counted rows and
+    discarded them (the comment claimed a downstream write that never happened —
+    ``pull_full`` returned data-less envelopes). ``tenant_id`` is the workflow
+    argument (resolved server-side from the verified Drive channel), NEVER from a
+    row payload (P3).
 
     Plain function; ``register_drive_push_scheduler`` applies
     ``@DBOS.workflow()`` explicitly to keep import-time side-effect-free
@@ -48,15 +53,27 @@ def pull_sheet_delta_workflow(
     from orchestrator.integrations.connectors.google_sheet import (
         GoogleSheetConnector,
     )
+    from orchestrator.integrations.ingest import (
+        ingest_customer_rows,
+        sheet_row_to_canonical,
+    )
 
     try:
         connector = GoogleSheetConnector()
-        rows = connector.pull_full(UUID(tenant_id), resource_id)
-        # VT-209 + VT-184 are invoked downstream by the connector's
-        # pull_full method (route through registry). We only return shape.
+        raw_rows = connector.pull_full(UUID(tenant_id), resource_id)
+        canonical = [
+            c
+            for r in (raw_rows or [])
+            if isinstance(r, dict) and (c := sheet_row_to_canonical(r)) is not None
+        ]
+        summary = ingest_customer_rows(
+            UUID(tenant_id), canonical, acquired_via="drive_sheet"
+        )
         return {
             "status": "ok",
-            "row_count": len(rows) if rows is not None else 0,
+            "row_count": len(raw_rows) if raw_rows is not None else 0,
+            "committed": summary.committed,
+            "sales_written": summary.sales_written,
             "tenant_id": tenant_id,
             "connector_id": connector_id,
         }

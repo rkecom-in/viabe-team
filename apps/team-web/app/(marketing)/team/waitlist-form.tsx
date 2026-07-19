@@ -59,21 +59,30 @@ export function WaitlistForm({ labels }: { labels: WaitlistLabels }) {
     }
   }
 
-  if (done) return <p className="waitlist-done">{labels.submitted}</p>
+  if (done)
+    return (
+      <p className="waitlist-done rounded-xl bg-secondary/10 px-5 py-3 font-medium text-secondary">
+        {labels.submitted}
+      </p>
+    )
 
   return (
-    <form className="waitlist-form" onSubmit={onSubmit}>
-      <p className="waitlist-notice">{labels.notice}</p>
-      <label>
+    <form
+      className="waitlist-form flex w-full max-w-md flex-col gap-4 rounded-2xl border border-border bg-card p-6 text-left shadow-sm"
+      onSubmit={onSubmit}
+    >
+      <p className="waitlist-notice text-sm text-muted-foreground">{labels.notice}</p>
+      <label className="flex flex-col gap-1 text-sm font-medium text-foreground">
         {labels.email}
         <input
           type="email"
           value={email}
           onChange={(e) => setEmail(e.target.value)}
           required
+          className="rounded-lg border border-input px-3 py-2 text-base font-normal text-foreground focus:border-ring focus:outline-none focus:ring-2 focus:ring-ring/20"
         />
       </label>
-      <label>
+      <label className="flex flex-col gap-1 text-sm font-medium text-foreground">
         {labels.phone}
         <input
           value={phone}
@@ -81,22 +90,28 @@ export function WaitlistForm({ labels }: { labels: WaitlistLabels }) {
           placeholder="+919876543210"
           inputMode="tel"
           required
+          className="rounded-lg border border-input px-3 py-2 text-base font-normal text-foreground focus:border-ring focus:outline-none focus:ring-2 focus:ring-ring/20"
         />
       </label>
-      <label className="waitlist-consent">
+      <label className="waitlist-consent flex items-start gap-2 text-sm text-muted-foreground">
         <input
           type="checkbox"
           checked={consent}
           onChange={(e) => setConsent(e.target.checked)}
+          className="mt-0.5 h-4 w-4 accent-primary"
         />
         {labels.consent}
       </label>
       {error && (
-        <p className="signup-error" role="alert">
+        <p className="signup-error text-sm font-medium text-destructive" role="alert">
           {error}
         </p>
       )}
-      <button type="submit" disabled={submitting || !consent}>
+      <button
+        type="submit"
+        disabled={submitting || !consent}
+        className="rounded-xl bg-primary px-5 py-2.5 font-semibold text-primary-foreground transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:bg-muted disabled:text-muted-foreground"
+      >
         {labels.submit}
       </button>
     </form>

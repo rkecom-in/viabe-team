@@ -16,9 +16,9 @@ Surface
 - :class:`ComposedOutput` — frozen dataclass returned by the composer.
 - :func:`compose_owner_output` — single entry point. Reads template
   routing + composes the message body per the deterministic rule
-  precedence documented inline (24h-window → refund acknowledgment →
-  escalation framing → hard-limit explanation → template selection →
-  honesty enforcement → language selection).
+  precedence documented inline (24h-window → escalation framing →
+  hard-limit explanation → template selection → honesty enforcement →
+  language selection).
 - :func:`load_template_routing` — yaml loader exposed for tests + the
   agent-tool wrapper.
 
@@ -32,8 +32,6 @@ Honesty rules (Pillar 7 owner-truth — Fazal-priority)
 4. No certainty claims about customer intent — composer frames
    inferred-intent specialist output as ``"pattern suggests"`` /
    ``"looks like"``.
-5. Refund-phase acknowledgment — ``state.phase == "refunded"`` →
-   message must mention the refund decision.
 
 These rules run as deterministic Python checks; tests cover each.
 """
@@ -153,13 +151,28 @@ def load_twilio_templates(path: Path | None = None) -> dict[str, Any]:
     return templates_registry._load_raw(path or _TEMPLATES_PATH)
 
 
-def _tenant_preferred_language(_state: Any) -> PreferredLanguage:
-    """Resolve the tenant's preferred language. Phase-1 fallback constant.
+def _tenant_preferred_language(state: Any) -> PreferredLanguage:
+    """Resolve the tenant's preferred language — PER-TENANT, not global (VT-416 PR-3).
 
-    The ``tenants.preferred_language`` column doesn't exist on main yet
-    (ships under VT-9.2 sign-up). Until then, default to ``"en"`` via
-    the ``TENANT_DEFAULT_LANGUAGE`` env override.
+    Reads ``state['preferred_language']`` when present and valid (a Hindi-preference
+    owner therefore gets the Hindi template variant). Falls back to the global
+    ``TENANT_DEFAULT_LANGUAGE`` env default (``"en"``) ONLY when the state key is
+    absent, empty, or an unrecognised value — so the path stays safe even on prod,
+    where the ``tenants.preferred_language`` column may not yet be threaded into
+    every state (the needs-triage item).
+
+    Prior to this fix the function ignored ``state`` entirely and returned ONE
+    global language for EVERY tenant, so a Hindi-preference owner silently got
+    English template variants.
     """
+    # Per-tenant: prefer the value carried on state.
+    raw_state = state.get("preferred_language") if hasattr(state, "get") else None
+    if raw_state:
+        candidate = str(raw_state).lower()
+        if candidate in ("en", "hi"):
+            return candidate  # type: ignore[return-value]
+
+    # Fallback: global default (column not yet populated / no state value).
     raw = os.environ.get("TENANT_DEFAULT_LANGUAGE", "en").lower()
     if raw not in ("en", "hi"):
         return "en"
@@ -237,7 +250,7 @@ def _enforce_no_arrr_overstatement(body: str, specialist_result: Any) -> tuple[s
     ``"approximately"`` (or ``"~"`` for shorter form).
     """
     notes: list[str] = []
-    out = (specialist_result.output if specialist_result else None) or {}
+    out = getattr(specialist_result, "output", None) or {}
     if not isinstance(out, dict):
         return body, notes
     if not out.get("attribution_uncertain"):
@@ -259,7 +272,7 @@ def _enforce_no_arrr_overstatement(body: str, specialist_result: Any) -> tuple[s
 def _enforce_no_certainty_claims(body: str, specialist_result: Any) -> tuple[str, list[str]]:
     """Honesty rule #4. Replace ``"customer wants X"`` → ``"pattern suggests X"``."""
     notes: list[str] = []
-    out = (specialist_result.output if specialist_result else None) or {}
+    out = getattr(specialist_result, "output", None) or {}
     is_inferred = isinstance(out, dict) and out.get("intent_inferred") is True
     if not is_inferred:
         return body, notes
@@ -316,22 +329,6 @@ def _explain_hard_limit(
         + body.lstrip()
     )
     notes.append(f"hard_limit_axis_explained:{axis}")
-    return framed, notes
-
-
-def _maybe_prepend_refund_ack(body: str, state: Any) -> tuple[str, list[str]]:
-    """Honesty rule #5. Refunded phase → message MUST mention refund decision."""
-    notes: list[str] = []
-    phase = getattr(state, "get", lambda *_: None)("phase")
-    if phase != "refunded":
-        return body, notes
-    if re.search(r"\brefund(ed)?\b", body, re.IGNORECASE):
-        notes.append("refund_ack_already_present")
-        return body, notes
-    framed = (
-        "Following your day-39 refund decision: " + body.lstrip()
-    )
-    notes.append("refund_ack_prepended")
     return framed, notes
 
 
@@ -430,8 +427,6 @@ def compose_owner_output(
         message_body, state, urgency
     )
     notes.extend(n3)
-    message_body, n4 = _maybe_prepend_refund_ack(message_body, state)
-    notes.extend(n4)
 
     # Pressure check is enforce-fail style: detected pressure phrases get
     # surfaced in honesty_notes; the composer does NOT silently rewrite.
@@ -475,7 +470,7 @@ def _derive_template_params(
 ) -> dict[str, str]:
     """Build the variable-substitution map for the template send."""
     params: dict[str, str] = {}
-    out = (specialist_result.output if specialist_result else None) or {}
+    out = getattr(specialist_result, "output", None) or {}
     if not isinstance(out, dict):
         out = {}
 
@@ -487,6 +482,11 @@ def _derive_template_params(
     if intent_or_trigger == "campaign_not_sent_invalid_cohort":
         params["owner_name"] = _owner_name(state)
         params["unverified_count"] = str(int(out.get("rejected_count", 0)))
+        return params
+
+    # VT-486: the out-of-window owner re-engagement template carries a single var, {{1}}=owner_name.
+    if intent_or_trigger == "reengage":
+        params["owner_name"] = _owner_name(state)
         return params
 
     if isinstance(out, dict):
@@ -506,7 +506,7 @@ def _derive_free_form_body(
     free-form copy machinery (templates with slot substitution) ships
     downstream.
     """
-    out = (specialist_result.output if specialist_result else None) or {}
+    out = getattr(specialist_result, "output", None) or {}
     if isinstance(out, dict) and isinstance(out.get("message"), str):
         return out["message"]
     return f"[{intent_or_trigger}] no template applies; specialist provided no message"
@@ -525,7 +525,7 @@ def _derive_follow_up(
     intent_or_trigger: str, specialist_result: Any, state: Any
 ) -> tuple[bool, str | None]:
     """Heuristic follow-up routing. Conservative: only trigger when explicit."""
-    out = (specialist_result.output if specialist_result else None) or {}
+    out = getattr(specialist_result, "output", None) or {}
     if isinstance(out, dict) and out.get("follow_up_required"):
         return True, str(out.get("follow_up_intent") or "unspecified")
     return False, None

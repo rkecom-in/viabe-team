@@ -1,4 +1,4 @@
-import { issueOperatorJwt } from '@/lib/auth/operator-jwt'
+import { issueOperatorJwt, OPERATOR_RESOLVE_TTL_SEC } from '@/lib/auth/operator-jwt'
 
 /** Result of forwarding an inbound webhook to the orchestrator. */
 export interface ForwardResult {
@@ -171,6 +171,281 @@ export async function forwardRunControl(
   }
 }
 
+// ---------------------------------------------------------------------------
+// VT-406 (Part B) — entity-match at signup. team-web PROXIES the orchestrator's
+// internal-secret-gated endpoints (Part A); the browser NEVER sees INTERNAL_API_SECRET
+// and team-web NEVER calls the Sandbox/Apify vendors directly. Both fns fail CLOSED:
+// candidates → {candidates: []} (never stalls signup — a no-candidate owner proceeds via
+// the not-listed path); confirm → {ok: false, reason} (a vendor failure never fakes
+// "verified" — the verify status is the only thing that gates account-creation, VT-408).
+//
+// CL-390: log path + status ONLY — never the business_name/city/gstin/name or any body
+// (those are business identity, and an echoed body in Vercel logs is a CL-390 breach).
+// ---------------------------------------------------------------------------
+
+const _ENTITY_CANDIDATES_TIMEOUT_MS = 10_000
+const _ENTITY_CONFIRM_TIMEOUT_MS = 15_000
+
+/** One UNVERIFIED entity candidate as Part A ships it (asdict of EntityCandidate). Never a fact —
+ *  the owner picks one to verify. `source` drives the "found via web/GBP" chip (NEVER "verified");
+ *  `candidate_gstin` is null for GBP candidates (no registry id); `detail` disambiguates same-name
+ *  candidates (address/category). */
+export interface EntityCandidate {
+  trade_name: string | null
+  source: 'web' | 'gbp' | 'registry'
+  candidate_gstin: string | null
+  legal_name: string | null
+  detail: string | null
+  /** VT-449 — a discovered REGISTRY CIN (source==='registry' candidates only; null otherwise). A
+   *  public registry id, NOT verified: the owner CONFIRMS it's theirs, then it rides into the create
+   *  payload for the orchestrator's MCA-canonical name-match. NEVER auto-sent without confirmation. */
+  candidate_cin?: string | null
+  /** VT-411 — the discovered PUBLIC business number (GBP candidates only; null otherwise). It is the
+   *  ownership-verification target: a DISTINCT OTP is sent here to prove the owner controls the public
+   *  business channel. NEVER rendered as verified — it's a discovered public listing value. */
+  phone?: string | null
+}
+
+export interface EntityCandidatesResult {
+  /** True iff the orchestrator returned 2xx (even with an empty list). */
+  ok: boolean
+  candidates: EntityCandidate[]
+  /** ok | http_<n> | timeout | error — render-only; NEVER implies a candidate is verified. */
+  reason: string
+}
+
+/**
+ * Fetch UNVERIFIED entity candidates for {businessName, city} (Part A web-search + GBP). Fail-CLOSED
+ * to an empty list on any non-2xx / throw — candidate lookup must never stall or block signup (the
+ * not-listed path always exists). The returned candidates are SHOWN AS "found", never "verified".
+ */
+export async function fetchEntityCandidates(
+  businessName: string,
+  city: string,
+): Promise<EntityCandidatesResult> {
+  const base = process.env.TEAM_ORCHESTRATOR_URL ?? _ORCHESTRATOR_DEFAULT
+  const secret = process.env.INTERNAL_API_SECRET ?? ''
+  try {
+    const res = await fetch(`${base}/api/orchestrator/onboard/entity-candidates`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'X-Internal-Secret': secret },
+      body: JSON.stringify({ business_name: businessName, city }),
+      signal: AbortSignal.timeout(_ENTITY_CANDIDATES_TIMEOUT_MS),
+    })
+    if (!res.ok) {
+      console.error(`entity-candidates: http_${res.status}; failing closed`) // CL-390: path + status only
+      return { ok: false, candidates: [], reason: `http_${res.status}` }
+    }
+    const data = (await res.json()) as { candidates?: EntityCandidate[] }
+    return { ok: true, candidates: data.candidates ?? [], reason: 'ok' }
+  } catch (err) {
+    const timedOut = err instanceof Error && err.name === 'TimeoutError'
+    console.error(`entity-candidates: ${timedOut ? 'timeout' : 'error'}; failing closed`) // CL-390: no detail/body
+    return { ok: false, candidates: [], reason: timedOut ? 'timeout' : 'error' }
+  }
+}
+
+export interface GstinsByPanResult {
+  /** True iff the orchestrator returned 2xx (even with an empty list). */
+  ok: boolean
+  /** The GSTIN(s) registered against the PAN (one per state). Empty on no-match / fail-closed. */
+  gstins: string[]
+  /** ok | http_<n> | timeout | error — render-only; a GSTIN here is IDENTIFIED, never verified. */
+  reason: string
+}
+
+/**
+ * VT-448 — IDENTIFY the GSTIN(s) registered against an owner's 10-char PAN (+ derived state code).
+ * The orchestrator holds the vendor creds + does the PAN→GSTIN lookup; team-web NEVER calls the
+ * vendor directly. Fail-CLOSED to an empty list on any non-2xx / throw — a lookup failure must never
+ * stall signup (the manual-GSTIN fallback always exists). The returned GSTIN(s) are IDENTIFIED, not
+ * verified: the owner still PICKS one and we round-trip the Sandbox confirm (status gstin_verified)
+ * before anything reads as verified.
+ */
+export async function fetchGstinsByPan(
+  pan: string,
+  stateCode: string,
+): Promise<GstinsByPanResult> {
+  const base = process.env.TEAM_ORCHESTRATOR_URL ?? _ORCHESTRATOR_DEFAULT
+  const secret = process.env.INTERNAL_API_SECRET ?? ''
+  try {
+    const res = await fetch(`${base}/api/orchestrator/onboard/gstins-by-pan`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'X-Internal-Secret': secret },
+      body: JSON.stringify({ pan, state_code: stateCode }),
+      signal: AbortSignal.timeout(_ENTITY_CANDIDATES_TIMEOUT_MS),
+    })
+    if (!res.ok) {
+      console.error(`gstins-by-pan: http_${res.status}; failing closed`) // CL-390: path + status only
+      return { ok: false, gstins: [], reason: `http_${res.status}` }
+    }
+    const data = (await res.json()) as { gstins?: string[] }
+    return { ok: true, gstins: data.gstins ?? [], reason: 'ok' }
+  } catch (err) {
+    const timedOut = err instanceof Error && err.name === 'TimeoutError'
+    console.error(`gstins-by-pan: ${timedOut ? 'timeout' : 'error'}; failing closed`) // CL-390: no PAN/body
+    return { ok: false, gstins: [], reason: timedOut ? 'timeout' : 'error' }
+  }
+}
+
+export interface EntityConfirmResult {
+  /** True iff the chosen GSTIN verified ACTIVE at Sandbox (status === 'gstin_verified'). */
+  ok: boolean
+  /** unverified | gstin_verified — the ONLY thing that may render a "verified" chip. */
+  status?: string
+  /** vendor_down (retryable, NOT a reject) | invalid_gstin | invalid_gstin_format. */
+  reason?: string
+  /** The AUTHORITATIVE registry name on success — render this, never the candidate's web/LLM name. */
+  name?: string | null
+}
+
+/**
+ * Confirm the owner-picked candidate GSTIN (Part A Sandbox round-trip). Returns the verify status
+ * verbatim. Fail-CLOSED: any non-2xx / throw → {ok:false, reason} — a vendor failure NEVER fakes a
+ * verified result. `gstin_verified` is the sole signal that may unlock account-creation (VT-408).
+ *
+ * tenantId is '' pre-create (the wizard runs BEFORE the tenant exists — see VT-408 verify-then-create
+ * ordering): the Sandbox verify still returns a status, and Part A's anchor-persist/discovery-seed are
+ * best-effort no-ops without a real tenant. The verified entity is carried into the create payload so
+ * the orchestrator anchors it at tenant-create time.
+ */
+export async function confirmEntity(
+  tenantId: string,
+  gstin: string,
+  businessName = '',
+): Promise<EntityConfirmResult> {
+  const base = process.env.TEAM_ORCHESTRATOR_URL ?? _ORCHESTRATOR_DEFAULT
+  const secret = process.env.INTERNAL_API_SECRET ?? ''
+  try {
+    const res = await fetch(`${base}/api/orchestrator/onboard/entity-confirm`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'X-Internal-Secret': secret },
+      // VT-#10: pass the typed business_name so the orchestrator enforces the name-match at the
+      // verify seam (caught before the owner sees "Verified" + spends an OTP), not only at create.
+      body: JSON.stringify({ tenant_id: tenantId, gstin, business_name: businessName }),
+      signal: AbortSignal.timeout(_ENTITY_CONFIRM_TIMEOUT_MS),
+    })
+    if (!res.ok) {
+      console.error(`entity-confirm: http_${res.status}; failing closed`) // CL-390: path + status only
+      return { ok: false, reason: `http_${res.status}` }
+    }
+    const data = (await res.json()) as {
+      ok?: boolean
+      status?: string
+      reason?: string
+      name?: string | null
+    }
+    return {
+      ok: Boolean(data.ok),
+      status: data.status ?? undefined,
+      reason: data.reason ?? undefined,
+      name: data.name ?? null,
+    }
+  } catch (err) {
+    const timedOut = err instanceof Error && err.name === 'TimeoutError'
+    console.error(`entity-confirm: ${timedOut ? 'timeout' : 'error'}; failing closed`) // CL-390: no detail/body
+    return { ok: false, reason: timedOut ? 'timeout' : 'error' }
+  }
+}
+
+
+// ---------------------------------------------------------------------------
+// VT-507 — progressive discovery: parallel async entity search (LLM + KnowYourGST). Returns a
+// discovery_id immediately; the browser polls for progressive candidate surfacing. Both fns fail
+// CLOSED: start → {discoveryId:null} (browser falls back to old blocking search); status →
+// {ok:false} (browser retries, degrades to manual option after N errors). Never blocks signup.
+//
+// CL-390: log path + status ONLY — never business_name/city/discovery_id body.
+// ---------------------------------------------------------------------------
+
+const _DISCOVERY_TIMEOUT_MS = 5_000
+
+export interface DiscoveryStartResult {
+  ok: boolean
+  discoveryId: string | null
+  reason: string
+}
+
+/**
+ * VT-507 — start a parallel async entity discovery session. Returns a discovery_id immediately;
+ * the browser polls getDiscoveryStatus to surface candidates progressively. Fail-CLOSED: any
+ * non-2xx / throw → {ok:false, discoveryId:null} so the browser falls back gracefully.
+ * CL-390: log path + status only — no business_name/city in the log output.
+ */
+export async function startEntityDiscovery(
+  businessName: string,
+  city: string,
+): Promise<DiscoveryStartResult> {
+  const base = process.env.TEAM_ORCHESTRATOR_URL ?? _ORCHESTRATOR_DEFAULT
+  const secret = process.env.INTERNAL_API_SECRET ?? ''
+  try {
+    const res = await fetch(`${base}/api/orchestrator/onboard/discovery/start`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'X-Internal-Secret': secret },
+      body: JSON.stringify({ business_name: businessName, city }),
+      signal: AbortSignal.timeout(_DISCOVERY_TIMEOUT_MS),
+    })
+    if (!res.ok) {
+      console.error(`discovery-start: http_${res.status}; failing closed`) // CL-390: path + status only
+      return { ok: false, discoveryId: null, reason: `http_${res.status}` }
+    }
+    const data = (await res.json()) as { discovery_id?: string | null }
+    return { ok: true, discoveryId: data.discovery_id ?? null, reason: 'ok' }
+  } catch (err) {
+    const timedOut = err instanceof Error && err.name === 'TimeoutError'
+    console.error(`discovery-start: ${timedOut ? 'timeout' : 'error'}; failing closed`) // CL-390: no body
+    return { ok: false, discoveryId: null, reason: timedOut ? 'timeout' : 'error' }
+  }
+}
+
+export interface DiscoveryStatusResult {
+  ok: boolean
+  overallStatus: 'searching' | 'complete' | 'error'
+  candidates: EntityCandidate[]
+  bothCompleteZero: boolean
+  reason: string
+}
+
+/**
+ * VT-507 — poll the status of a running discovery session. Fast (reads pre-computed state; no
+ * 90s wait). Fail-CLOSED: any non-2xx / throw → {ok:false} so the browser retries N times then
+ * degrades to the manual GST-entry path. `both_complete_zero` is the authoritative signal that
+ * both sources returned zero results — the sole trigger for "couldn't find" copy on the browser.
+ * CL-390: log path + status only.
+ */
+export async function getDiscoveryStatus(discoveryId: string): Promise<DiscoveryStatusResult> {
+  const base = process.env.TEAM_ORCHESTRATOR_URL ?? _ORCHESTRATOR_DEFAULT
+  const secret = process.env.INTERNAL_API_SECRET ?? ''
+  try {
+    const res = await fetch(`${base}/api/orchestrator/onboard/discovery/${discoveryId}`, {
+      method: 'GET',
+      headers: { 'X-Internal-Secret': secret },
+      signal: AbortSignal.timeout(_DISCOVERY_TIMEOUT_MS),
+    })
+    if (!res.ok) {
+      console.error(`discovery-status: http_${res.status}; failing closed`) // CL-390: path + status only
+      return { ok: false, overallStatus: 'error', candidates: [], bothCompleteZero: false, reason: `http_${res.status}` }
+    }
+    const data = (await res.json()) as {
+      overall_status?: string
+      candidates?: EntityCandidate[]
+      both_complete_zero?: boolean
+    }
+    return {
+      ok: true,
+      overallStatus: data.overall_status === 'complete' ? 'complete' : 'searching',
+      candidates: data.candidates ?? [],
+      bothCompleteZero: Boolean(data.both_complete_zero),
+      reason: 'ok',
+    }
+  } catch (err) {
+    const timedOut = err instanceof Error && err.name === 'TimeoutError'
+    console.error(`discovery-status: ${timedOut ? 'timeout' : 'error'}; failing closed`) // CL-390: no id/body
+    return { ok: false, overallStatus: 'error', candidates: [], bothCompleteZero: false, reason: timedOut ? 'timeout' : 'error' }
+  }
+}
+
+
 /** VT-211 onboard-step result envelope. */
 export interface OnboardStepResult {
   ok: boolean
@@ -244,8 +519,8 @@ export async function forwardOnboardStep(
 // service-role client + app-side masking, the VTR ops reads call these endpoints, which read ONLY
 // the de-identified views as app_vtr_role (NO grant on raw / decrypt — VT-281). The orchestrator is
 // the ONLY door to VTR data. Fail-CLOSED: any error → [] (the surface degrades to empty, never to
-// raw). MULTI-VTR precondition (VT-281/360): the views aren't assignment-scoped yet — Phase-1 =
-// Fazal-as-VTR#1 sees all tenants; a 2nd VTR needs the views scoped first.
+// raw). Multi-VTR (VT-377/mig-134): the views ARE assignment-scoped per-operator (admin tier sees
+// all via the audited break-glass role) — the old "needs scoping first" precondition is closed.
 // ---------------------------------------------------------------------------
 
 const _VTR_READ_TIMEOUT_MS = 5000
@@ -359,5 +634,937 @@ export async function forwardVtrVerify(
   } catch (err) {
     const timedOut = err instanceof Error && err.name === 'TimeoutError'
     return { ok: false, reason: timedOut ? 'timeout' : 'error' }
+  }
+}
+
+
+// ---------------------------------------------------------------------------
+// VT-370 Gap-6 — VTR console (plan-editing + agent-correction) client.
+//
+// ALL seven fns ride the forwardVtrVerify template: X-Internal-Secret (transport) +
+// X-Operator-Jwt (attribution) — NEVER the forwardRunControl shape (no JWT, body-trusted
+// operator_id = forgeable attribution). Every JWT is minted with
+// `{ ttlSec: OPERATOR_RESOLVE_TTL_SEC }` (5 min) — the bare issueOperatorJwt default is
+// 7 DAYS (operator-jwt.ts) and is forbidden here; these tokens cross the orchestrator
+// audit boundary (CL-390). `operator_id` is always passed through from the caller
+// (server actions derive it from the session claim — never client input); the
+// orchestrator re-verifies body operator_id == JWT claim + assignment, fail-closed.
+//
+// CL-390 logging: these fns log path + status ONLY. Never the patch, params, reason,
+// violations, or any response body (an echoed body in Vercel logs is a CL-390 breach).
+// ---------------------------------------------------------------------------
+
+const _VTR_ACTION_TIMEOUT_MS = 10_000
+
+interface VtrCall {
+  /** HTTP status; 0 on network throw/timeout. */
+  status: number
+  body: Record<string, unknown>
+  /** ok | http_<n> | timeout | error */
+  reason: string
+}
+
+async function vtrCall(path: string, operatorId: string, payload: Record<string, unknown>): Promise<VtrCall> {
+  const base = process.env.TEAM_ORCHESTRATOR_URL ?? _ORCHESTRATOR_DEFAULT
+  const secret = process.env.INTERNAL_API_SECRET ?? ''
+  try {
+    // Short-lived by mandate — never the bare 7-day default.
+    const jwt = await issueOperatorJwt(operatorId, { ttlSec: OPERATOR_RESOLVE_TTL_SEC })
+    const res = await fetch(`${base}/api/orchestrator/ops/${path}`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'X-Internal-Secret': secret,
+        'X-Operator-Jwt': jwt,
+      },
+      body: JSON.stringify({ operator_id: operatorId, ...payload }),
+      signal: AbortSignal.timeout(_VTR_ACTION_TIMEOUT_MS),
+    })
+    let body: Record<string, unknown> = {}
+    try {
+      body = (await res.json()) as Record<string, unknown>
+    } catch {
+      body = {}
+    }
+    if (!res.ok) console.error(`vtr ${path}: http_${res.status}`) // CL-390: path + status only
+    return { status: res.status, body, reason: res.ok ? 'ok' : `http_${res.status}` }
+  } catch (err) {
+    const timedOut = err instanceof Error && err.name === 'TimeoutError'
+    console.error(`vtr ${path}: ${timedOut ? 'timeout' : 'error'}`) // CL-390: no err detail/body
+    return { status: 0, body: {}, reason: timedOut ? 'timeout' : 'error' }
+  }
+}
+
+/** FastAPI HTTPException `detail` → display strings (server scrubs PII before raising). */
+function _detailStrings(body: Record<string, unknown>): string[] {
+  const detail = body.detail
+  if (typeof detail === 'string') return [detail]
+  if (Array.isArray(detail)) return detail.map((d) => (typeof d === 'string' ? d : JSON.stringify(d)))
+  if (detail != null) return [JSON.stringify(detail)]
+  return []
+}
+
+/** One roadmap item as the vtr_business_plan view ships it (diff_from_prev values pre-stripped). */
+export interface VtrRoadmapItem {
+  item_id: string
+  seq: number
+  month: number
+  objective: string
+  why: string
+  owning_agent: string
+  owner_action_needed: boolean
+  owner_action: string | null
+  owner_action_hi: string | null
+  status: string
+  cited_facts?: string[]
+  provenance?: Record<string, unknown>
+}
+
+export interface VtrPlan {
+  tenant_id: string
+  version: number
+  summary_json: Record<string, unknown> | null
+  roadmap_json: VtrRoadmapItem[]
+  generated_by: string
+  model_id: string | null
+  delivered_parts: number
+  delivered_at: string | null
+  created_at: string | null
+}
+
+/** vtr_plan_history view row — metadata ONLY (no roadmap/summary content for prior versions). */
+export interface VtrPlanHistoryEntry {
+  tenant_id: string
+  version: number
+  generated_by: string
+  model_id: string | null
+  created_at: string | null
+}
+
+export interface VtrPlanResult {
+  ok: boolean
+  plan: VtrPlan | null
+  history: VtrPlanHistoryEntry[]
+  reason: string
+}
+
+/** Gap-6: latest plan (latest-version-only, diff-values-stripped view) + metadata history. */
+export async function vtrPlan(operatorId: string, tenantId: string): Promise<VtrPlanResult> {
+  const r = await vtrCall('vtr-plan', operatorId, { tenant_id: tenantId })
+  if (r.status !== 200) return { ok: false, plan: null, history: [], reason: r.reason }
+  return {
+    ok: true,
+    plan: (r.body.plan as VtrPlan | null) ?? null,
+    history: (r.body.history as VtrPlanHistoryEntry[] | undefined) ?? [],
+    reason: 'ok',
+  }
+}
+
+export interface VtrPlanEditResult {
+  ok: boolean
+  newVersion: number | null
+  /** ok | grounding_or_patch | forbidden | not_found | stale_version | http_<n> | timeout | error */
+  reason: string
+  /** Scrubbed grounding-violation strings (400 only). Render-only — never log (CL-390). */
+  violations: string[]
+}
+
+/**
+ * Gap-6: edit one roadmap item (EDITABLE_FIELDS patch). Carries `expected_prev_version`
+ * (optimistic concurrency) — 409 means the plan moved underneath the loaded copy.
+ */
+export async function vtrPlanEdit(
+  operatorId: string,
+  tenantId: string,
+  itemId: string,
+  patch: Record<string, unknown>,
+  expectedPrevVersion: number,
+): Promise<VtrPlanEditResult> {
+  const r = await vtrCall('vtr-plan-edit', operatorId, {
+    tenant_id: tenantId,
+    item_id: itemId,
+    patch,
+    expected_prev_version: expectedPrevVersion,
+  })
+  if (r.status === 200) {
+    return {
+      ok: true,
+      newVersion: typeof r.body.new_version === 'number' ? r.body.new_version : null,
+      reason: 'ok',
+      violations: [],
+    }
+  }
+  if (r.status === 400) {
+    return { ok: false, newVersion: null, reason: 'grounding_or_patch', violations: _detailStrings(r.body) }
+  }
+  if (r.status === 403) return { ok: false, newVersion: null, reason: 'forbidden', violations: [] }
+  if (r.status === 404) return { ok: false, newVersion: null, reason: 'not_found', violations: [] }
+  if (r.status === 409) return { ok: false, newVersion: null, reason: 'stale_version', violations: [] }
+  return { ok: false, newVersion: null, reason: r.reason, violations: [] }
+}
+
+/** VT-556 — VTR strategy/behavioural directive ingest result. */
+export interface VtrAgentDirectiveResult {
+  ok: boolean
+  version: number | null
+  memoryKey: string | null
+  /** ok | invalid | forbidden | not_found | http_<n> | timeout | error */
+  reason: string
+  violations: string[]
+}
+
+/**
+ * VT-556 — a VTR ingests a strategy/behavioural DIRECTIVE the Team Manager picks up on its next run
+ * (human-as-teacher input; distinct from vtr-plan-edit's draft correction). The orchestrator writes
+ * it into agent_memory with provenance + authority='vtr', marks it retrieval-eligible, and audits it
+ * (ops_audit fail-loud + tm_audit). The operator↔tenant assignment gate is enforced server-side.
+ */
+export async function vtrAgentDirective(
+  operatorId: string,
+  tenantId: string,
+  memoryKey: string,
+  content: string,
+  directiveKind: 'strategy' | 'behavioural',
+  agent = 'manager',
+): Promise<VtrAgentDirectiveResult> {
+  const r = await vtrCall('vtr-agent-directive', operatorId, {
+    tenant_id: tenantId,
+    memory_key: memoryKey,
+    content,
+    directive_kind: directiveKind,
+    agent,
+  })
+  if (r.status === 200) {
+    return {
+      ok: true,
+      version: typeof r.body.version === 'number' ? r.body.version : null,
+      memoryKey: typeof r.body.memory_key === 'string' ? r.body.memory_key : null,
+      reason: 'ok',
+      violations: [],
+    }
+  }
+  if (r.status === 400) {
+    return { ok: false, version: null, memoryKey: null, reason: 'invalid', violations: _detailStrings(r.body) }
+  }
+  if (r.status === 403) return { ok: false, version: null, memoryKey: null, reason: 'forbidden', violations: [] }
+  if (r.status === 404) return { ok: false, version: null, memoryKey: null, reason: 'not_found', violations: [] }
+  return { ok: false, version: null, memoryKey: null, reason: r.reason, violations: [] }
+}
+
+/** vtr_agent_autonomy view row. NO revoke_reason (excluded by construction — free text). */
+export interface VtrAgentAutonomy {
+  tenant_id: string
+  tenant_name: string | null
+  agent: string
+  level: string
+  clean_approval_streak: number
+  lifetime_approvals: number
+  lifetime_rejections: number
+  frozen: boolean
+  last_regression_at: string | null
+  last_regression_kind: string | null
+  l3_granted_at: string | null
+  l3_revoked_at: string | null
+  updated_at: string | null
+}
+
+/** Gap-6: per-agent autonomy state. Fail-closed [] (a missing agent row = L2/0/unfrozen default). */
+export async function vtrAgentState(
+  operatorId: string,
+  tenantId: string,
+): Promise<{ ok: boolean; agents: VtrAgentAutonomy[]; reason: string }> {
+  const r = await vtrCall('vtr-agent-state', operatorId, { tenant_id: tenantId })
+  if (r.status !== 200) return { ok: false, agents: [], reason: r.reason }
+  return { ok: true, agents: (r.body.agents as VtrAgentAutonomy[] | undefined) ?? [], reason: 'ok' }
+}
+
+/**
+ * vtr_tenant_profile view row (VT-405 Part A) — signup fields + auto-discovered draft + keys-only
+ * confirmation status. Non-PII: WhatsApp is masked to last-4 AT the view; the confirmed canonical
+ * profile is keys-only (`confirmed_fields`); draft attributes/provenance carry public discovery values.
+ */
+export interface VtrTenantProfile {
+  tenant_id: string
+  business_name: string | null
+  phase: string | null
+  plan_tier: string | null
+  business_type: string | null
+  locality: string | null
+  city_tier: string | null
+  language_preference: string | null
+  preferred_language: string | null
+  signed_up_at: string | null
+  trial_started_at: string | null
+  phase_entered_at: string | null
+  owner_name: string | null
+  whatsapp_last4: string | null
+  draft_attributes: Record<string, unknown> | null
+  draft_provenance: Record<string, { source?: string; fetched_at?: string }> | null
+  draft_created_at: string | null
+  draft_updated_at: string | null
+  onboarding_status: string | null
+  onboarding_queue_len: number
+  confirmed_fields: string[] | null
+  /** VT-405 Part B — per-field confirm provenance ({field: {source, status, confirmed_by, at}}).
+   *  METADATA ONLY (no field values); source='vtr' → VTR-asserted, absent/owner → owner-confirmed. */
+  field_provenance: Record<
+    string,
+    { source?: string; status?: string; confirmed_by?: string; at?: string }
+  > | null
+  /** VT-517 — ownership review state (vtr_tenant_profile view, migration 148). `ownership_status` is
+   *  pending | verified | rejected; `ownership_verified` is the bool the EXECUTION gate reads. Both are
+   *  business-level (non-PII) — they drive the Ops Console ownership-review surface. */
+  ownership_verified?: boolean | null
+  ownership_status?: string | null
+}
+
+export async function vtrTenantProfile(
+  operatorId: string,
+  tenantId: string,
+): Promise<{ ok: boolean; profile: VtrTenantProfile | null; reason: string }> {
+  const r = await vtrCall('vtr-tenant-profile', operatorId, { tenant_id: tenantId })
+  if (r.status !== 200) return { ok: false, profile: null, reason: r.reason }
+  return { ok: true, profile: (r.body.profile as VtrTenantProfile | null) ?? null, reason: 'ok' }
+}
+
+export interface VtrConfirmFieldResult {
+  ok: boolean
+  field: string | null
+  status: string | null
+  reason: string
+}
+
+/**
+ * VT-405 Part B — promote ONE auto-discovered draft field to VTR-asserted confirmed (CL-441: a VTR
+ * may confirm ANY discovered field incl. identity). The value is read server-side from the draft
+ * (never sent by the client — IDOR/PII); we send only the field NAME. Fail-closed on any non-200.
+ */
+export async function vtrConfirmField(
+  operatorId: string,
+  tenantId: string,
+  field: string,
+  basis = '',
+): Promise<VtrConfirmFieldResult> {
+  const r = await vtrCall('vtr-confirm-field', operatorId, { tenant_id: tenantId, field, basis })
+  if (r.status === 200) {
+    return {
+      ok: true,
+      field: typeof r.body.field === 'string' ? r.body.field : field,
+      status: typeof r.body.status === 'string' ? r.body.status : 'vtr_confirmed',
+      reason: 'ok',
+    }
+  }
+  if (r.status === 400) return { ok: false, field: null, status: null, reason: 'invalid_field' }
+  if (r.status === 403) return { ok: false, field: null, status: null, reason: 'forbidden' }
+  if (r.status === 404) return { ok: false, field: null, status: null, reason: 'not_found' }
+  return { ok: false, field: null, status: null, reason: r.reason }
+}
+
+export interface VtrOwnershipDecisionResult {
+  ok: boolean
+  /** The recorded decision (verified | rejected) on success; null otherwise. */
+  decision: string | null
+  /** The resulting tenants.ownership_verified bool — the EXECUTION gate reads this. */
+  ownershipVerified: boolean
+  /** ok | forbidden | not_found | conflict | http_<n> | timeout | error */
+  reason: string
+}
+
+/**
+ * VT-517 — a VTR human decides ownership (the self-serve OTP path is gone). The orchestrator writes
+ * the tenants row + an ops_audit row + a fail-closed tm_audit row in one transaction behind the
+ * standard VTR action gate (X-Internal-Secret + X-Operator-Jwt + operator-assignment). `note` +
+ * `evidence` are the operator's free-text justification (audited server-side). Fail-closed on any
+ * non-200 — a transport/gate failure NEVER reads as a recorded decision. Modeled on vtrConfirmField.
+ */
+export async function vtrOwnershipDecision(
+  operatorId: string,
+  tenantId: string,
+  decision: 'verified' | 'rejected',
+  note: string,
+  evidence: string,
+): Promise<VtrOwnershipDecisionResult> {
+  const r = await vtrCall('vtr-ownership-decision', operatorId, {
+    tenant_id: tenantId,
+    decision,
+    note,
+    evidence,
+  })
+  if (r.status === 200) {
+    return {
+      ok: true,
+      decision: typeof r.body.decision === 'string' ? r.body.decision : decision,
+      ownershipVerified: Boolean(r.body.ownership_verified),
+      reason: 'ok',
+    }
+  }
+  if (r.status === 403) return { ok: false, decision: null, ownershipVerified: false, reason: 'forbidden' }
+  if (r.status === 404) return { ok: false, decision: null, ownershipVerified: false, reason: 'not_found' }
+  if (r.status === 409) return { ok: false, decision: null, ownershipVerified: false, reason: 'conflict' }
+  return { ok: false, decision: null, ownershipVerified: false, reason: r.reason }
+}
+
+/** vtr_draft_batches view row — AGGREGATES ONLY (no params/owner_feedback/customer_id by view). */
+export interface VtrDraftBatch {
+  batch_id: string
+  tenant_id: string
+  tenant_name: string | null
+  agent: string
+  status: string
+  edit_cycles: number
+  created_at: string | null
+  updated_at: string | null
+  draft_count: number
+  pending_count: number
+  sent_count: number
+  skipped_count: number
+  halted_count: number
+  template_names: (string | null)[]
+}
+
+/** Gap-6: draft batches (counts + template-name enums only). Fail-closed []. */
+export async function vtrDraftBatches(
+  operatorId: string,
+  tenantId: string,
+  limit = 100,
+): Promise<{ ok: boolean; rows: VtrDraftBatch[]; count: number; reason: string }> {
+  const r = await vtrCall('vtr-draft-batches', operatorId, { tenant_id: tenantId, limit })
+  if (r.status !== 200) return { ok: false, rows: [], count: 0, reason: r.reason }
+  const rows = (r.body.rows as VtrDraftBatch[] | undefined) ?? []
+  return { ok: true, rows, count: typeof r.body.count === 'number' ? r.body.count : rows.length, reason: 'ok' }
+}
+
+export type VtrOverrideAction = 'freeze' | 'unfreeze' | 'demote' | 'revoke_l3'
+
+export interface VtrOverrideResult {
+  ok: boolean
+  state: { level: string; frozen: boolean; streak: number } | null
+  batchesCancelled: number
+  /** ok | forbidden | http_<n> | timeout | error */
+  reason: string
+}
+
+/** Gap-6: freeze/unfreeze/demote/revoke_l3 one agent. Reason is scrubbed + clamped server-side. */
+export async function vtrAutonomyOverride(
+  operatorId: string,
+  tenantId: string,
+  agent: string,
+  action: VtrOverrideAction,
+  reason = '',
+): Promise<VtrOverrideResult> {
+  const r = await vtrCall('vtr-autonomy-override', operatorId, {
+    tenant_id: tenantId,
+    agent,
+    action,
+    reason,
+  })
+  if (r.status !== 200) {
+    return { ok: false, state: null, batchesCancelled: 0, reason: r.status === 403 ? 'forbidden' : r.reason }
+  }
+  const state = (r.body.state as { level: string; frozen: boolean; streak: number } | undefined) ?? null
+  return {
+    ok: true,
+    state,
+    batchesCancelled: typeof r.body.batches_cancelled === 'number' ? r.body.batches_cancelled : 0,
+    reason: 'ok',
+  }
+}
+
+export interface VtrBatchCancelResult {
+  ok: boolean
+  tenantId: string | null
+  draftsHalted: number
+  /** ok | forbidden | not_found | http_<n> | timeout | error */
+  reason: string
+}
+
+/**
+ * Gap-6: cancel ONE batch (the scalpel). NO tenant_id crosses the wire — the orchestrator
+ * derives it from the batch row server-side (VT-293/294 IDOR discipline; missing → 404).
+ */
+export async function vtrBatchCancel(
+  operatorId: string,
+  batchId: string,
+  reason = '',
+): Promise<VtrBatchCancelResult> {
+  const r = await vtrCall('vtr-batch-cancel', operatorId, { batch_id: batchId, reason })
+  if (r.status !== 200) {
+    const mapped = r.status === 403 ? 'forbidden' : r.status === 404 ? 'not_found' : r.reason
+    return { ok: false, tenantId: null, draftsHalted: 0, reason: mapped }
+  }
+  return {
+    ok: true,
+    tenantId: (r.body.tenant_id as string | undefined) ?? null,
+    draftsHalted: typeof r.body.drafts_halted === 'number' ? r.body.drafts_halted : 0,
+    reason: 'ok',
+  }
+}
+
+/** Per-draft row from the EXCEPTION-TIER drill-in (params visible — Fazal-only, audited). */
+export interface VtrBatchDraft {
+  template_name: string
+  params: Record<string, unknown> | null
+  status: string
+  skip_reason: string | null
+}
+
+/**
+ * Gap-6 exception tier (Fazal=VTR#1 only): per-draft template_name + params for one batch.
+ * The orchestrator audits the reveal in-txn BEFORE the read. 403 = not exception tier —
+ * callers render that gracefully (the button shows for everyone; the gate is server-side).
+ * CL-390: NEVER log the returned drafts.
+ */
+export async function vtrBatchDrafts(
+  operatorId: string,
+  batchId: string,
+): Promise<{ ok: boolean; drafts: VtrBatchDraft[]; reason: string }> {
+  const r = await vtrCall('vtr-batch-drafts', operatorId, { batch_id: batchId })
+  if (r.status !== 200) {
+    const mapped = r.status === 403 ? 'forbidden' : r.status === 404 ? 'not_found' : r.reason
+    return { ok: false, drafts: [], reason: mapped }
+  }
+  return { ok: true, drafts: (r.body.drafts as VtrBatchDraft[] | undefined) ?? [], reason: 'ok' }
+}
+
+
+// ---------------------------------------------------------------------------
+// VT-375 (Phase B) — VTR run-control READ surface (programs projection + step
+// timeline). READ-ONLY: GET endpoints on the Gap-6 stack — X-Internal-Secret
+// (transport) + a SHORT-LIVED X-Operator-Jwt (attribution). GET carries NO body:
+// the orchestrator feeds the JWT claim id itself to the assignment-gate equality
+// leg (it never reads an operator_id from a GET body), so these fns mint the
+// short-lived token and send NOTHING in a body. Fail-CLOSED (empty projection /
+// empty timeline) on any non-2xx or throw — the canvas degrades to empty, never
+// to raw. CL-390: log path + status ONLY — never the projection/timeline body.
+//
+// The write leg (pause / override / rerun) ships below this read surface (the
+// VT-376 mutation fns — see the VT-376 section further down this file).
+// ---------------------------------------------------------------------------
+
+const _VTR_RC_READ_TIMEOUT_MS = 10_000
+
+/** GET on the run-control read stack — short-lived JWT, no body. status 0 on throw/timeout. */
+async function vtrRcGet(path: string, operatorId: string): Promise<VtrCall> {
+  const base = process.env.TEAM_ORCHESTRATOR_URL ?? _ORCHESTRATOR_DEFAULT
+  const secret = process.env.INTERNAL_API_SECRET ?? ''
+  try {
+    const jwt = await issueOperatorJwt(operatorId, { ttlSec: OPERATOR_RESOLVE_TTL_SEC })
+    const res = await fetch(`${base}/api/orchestrator/ops/run-control/${path}`, {
+      method: 'GET',
+      headers: {
+        'X-Internal-Secret': secret,
+        'X-Operator-Jwt': jwt,
+      },
+      signal: AbortSignal.timeout(_VTR_RC_READ_TIMEOUT_MS),
+    })
+    let body: Record<string, unknown> = {}
+    try {
+      body = (await res.json()) as Record<string, unknown>
+    } catch {
+      body = {}
+    }
+    if (!res.ok) console.error(`vtr-rc ${path}: http_${res.status}`) // CL-390: path + status only
+    return { status: res.status, body, reason: res.ok ? 'ok' : `http_${res.status}` }
+  } catch (err) {
+    const timedOut = err instanceof Error && err.name === 'TimeoutError'
+    console.error(`vtr-rc ${path}: ${timedOut ? 'timeout' : 'error'}`) // CL-390: no err detail/body
+    return { status: 0, body: {}, reason: timedOut ? 'timeout' : 'error' }
+  }
+}
+
+/** One terminal/running run as the programs projection ships it (past + running share fields). */
+export interface VtrProgramRun {
+  run_id: string
+  run_type: string | null
+  status: string
+  started_at: string | null
+  ended_at: string | null
+  rerun_of_run_id: string | null
+  rerun_from_step: string | null
+  step_count: number | null
+  /** running rows only — an active workflow_controls hold covers this run's kind. */
+  active_hold?: boolean
+}
+
+/** One COMPUTED upcoming-7d forecast item (no new state — trial sweep / agent dispatch / roadmap). */
+export interface VtrUpcomingItem {
+  kind: string
+  due_at: string | null
+  label: string
+  source: string
+}
+
+/** One active pause hold (vtr_workflow_controls — structural fields only; NEVER reason). */
+export interface VtrHold {
+  // /programs sends exactly {workflow_kind, set_at} (deliberately minimal — no reason text);
+  // /timeline's active_controls additionally carry tenant_id/released_at from the view.
+  tenant_id?: string
+  workflow_kind: string
+  set_at: string | null
+  released_at?: string | null
+}
+
+export interface VtrProgramsResult {
+  ok: boolean
+  past: VtrProgramRun[]
+  running: VtrProgramRun[]
+  upcoming7d: VtrUpcomingItem[]
+  holds: VtrHold[]
+  /** true when the workflow_controls read degraded (fail-open) — drives the unverifiable banner. */
+  degraded: boolean
+  reason: string
+}
+
+/**
+ * VT-375: per-tenant programs projection (past / running / upcoming-7d + active holds).
+ * Read-only. Fail-CLOSED on any non-2xx / throw → empty groups, degraded=true so the
+ * canvas surfaces the pause-state-unverifiable copy rather than implying "not paused".
+ */
+export async function vtrPrograms(
+  operatorId: string,
+  tenantId: string,
+): Promise<VtrProgramsResult> {
+  const r = await vtrRcGet(`programs/${tenantId}`, operatorId)
+  if (r.status !== 200) {
+    return { ok: false, past: [], running: [], upcoming7d: [], holds: [], degraded: true, reason: r.reason }
+  }
+  return {
+    ok: true,
+    past: (r.body.past as VtrProgramRun[] | undefined) ?? [],
+    running: (r.body.running as VtrProgramRun[] | undefined) ?? [],
+    upcoming7d: (r.body.upcoming_7d as VtrUpcomingItem[] | undefined) ?? [],
+    holds: (r.body.holds as VtrHold[] | undefined) ?? [],
+    degraded: Boolean(r.body.degraded),
+    reason: 'ok',
+  }
+}
+
+/** One step row as vtr_step_timeline ships it — keys-only envelopes by construction (plan §6). */
+export interface VtrTimelineStep {
+  run_id: string
+  run_type: string | null
+  run_status: string | null
+  run_started_at: string | null
+  run_ended_at: string | null
+  rerun_of_run_id: string | null
+  rerun_from_step: string | null
+  step_id: string | null
+  step_seq: number | null
+  step_kind: string | null
+  step_name: string | null
+  step_status: string | null
+  /**
+   * Control axis (orchestrator-authoritative): 'controllable' = pause/override/rerun can act on
+   * this step; 'observed' = timeline display only, not controllable in this panel. Drives the
+   * "Observed — not controllable" badge. Absent/unknown ⇒ treat as observed (fail-safe: never
+   * imply a step is controllable when the server didn't say so).
+   */
+  tier: 'controllable' | 'observed' | null
+  /**
+   * VT-376 (B1 /timeline annotation): the KEY NAMES the override form may pin for this step —
+   * the registry StepEntry.allowed_keys (config/ID-class only, I7-safe to show). Empty array for
+   * observed/uncontrollable steps. NEVER the VALUES (those are de-identified by construction); the
+   * override dialog renders one field per name and warns the operator is editing blind.
+   */
+  allowed_keys?: string[]
+  started_at: string | null
+  ended_at: string | null
+  duration_ms: number | null
+  override_id: string | null
+  paused_ms: number | null
+  /** keys-only (array of key names) for non-audited kinds; an object for the audited name-free set. */
+  input_envelope: unknown
+  output_envelope: unknown
+}
+
+export interface VtrRunTimelineResult {
+  ok: boolean
+  runId: string | null
+  tenantId: string | null
+  steps: VtrTimelineStep[]
+  /** active vtr_workflow_controls holds riding along so the panel never shows a false "not paused". */
+  activeControls: VtrHold[]
+  /**
+   * VT-376 (B1 run-level annotation): true iff this run's workflow_kind is in RERUNNABLE — drives
+   * whether the rerun button shows at all. Absent ⇒ false (fail-safe: never offer rerun the server
+   * didn't bless).
+   */
+  rerunnable: boolean
+  /**
+   * VT-376: per-kind WHY-copy when the run is NOT rerunnable
+   * ('message-dedup semantics' | 'duplicate-nudge risk' | 'kg-duplication'). null when rerunnable.
+   * Rendered verbatim next to the (absent) button so the operator sees the reason, not silence.
+   */
+  forbiddenReason: string | null
+  /**
+   * VT-376 PRE-FLIGHT (a3): true iff the tenant has an OPEN owner approval right now — a rerun
+   * would refuse (server 409/422 is the authority). The confirm dialog re-fetches this immediately
+   * pre-POST and, when true, warns + disables submit. Absent ⇒ false (the server gate still
+   * decides; this is UI sugar). NEVER the approval's contents — a boolean only.
+   */
+  openApproval: boolean
+  reason: string
+}
+
+/**
+ * VT-375: the step timeline for ONE run (the Phase-A GET surface). Read-only.
+ * Tenant is DERIVED server-side from the run row (VT-293/294) — no tenant crosses the wire.
+ * Fail-CLOSED on non-2xx / throw → empty steps.
+ */
+export async function vtrRunTimeline(
+  operatorId: string,
+  runId: string,
+): Promise<VtrRunTimelineResult> {
+  const r = await vtrRcGet(`timeline/${runId}`, operatorId)
+  if (r.status !== 200) {
+    return {
+      ok: false,
+      runId: null,
+      tenantId: null,
+      steps: [],
+      activeControls: [],
+      rerunnable: false,
+      forbiddenReason: null,
+      openApproval: false,
+      reason: r.reason,
+    }
+  }
+  // VT-376 run-level annotations (B1) — all fail-safe-defaulted: a server that omits them is
+  // treated as "not rerunnable / no open-approval signal", never as "rerun is fine".
+  return {
+    ok: true,
+    runId: (r.body.run_id as string | undefined) ?? null,
+    tenantId: (r.body.tenant_id as string | undefined) ?? null,
+    steps: (r.body.steps as VtrTimelineStep[] | undefined) ?? [],
+    activeControls: (r.body.active_controls as VtrHold[] | undefined) ?? [],
+    rerunnable: Boolean(r.body.rerunnable),
+    forbiddenReason:
+      typeof r.body.forbidden_reason === 'string' ? r.body.forbidden_reason : null,
+    openApproval: Boolean(r.body.open_approval),
+    reason: 'ok',
+  }
+}
+
+
+// ---------------------------------------------------------------------------
+// VT-376 (Phase C) — VTR run-control MUTATION surface (pause/release/override/
+// cancel-override/rerun). POST on the Gap-6 vtrCall idiom (X-Internal-Secret +
+// SHORT-LIVED X-Operator-Jwt) — the SAME endpoints the orchestrator built in
+// Phase A; the panel invents NO new mutation paths. Every fn maps the pinned
+// status codes (401/403/404/409/422/503) to a TYPED reason; the orchestrator
+// re-derives tenant + re-checks the assignment gate + audits BEFORE the mutation
+// (team-web auth is fail-open at the enforcement leg, server is authoritative).
+//
+// CL-390: vtrCall already logs path + status ONLY — these fns NEVER log the
+// reason text, pins, override ids, or any response body. NO tenant_id crosses the
+// wire for the ROW-targeted actions (cancel-override / rerun) — the orchestrator
+// derives it from the row (VT-293/294 IDOR discipline).
+// ---------------------------------------------------------------------------
+
+/** Map a vtrCall result to the run-control typed reason vocabulary (shared across the 5 fns). */
+function _rcReason(status: number, fallback: string): string {
+  switch (status) {
+    case 401:
+      return 'unauthorized'
+    case 403:
+      return 'forbidden'
+    case 404:
+      return 'not_found'
+    case 409:
+      return 'conflict'
+    case 422:
+      return 'unprocessable'
+    case 503:
+      return 'registry_unavailable'
+    default:
+      return fallback
+  }
+}
+
+export interface RcPauseResult {
+  ok: boolean
+  controlId: string | null
+  /** ok | unauthorized | forbidden | conflict (already paused) | http_<n> | timeout | error */
+  reason: string
+}
+
+/**
+ * VT-376: set the (tenant, workflow_kind) hold. 409 = already paused. The server F9 read-back
+ * means a 200 here is a hold the executor can actually see (a pause it can't see is a 500, not
+ * a false success). ``reason`` free text is redacted at write — the UI notes that.
+ */
+export async function vtrRcPause(
+  operatorId: string,
+  tenantId: string,
+  workflowKind: string,
+  reason = '',
+): Promise<RcPauseResult> {
+  const r = await vtrCall('run-control/pause', operatorId, {
+    tenant_id: tenantId,
+    workflow_kind: workflowKind,
+    reason,
+  })
+  if (r.status !== 200) {
+    return { ok: false, controlId: null, reason: _rcReason(r.status, r.reason) }
+  }
+  return { ok: true, controlId: (r.body.control_id as string | undefined) ?? null, reason: 'ok' }
+}
+
+export interface RcReleaseResult {
+  ok: boolean
+  controlId: string | null
+  /** ok | unauthorized | forbidden | not_found (no active pause) | http_<n> | timeout | error */
+  reason: string
+}
+
+/** VT-376: release the active (tenant, workflow_kind) hold. 404 = no active pause. */
+export async function vtrRcRelease(
+  operatorId: string,
+  tenantId: string,
+  workflowKind: string,
+): Promise<RcReleaseResult> {
+  const r = await vtrCall('run-control/release', operatorId, {
+    tenant_id: tenantId,
+    workflow_kind: workflowKind,
+  })
+  if (r.status !== 200) {
+    return { ok: false, controlId: null, reason: _rcReason(r.status, r.reason) }
+  }
+  return { ok: true, controlId: (r.body.control_id as string | undefined) ?? null, reason: 'ok' }
+}
+
+export interface RcOverrideResult {
+  ok: boolean
+  overrideId: string | null
+  expiresAt: string | null
+  /**
+   * ok | unauthorized | forbidden | not_found | unprocessable (422 — bad keys / non-controllable
+   * step / pause-only boundary / gate module / next-run-needs-expiry) | registry_unavailable (503)
+   * | http_<n> | timeout | error
+   */
+  reason: string
+  /** Scrubbed 422/4xx detail strings — render-only, NEVER log (CL-390). */
+  detail: string[]
+}
+
+/**
+ * VT-376: pre-register a one-shot step pin. ``workflowId`` set = row-targeted (tenant derived
+ * from the run); NULL = next-run, tenant-scoped, ``expiresAt`` REQUIRED (UI defaults 7d).
+ * The server 422 is the authority on allowed-keys / pure_return / pause-only / gate-module /
+ * next-run-expiry — the form only renders the step's allowed_keys (key NAMES; values blind).
+ */
+export async function vtrRcOverride(
+  operatorId: string,
+  args: {
+    tenantId: string
+    workflowKind: string
+    stepName: string
+    workflowId?: string | null
+    pinnedInput?: Record<string, unknown> | null
+    pinnedOutput?: Record<string, unknown> | null
+    reason?: string
+    expiresAt?: string | null
+  },
+): Promise<RcOverrideResult> {
+  const r = await vtrCall('run-control/override', operatorId, {
+    tenant_id: args.tenantId,
+    workflow_kind: args.workflowKind,
+    step_name: args.stepName,
+    workflow_id: args.workflowId ?? null,
+    pinned_input: args.pinnedInput ?? null,
+    pinned_output: args.pinnedOutput ?? null,
+    reason: args.reason ?? '',
+    expires_at: args.expiresAt ?? null,
+  })
+  if (r.status !== 200) {
+    return {
+      ok: false,
+      overrideId: null,
+      expiresAt: null,
+      reason: _rcReason(r.status, r.reason),
+      detail: _detailStrings(r.body),
+    }
+  }
+  return {
+    ok: true,
+    overrideId: (r.body.override_id as string | undefined) ?? null,
+    expiresAt: (r.body.expires_at as string | undefined) ?? null,
+    reason: 'ok',
+    detail: [],
+  }
+}
+
+export interface RcCancelOverrideResult {
+  ok: boolean
+  /** ok | unauthorized | forbidden | not_found | conflict (consumed/cancelled) | http_<n> | … */
+  reason: string
+}
+
+/**
+ * VT-376: cancel ONE unconsumed override. NO tenant_id crosses the wire — the orchestrator
+ * derives it from the override row (VT-293/294). 409 = already consumed/cancelled (or lost the
+ * race with a consuming run).
+ */
+export async function vtrRcCancelOverride(
+  operatorId: string,
+  overrideId: string,
+): Promise<RcCancelOverrideResult> {
+  const r = await vtrCall('run-control/cancel-override', operatorId, { override_id: overrideId })
+  if (r.status !== 200) return { ok: false, reason: _rcReason(r.status, r.reason) }
+  return { ok: true, reason: 'ok' }
+}
+
+export interface RcRerunResult {
+  ok: boolean
+  newRunId: string | null
+  /**
+   * The C1/Option-A close outcome — 'completed' | 'escalated_overlap'. The server returns 200
+   * for BOTH (the rerun DID run; an overlap is disclosed, never rolled back). null on any non-200.
+   */
+  outcome: 'completed' | 'escalated_overlap' | null
+  /**
+   * ok | unauthorized | forbidden | not_found | conflict (paused) | unprocessable (422 — kind not
+   * rerunnable / open approval / unknown step / non-object pin) | http_<n> | timeout | error
+   */
+  reason: string
+  /** Scrubbed refusal detail — render-only, NEVER log (CL-390). */
+  detail: string[]
+}
+
+/**
+ * VT-376: app-level re-dispatch from a step (re-dispatch, NOT time-travel). NO tenant_id crosses
+ * the wire — derived from the source run (VT-293/294). Outputs RE-ENTER owner approval (I2). An
+ * owner approval that armed mid-flight closes the run 'escalated' with outcome
+ * 'escalated_overlap' (still HTTP 200 — the panel surfaces the C1-A disclosure). The double-click
+ * hazard is serialized server-side by the rerun-slot advisory lock (B1); the second concurrent
+ * POST refuses cleanly (no two lineage rows for one source).
+ */
+export async function vtrRcRerun(
+  operatorId: string,
+  sourceRunId: string,
+  fromStep: string,
+  overrides: Record<string, unknown>[] = [],
+): Promise<RcRerunResult> {
+  const r = await vtrCall('run-control/rerun', operatorId, {
+    source_run_id: sourceRunId,
+    from_step: fromStep,
+    overrides,
+  })
+  if (r.status !== 200) {
+    return {
+      ok: false,
+      newRunId: null,
+      outcome: null,
+      reason: _rcReason(r.status, r.reason),
+      detail: _detailStrings(r.body),
+    }
+  }
+  const outcome = r.body.outcome === 'escalated_overlap' ? 'escalated_overlap' : 'completed'
+  return {
+    ok: true,
+    newRunId: (r.body.new_run_id as string | undefined) ?? null,
+    outcome,
+    reason: 'ok',
+    detail: [],
   }
 }

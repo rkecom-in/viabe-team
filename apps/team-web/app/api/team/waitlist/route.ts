@@ -7,18 +7,11 @@
  */
 import { NextResponse } from 'next/server'
 
+import { trustedClientIp } from '@/lib/auth/client-ip'
 import { checkWaitlistRateLimit } from '@/lib/auth/otp-rate-limit'
 
 const BASE = process.env.TEAM_ORCHESTRATOR_URL ?? 'http://localhost:8001'
 const _secret = (): string => process.env.INTERNAL_API_SECRET ?? ''
-
-function clientIp(req: Request): string {
-  return (
-    req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ??
-    req.headers.get('x-real-ip')?.trim() ??
-    'unknown'
-  )
-}
 
 export async function POST(request: Request): Promise<Response> {
   // CL-422 dark gate: no real waitlist PII collected until ENABLE_WAITLIST_CAPTURE=true
@@ -34,7 +27,7 @@ export async function POST(request: Request): Promise<Response> {
 
   // Per-IP throttle — a flood backstop (distinct-email spam). The orchestrator dedups + the
   // X-Internal-Secret gates the BYPASSRLS write; this caps the edge.
-  if (!checkWaitlistRateLimit(clientIp(request)).allowed) {
+  if (!checkWaitlistRateLimit(trustedClientIp(request)).allowed) {
     return NextResponse.json({ detail: { code: 'rate_limited' } }, { status: 429 })
   }
 

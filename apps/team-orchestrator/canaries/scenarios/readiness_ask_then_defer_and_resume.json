@@ -1,0 +1,24 @@
+{
+  "name": "readiness_ask_then_defer_and_resume",
+  "domain": "onboarding",
+  "critical": false,
+  "setup_args": ["--onboarded", "--flow", "ready_asked"],
+  "expected_fail": false,
+  "notes": "Journey COMPLETE with __flow__='ready_asked'. An unambiguous decline token ('nahi'/'baad' are in the deterministic _FLOW_DECLINE floor set) routes to _flow_defer (verbatim 'No problem — I'll hold off... say connect' template), then a later clear connect-intent message ('connect'/'ready' tokens) resumes via _resolve_deferred_intent into _flow_offer_next_integration. Setup: `setup --onboarded --flow ready_asked` then `script <tenant> readiness_ask_then_defer_and_resume.json`.",
+  "steps": [
+    {
+      "message": "nahi abhi nahi, baad mein karenge",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_contains": ["hold off"],
+      "note": "Unambiguous decline. Expect the deterministic defer message (holds off, offers to pick up later with 'connect') — never a hard stop or a fabricated missing-data claim."
+    },
+    {
+      "message": "theek hai ab connect kar do, ready hoon",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_not_contains": ["hold off"],
+      "note": "Owner re-engages with a clear connect intent. Expect the deferred flow to resume and offer a connection step, NOT repeat the defer/hold-off message again."
+    }
+  ]
+}

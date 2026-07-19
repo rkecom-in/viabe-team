@@ -19,6 +19,11 @@ llm:
     claude-sonnet-4-6:
       input_per_1m_paise: 24900   # ~$3 per 1M input tokens
       output_per_1m_paise: 124500 # ~$15 per 1M output tokens
+    # VT-596 (2026-07-04): Sonnet 5 — the conversational + SR-draft tier after the
+    # Fazal general upgrade. Same list price as Sonnet 4.6; matches cost.py _RATES.
+    claude-sonnet-5:
+      input_per_1m_paise: 24900   # ~$3 per 1M input tokens
+      output_per_1m_paise: 124500 # ~$15 per 1M output tokens
     claude-opus-4-7:
       input_per_1m_paise: 124500  # ~$15 per 1M input
       output_per_1m_paise: 622500 # ~$75 per 1M output

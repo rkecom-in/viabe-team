@@ -70,5 +70,40 @@ class AgentGraphState(TypedDict, total=False):
     #     the fan-out runs. CL-390: counts only, no PII.
     #   campaign_execution_error: exception type name if the seam errors
     #     (e.g. RuntimeError from a missing campaign row). Absent on success.
+    #   campaign_execution_blocked: VT-608 re-verify residual — _campaign_execute_node has
+    #     returned this key since VT-328 (execute_approved_campaign's own dispatch_blocked
+    #     reflection), but it was NEVER declared here, the same undeclared-TypedDict-key class of
+    #     bug the VT-607 fix round found for manager_review_outcome — LangGraph silently dropped it
+    #     from the merged state instead of merging it as a channel. Declared now (purely additive).
     campaign_execution_summary: dict[str, int] | None
     campaign_execution_error: str | None
+    campaign_execution_blocked: dict[str, str] | None
+    # VT-606 (Loop Package 3, enforce-mode ONLY — absent/None in legacy/shadow) — the plan-store
+    # identifiers + step framing manager_task_workflow populates before invoking the graph for ONE
+    # specialist-dispatch attempt, and manager_review_node reads to run the review + persist its
+    # decision. additive + total=False: every pre-VT-606 caller (legacy/shadow mode) never sets
+    # these, so the graph shape and behavior for those modes is unaffected by their presence here.
+    manager_task_id: UUID | None
+    manager_step_id: UUID | None
+    manager_step_situation: str | None
+    manager_step_desired_outcome: str | None
+    manager_step_acceptance_criteria: list[str] | None
+    manager_has_next_step: bool | None
+    # VT-607 fix round (adversarial review) — manager_review_node's PRIMARY output. Declared here
+    # (it was NOT — only manager_review_revised_outcome, below, was ever added) so LangGraph
+    # actually merges it as a real channel; every reader (_dispatch_specialist_step's
+    # terminal_state.get("manager_review_outcome"), the "escalate" fallback) was silently reading
+    # None back for ANY clean (non-interrupted) terminal, since an undeclared TypedDict key is
+    # dropped rather than merged — masked everywhere else because every dispatch this loop has
+    # actually exercised end-to-end so far paused on the approval gate first (paused_approval is
+    # computed from is_paused, never from this key) or was reached via a mocked
+    # _dispatch_specialist_step (bypassing the real graph merge entirely). Caught by a MINOR fix-
+    # round test asserting the pipeline_runs close-status for a CLEAN 'complete' terminal — the
+    # SAME string coincidentally being the "escalate" fallback's own value is what let this hide
+    # even in the sibling 'escalate' test.
+    manager_review_outcome: str | None
+    # VT-606 round-3 (adversarial-review fix, MAJOR #4) — manager_review_node's OUTPUT: the
+    # reframed desired_outcome to re-dispatch with on a revise_step decision (ManagerDecision.
+    # revised_outcome). None for every other outcome. workflow.py reads this to actually APPLY the
+    # revision (build a replacement PlanStep) instead of silently re-claiming the stale original.
+    manager_review_revised_outcome: str | None

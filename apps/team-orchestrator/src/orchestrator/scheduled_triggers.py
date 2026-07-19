@@ -12,11 +12,7 @@ n8n / parallel cron):
    ``status: skipped_schema_pending`` per VT-28 review §Condition 2.
    Reserved completion event ``attribution_closed`` fires only when
    VT-175 ships the supporting schema.
-3. **Day-39 evaluation** — daily 6 AM IST. Pure deterministic SQL.
-   **SHELL form** — emits ``day39_shell`` with ``status:
-   skipped_schema_pending``. Reserved completion event ``day39_evaluated``
-   gated on VT-175.
-4. **Monthly impact** — 1st-of-month 8 AM IST. Pure deterministic data
+3. **Monthly impact** — 1st-of-month 8 AM IST. Pure deterministic data
    prep. **SHELL form** — emits ``monthly_impact_shell`` with
    ``status: skipped_schema_pending``. Reserved completion event
    ``monthly_impact_started`` gated on VT-175.
@@ -24,10 +20,10 @@ n8n / parallel cron):
 CL-274 plumbing-mode note
 -------------------------
 VT-28 proves the weekly cadence trigger fires + reaches Anthropic; it does
-NOT prove the cadence produces useful output. The 3 deterministic
+NOT prove the cadence produces useful output. The deterministic
 triggers are SHELLS in this row pending VT-175 schema. Phantom-Done
 prevention per CL-318/319/380: reserved completion event names
-(``attribution_closed`` / ``day39_evaluated`` / ``monthly_impact_started``)
+(``attribution_closed`` / ``monthly_impact_started``)
 are NOT emitted from this module — they ship with VT-176.
 
 Each workflow body accepts ``now: datetime | None = None`` so the canary
@@ -45,6 +41,7 @@ analog).
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID, uuid4
@@ -63,16 +60,36 @@ logger = logging.getLogger(__name__)
 
 WEEKLY_CADENCE_CRON = "0 9 * * MON"
 ATTRIBUTION_CLOSE_CRON = "0 2 * * *"
-DAY39_EVALUATION_CRON = "0 6 * * *"
 TRIAL_EVALUATION_CRON = "0 7 * * *"  # VT-90 — daily 7 AM IST trial sweep (off-peak)
 MONTHLY_IMPACT_CRON = "0 8 1 * *"
 L3_CONSTRUCTION_CRON = "0 3 * * *"  # VT-68 — nightly 3 AM IST L3 rebuild
 WAITLIST_RETENTION_PURGE_CRON = "0 4 * * *"  # VT-354 — daily 4 AM IST waitlist 6-month bound
 SLA_BREACH_SWEEP_CRON = "0 * * * *"  # VT-357 — hourly: alert Fazal on SLA-breached open escalations
 VTR_DIGEST_CRON = "30 8 * * *"  # VT-280 — daily 8:30 AM IST VTR digest (de-identified, app_vtr_role)
+# VT-432: daily 04:30 IST (23:00 UTC) — after the attribution_close + redaction/reconstitution
+# batch; before the trial-evaluation sweep. Pure SQL, no LLM, no send.
+IMPLICIT_ATTRIBUTION_SWEEP_CRON = "0 23 * * *"
+# VT-439: daily 01:00 UTC (06:30 IST) — Razorpay orphan-DETECT backstop. Runs after the
+# attribution_close and outbox batches; off-peak billing window. DETECT-ONLY (no cancel/charge).
+RECONCILE_SUBSCRIPTION_ORPHANS_CRON = "0 1 * * *"
+# VT-679 (§7A proactive planning): monthly plan-refresh — 1st of month 03:30 UTC = 09:00 IST
+# (matches monthly_impact's own 09:00 IST slot on a different minute).
+PLAN_REFRESH_CRON = "30 3 1 * *"
+# VT-679: daily proactive-initiative pick — 05:00 UTC = 10:30 IST, inside owner waking hours BY
+# CRON PLACEMENT. See ``_assert_ist_daytime`` for the belt-and-suspenders runtime guard.
+DAILY_INITIATIVE_CRON = "0 5 * * *"
 
 
 SHELL_STATUS = "skipped_schema_pending"
+
+# VT-679 — proactive planning is fully OFF by default; both new scheduled handlers below no-op
+# fast (before any DB scan) when this is unset. Mirrors the house boolean-flag convention
+# (TEAM_TWILIO_MOCK_MODE / TEAM_SANDBOX_GST_MOCK_MODE / TEAM_RAZORPAY_LIVE — exact string "1").
+TEAM_PROACTIVE_PLANNING_FLAG = "TEAM_PROACTIVE_PLANNING"
+
+
+def _proactive_planning_enabled() -> bool:
+    return os.environ.get(TEAM_PROACTIVE_PLANNING_FLAG, "0") == "1"
 
 
 # ---------------------------------------------------------------------------
@@ -237,30 +254,26 @@ def _scan_attribution_close_eligible(now: datetime) -> list[UUID]:
 
 
 # ---------------------------------------------------------------------------
-# 3. Day-39 evaluation — REAL body (VT-176)
+# 3. Trial-lifecycle + other scheduled sweeps
 # ---------------------------------------------------------------------------
-
-DAY39_SHELL_EVENT = "day39_shell"  # historical (VT-28); kept for audit-trail
-DAY39_CONTINUE_EVENT = "day39_continue"
-DAY39_REFUND_TRIGGERED_EVENT = "day39_refund_triggered"
-
-
-def day39_evaluation_scheduled(
-    scheduled_time: datetime,
-    actual_time: datetime,
-) -> None:
-    """DBOS scheduled handler — fires daily 6 AM IST. Pure SQL (no LLM)."""
-    run_day39_evaluation_body(now=actual_time)
 
 
 def trial_evaluation_scheduled(
     scheduled_time: datetime,
     actual_time: datetime,
 ) -> None:
-    """DBOS scheduled handler — fires daily 7 AM IST. VT-90 trial sweep. NO LLM."""
-    from orchestrator.billing.trial_sweep import run_trial_evaluation_body
+    """DBOS scheduled handler — fires daily 7 AM IST. VT-90 trial sweep. NO LLM.
 
-    run_trial_evaluation_body(now=actual_time)
+    VT-426 (Row C): wires the REAL owner notify (``_owner_notify`` → the VT-393
+    ``send_owner_template`` seam, registry-driven by template NAME) so a trial-ending /
+    expiring tenant actually gets the owner WhatsApp — replacing the logging-only
+    ``_default_notify`` stub. The notify FAIL-SAFE-SKIPs while the trial-ending Content
+    SID is a pending-approval stub (NEEDS-FAZAL); it sends with zero code change once the
+    approved SID lands in twilio_templates.yaml.
+    """
+    from orchestrator.billing.trial_sweep import _owner_notify, run_trial_evaluation_body
+
+    run_trial_evaluation_body(now=actual_time, notify_fn=_owner_notify)
 
 
 def waitlist_retention_purge_scheduled(
@@ -364,7 +377,11 @@ def _alert_audit_chain_break(result: Any) -> None:
     import asyncio
     import os
 
-    from orchestrator.alerts.clients import send_resend_email, send_telegram
+    from orchestrator.alerts.clients import (
+        alert_is_dev_routed,
+        send_resend_email,
+        send_telegram,
+    )
 
     text = (
         "[CRITICAL] privacy_audit_log hash-chain BREAK (VT-80/VT-304) — "
@@ -373,12 +390,23 @@ def _alert_audit_chain_break(result: Any) -> None:
         f"{getattr(result, 'rows_checked', None)}."
     )
 
+    # VT-502: this is the OTHER alert path that emitted DIRECT to ViabeOps (it
+    # can't use the per-tenant tenant_alerts path — the chain is global/NULL-tenant).
+    # Gate it through the same VT-489 dev-routing decision so a dev-env chain
+    # break routes to the DEV bot (and skips real email), never PROD ops. On
+    # prod (EXPECTED_ENV=prod) this is False → OPS bot + email, exactly as before.
+    dev_routed = alert_is_dev_routed(None)  # global alert — env arm only
+    if dev_routed:
+        bot_token = os.environ.get("TELEGRAM_DEV_BOT_TOKEN", "")
+        chat_id = os.environ.get("TELEGRAM_DEV_CHAT_ID", "")
+    else:
+        bot_token = os.environ.get("TELEGRAM_OPS_BOT_TOKEN", "")
+        chat_id = os.environ.get("TELEGRAM_OPS_CHAT_ID", "")
+
     async def _send() -> None:
-        await send_telegram(
-            os.environ.get("TELEGRAM_OPS_BOT_TOKEN", ""),
-            os.environ.get("TELEGRAM_OPS_CHAT_ID", ""),
-            text,
-        )
+        await send_telegram(bot_token, chat_id, text)
+        if dev_routed:
+            return  # dev/non-prod never emails real ops
         from orchestrator.alerts.email_senders import sender_from
 
         await send_resend_email(
@@ -491,215 +519,278 @@ def l2_retention_sweep_scheduled(
         logger.exception("VT-311 L2 retention sweep scheduled run failed")
 
 
-def run_day39_evaluation_body(now: datetime | None = None) -> list[Any]:
-    """Day-39 evaluation body — REAL (VT-176).
-
-    Scans tenants where ``paid_conversion_at + 39 days <= now`` and phase
-    ∈ {paid_active, paid_at_risk}, with no prior day39_* event. For each:
-    calls :func:`orchestrator.billing.day39_evaluator.evaluate_day39`.
-    Refund branch (VT-85) sends an OFFER via :func:`_send_day39_refund_offer`: it
-    parks the tenant in ``refund_offered`` (apply_transition with event
-    ``day39_refund_offered``) — NO auto-refund. The owner's REFUND/CONTINUE/DISCUSS
-    reply (or the 48h timeout -> CONTINUE) resolves it; the actual refund fires only
-    on REFUND (VT-93 execute_refund). (CL-104; apply_transition is the SOLE public
-    phase mutator.)
-
-    ``apply_transition`` is a ``@DBOS.step``; calling it from a
-    synchronous test path outside a DBOS workflow can fail (DBOS context
-    not available). Wrap defensively + log; production runs inside the
-    @DBOS.scheduled handler so context is always present.
-
-    NO LLM CALL ever.
-    """
-    from orchestrator.billing.day39_evaluator import evaluate_day39
-
-    now = now or datetime.now(timezone.utc)
-    eligible = _scan_day39_eligible(now)
-    verdicts: list[Any] = []
-    for tenant_id in eligible:
-        try:
-            verdict = evaluate_day39(tenant_id)
-        except Exception:  # noqa: BLE001
-            logger.exception(
-                "day39 evaluate_day39 failed for tenant %s; sweep continues",
-                tenant_id,
-            )
-            continue
-        verdicts.append(verdict)
-
-        # VT-92: persist the structured decision-audit (skip replays — idempotent).
-        if not verdict.already_decided:
-            _persist_day39_evaluation(tenant_id, verdict)
-
-        # VT-197: close the learning loop — distill the FRESH verdict into the
-        # tenant's agent_reflection L1 entity (calibrates the next context
-        # bundle). Skip already-decided (idempotent, mirrors the refund branch).
-        if not verdict.already_decided:
-            _write_day39_reflection(tenant_id, verdict)
-
-        if verdict.verdict == "refund_triggered" and not verdict.already_decided:
-            _send_day39_refund_offer(tenant_id, verdict)
-    return verdicts
+# VT-374: daily expired-override cancel sweep. 22:00 UTC = 03:30 IST (off-peak,
+# between the 03:00 PII-log sweep and the 04:00 reconstitution sweep). UTC-correct
+# cron (matches audit-chain/PII-log/KG-drain).
+OVERRIDE_EXPIRY_SWEEP_CRON = "0 22 * * *"
 
 
-DAY39_EVALUATOR_VERSION = "1.0.0"  # VT-92 D4: bump = Type-3 governance.
-
-
-def _persist_day39_evaluation(tenant_id: Any, verdict: Any) -> None:
-    """VT-92: persist the structured decision to day39_evaluations (RLS-scoped).
-    Best-effort — the authoritative signal is the day39_* pipeline_log event."""
-    from orchestrator.db import tenant_connection
+def override_expiry_sweep_scheduled(
+    scheduled_time: datetime,
+    actual_time: datetime,
+) -> None:
+    """DBOS scheduled handler — daily 03:30 IST (VT-374). Cancels expired, unconsumed
+    ``step_overrides`` rows via ``run_control.expire_overrides_sweep`` (F8: next-run
+    pins REQUIRE ``expires_at``, and the bound is only real because this sweep
+    enforces it — an expired pin must never fire on a much-later run). NO LLM;
+    idempotent. Best-effort: a sweep failure must not crash the scheduler (the
+    consume predicate also expiry-gates fresh claims, so the next run re-catches)."""
+    from orchestrator.run_control import expire_overrides_sweep
 
     try:
-        with tenant_connection(tenant_id) as conn:
-            conn.execute(
-                "INSERT INTO day39_evaluations "
-                "(tenant_id, verdict, arrr_paise, cumulative_fees_paise, evaluator_version) "
-                "VALUES (%s, %s, %s, %s, %s)",
-                (
-                    str(tenant_id),
-                    verdict.verdict,
-                    int(verdict.arrr_paise),
-                    int(verdict.cumulative_fees_paise),
-                    DAY39_EVALUATOR_VERSION,
-                ),
-            )
-    except Exception:  # noqa: BLE001 — audit persist is best-effort under the sweep
-        logger.exception("day39: persist evaluation failed tenant=%s; sweep continues", tenant_id)
+        expire_overrides_sweep()
+    except Exception:  # noqa: BLE001 — daily sweep is best-effort; next run retries
+        logger.exception("VT-374 override-expiry sweep scheduled run failed")
 
 
-def _write_day39_reflection(tenant_id: Any, verdict: Any) -> None:
-    """VT-197: write the agent-owned 'agent_reflection' L1 entity from a Day-39
-    verdict. LLM-FREE — a deterministic distillation (no agent/LLM call; keeps
-    the no-LLM-in-deterministic-triggers gate green). NEVER touches the owner-
-    curated 'business_profile' entity (Fazal D3 / VT-268). Best-effort: a write
-    failure logs + the sweep continues."""
+# VT-382: daily outbox-redaction sweep. 22:30 UTC = 04:00 IST (off-peak, after the
+# 03:30 override-expiry sweep). UTC-correct cron (matches the other nightly sweeps).
+# The reliability BACKSTOP for the inline redact-on-terminal hooks (customer_send /
+# approval_glue / autonomy): redacts params/owner_feedback on rows ALREADY terminal that
+# the inline hook never ran for — the CL-437 ruling-3.3 backfill clause — and captures the
+# exact owner-facing text for historical 'sent' rows still holding raw params BEFORE
+# redacting them (one-shot policy-honesty leg). NEVER touches non-terminal rows
+# (drafted/sending/edit_requested) — retain-while-needed is the policy.
+OUTBOX_REDACTION_SWEEP_CRON = "30 22 * * *"
+
+
+def outbox_redaction_sweep_scheduled(
+    scheduled_time: datetime,
+    actual_time: datetime,
+) -> None:
+    """DBOS scheduled handler — daily 04:00 IST (VT-382). Redacts outbox bodies on rows
+    already in a terminal status (CL-437 ruling 3 backfill + the inline-hook backstop) and
+    captures historical sent-row text into owner_message_audit before redacting. NO LLM;
+    batched; idempotent (already-redacted values pass through unchanged). Best-effort: a
+    sweep failure must not crash the scheduler (the next run + the inline hooks re-catch)."""
+    from orchestrator.agents.outbox_redaction import sweep_terminal_rows
+
     try:
-        from orchestrator.knowledge import upsert_agent_reflection
-
-        recovered = verdict.arrr_paise
-        fees = verdict.cumulative_fees_paise
-        note = (
-            "recovery on track; sustain the current cadence."
-            if verdict.verdict == "continue"
-            else "recovery under target; favor higher-yield campaigns next cycle."
-        )
-        upsert_agent_reflection(
-            str(tenant_id),
-            {
-                "source": "day39",
-                "verdict": verdict.verdict,
-                "arrr_paise": recovered,
-                "cumulative_fees_paise": fees,
-                "decided_at": verdict.decided_at.isoformat(),
-                "summary": (
-                    f"Day-39 {verdict.verdict}: attributed recovery {recovered}p "
-                    f"vs cumulative fees {fees}p — {note}"
-                ),
-            },
-        )
-    except Exception:  # noqa: BLE001 — reflection is best-effort enrichment
-        logger.exception(
-            "day39 reflection write failed for tenant %s; sweep continues",
-            tenant_id,
-        )
+        sweep_terminal_rows()
+    except Exception:  # noqa: BLE001 — daily sweep is best-effort; next run retries
+        logger.exception("VT-382 outbox-redaction sweep scheduled run failed")
 
 
-def _scan_day39_eligible(now: datetime) -> list[UUID]:
-    """Tenants whose day-39 window is reached + no prior day39_* event."""
+# VT-432: daily implicit-attribution sweep. 23:00 UTC = 04:30 IST — after the
+# attribution_close + outbox-redaction/reconstitution batch. Pure SQL, no LLM,
+# NO SEND — derives thumbs_up/thumbs_down from attribution_outcome vs baseline
+# and writes implicit owner_feedback rows (idempotent via partial unique index
+# on migration 041). The sweep is a computation/write pass only; no Twilio/Resend
+# path is reachable from run_implicit_attribution_sweep.
+
+
+def implicit_attribution_sweep_scheduled(
+    scheduled_time: datetime,
+    actual_time: datetime,
+) -> None:
+    """DBOS scheduled handler — daily 04:30 IST (VT-432). Runs the VT-198 implicit
+    attribution sweep: derives thumbs_up/thumbs_down from attribution_outcome vs
+    baseline for campaigns completed in the last 7 days and writes implicit
+    owner_feedback rows. Pure SQL (NO LLM, NO SEND). Idempotent — the partial unique
+    index on (tenant_id, run_id, tier='implicit') makes re-runs safe. Best-effort: a
+    sweep failure must not crash the scheduler."""
+    from orchestrator.feedback.implicit_attribution import run_implicit_attribution_sweep
+
+    try:
+        result = run_implicit_attribution_sweep()
+        logger.info(
+            "VT-432 implicit_attribution_sweep: considered=%d written=%d skipped=%d",
+            result.get("considered", 0),
+            result.get("written", 0),
+            result.get("skipped_no_outcome", 0),
+        )
+    except Exception:  # noqa: BLE001 — daily sweep is best-effort; next run retries
+        logger.exception("VT-432 implicit-attribution sweep scheduled run failed")
+
+
+# ---------------------------------------------------------------------------
+# VT-439: daily Razorpay vendor-orphan reconciliation — DETECT-ONLY backstop
+# ---------------------------------------------------------------------------
+# Pairs with billing/dead_letter.py F7 (VT-352). DETECT-ONLY: no cancel,
+# no charge, no send. Fetches all committed razorpay_subscription_ids from the
+# subscriptions table and delegates to reconcile_subscription_orphans — which
+# finds any vendor subscription with NO matching DB row and alerts Fazal.
+#
+# Pre-LIVE posture: the subscription.create is still a STUB, so the known set
+# equals the DB set and orphan detection produces an empty list (vacuously safe).
+# At TEAM_RAZORPAY_LIVE cutover, replace the DB query with razorpay.subscription.all()
+# to get the vendor-authoritative list (VT-352 F2 acceptance step).
+
+
+def reconcile_subscription_orphans_scheduled(
+    scheduled_time: datetime,
+    actual_time: datetime,
+) -> None:
+    """DBOS scheduled handler — daily 01:00 UTC / 06:30 IST (VT-439). Runs the
+    VT-352 F2 Razorpay vendor-orphan DETECT backstop: fetches all committed
+    razorpay_subscription_ids from the subscriptions table and calls
+    :func:`orchestrator.api.razorpay_subscribe.reconcile_subscription_orphans` to
+    surface any vendor subscription with NO DB row (a commit-after-vendor failure
+    the Idempotency-Key didn't cover). DETECT-ONLY — NO auto-cancel, NO charge,
+    NO send. Best-effort: a reconcile failure must not crash the scheduler.
+
+    Pre-LIVE: vendor list = DB-committed subscriptions (vacuously zero orphans).
+    At TEAM_RAZORPAY_LIVE cutover, swap the DB query for razorpay.subscription.all()
+    to get the vendor-authoritative list (VT-352 F2 live acceptance step)."""
+    from orchestrator.api.razorpay_subscribe import reconcile_subscription_orphans
     from orchestrator.graph import get_pool
-    from psycopg.rows import dict_row
-
-    with get_pool().connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-        # VT-85 suppression (offer model): the phase filter excludes tenants with an
-        # OPEN offer (phase=refund_offered) and EXECUTED refunds (phase=refunded), so
-        # a re-offer can't fire mid-window. An EXECUTED refund (refund_executed event)
-        # is the terminal marker (belt-and-suspenders if a phase ever reverts). A
-        # CONTINUE (reply or 48h timeout) emits day39_continue and suppresses for 90
-        # days, then the tenant is re-eligible (re-offer on ~day 129 if still under).
-        cur.execute(
-            "SELECT t.id "
-            "  FROM tenants t "
-            " WHERE t.paid_conversion_at IS NOT NULL "
-            "   AND t.paid_conversion_at + interval '39 days' <= %s "
-            "   AND t.phase IN ('paid_active', 'paid_at_risk') "
-            "   AND NOT EXISTS ("
-            "       SELECT 1 FROM pipeline_log p "
-            "        WHERE p.tenant_id = t.id "
-            "          AND p.event_type = 'refund_executed') "
-            "   AND NOT EXISTS ("
-            "       SELECT 1 FROM pipeline_log p "
-            "        WHERE p.tenant_id = t.id "
-            "          AND p.event_type = 'day39_continue' "
-            "          AND p.created_at > %s::timestamptz - interval '90 days')",
-            (now, now),
-        )
-        return [row["id"] for row in cur.fetchall()]
-
-
-def _send_day39_refund_offer(tenant_id: UUID, verdict: Any) -> None:
-    """VT-85: day-39 refund OFFER (replaces the VT-92 auto-refund). Sends the
-    refund_offer template + parks the tenant in ``refund_offered`` via
-    ``apply_transition(day39_refund_offered)``. NO money moves here (Pillar 7 — no
-    auto-refund without consent); the owner's REFUND/CONTINUE/DISCUSS reply or the
-    48h timeout resolves it. ``apply_transition`` is a @DBOS.step and may fail under
-    a direct synchronous (canary) call without a DBOS context — log + continue; the
-    day39_refund_offered pipeline_log event (emitted by the evaluator) is the
-    primary signal."""
-    from orchestrator.graph import get_pool
-    from orchestrator.state import new_subscriber_state
-    from orchestrator.transitions import apply_transition
     from psycopg.rows import dict_row
 
     try:
         with get_pool().connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-            cur.execute("SELECT phase FROM tenants WHERE id = %s", (str(tenant_id),))
-            row = cur.fetchone()
-            if row is None:
-                return
-            current_phase = row["phase"]
-        if current_phase not in ("paid_active", "paid_at_risk"):
-            logger.warning(
-                "day39 offer: tenant %s phase=%s not eligible for an offer; skipped",
-                tenant_id,
-                current_phase,
+            cur.execute(
+                "SELECT razorpay_subscription_id FROM subscriptions "
+                "WHERE razorpay_subscription_id IS NOT NULL"
             )
-            return
-        # Flip the phase FIRST (the gate the reply intake keys on), THEN send the
-        # offer template — a tenant who receives the offer is then always correctly
-        # parked in refund_offered to make a reply. The template send is best-effort
-        # (null SID -> no-op today, NEEDS-FAZAL).
-        state = new_subscriber_state(tenant_id=tenant_id, run_id=uuid4(), phase=current_phase)
-        apply_transition(state, "day39_refund_offered", {"reason": "day39_offer"})
-        _send_refund_offer_template(tenant_id, verdict)
-    except Exception:  # noqa: BLE001
-        logger.exception(
-            "day39 offer-send failed for tenant %s; the day39_refund_offered "
-            "pipeline_log event was emitted by the evaluator and remains the primary signal",
-            tenant_id,
+            vendor_ids = [r["razorpay_subscription_id"] for r in cur.fetchall()]
+        orphans = reconcile_subscription_orphans(vendor_ids)
+        logger.info(
+            "VT-439 reconcile_subscription_orphans: checked=%d orphans=%d",
+            len(vendor_ids),
+            len(orphans),
         )
+    except Exception:  # noqa: BLE001 — daily sweep is best-effort; next run retries
+        logger.exception("VT-439 reconcile_subscription_orphans scheduled run failed")
 
 
-def _send_refund_offer_template(tenant_id: UUID, verdict: Any) -> None:
-    """Send the refund_offer WABA template (full-refund amount = cumulative fees).
-    null SID (NEEDS-FAZAL) -> send returns success=False; log loud, never block the
-    offer state (Pillar 7 — honest; the template send is best-effort)."""
-    from orchestrator.utils.twilio_send import send_template_message
+# ---------------------------------------------------------------------------
+# VT-440: dead-letter retry sweep — DETECT/ALERT-ONLY backstop
+# ---------------------------------------------------------------------------
+# Pairs with billing/dead_letter.py F7 (VT-352). The dead-letter "retry" is the
+# operator-driven dead_letter.replay(event_id, corrected_payload): it RE-FEEDS a
+# CORRECTED event through razorpay_ingress so the dropped charge's fee NOW applies.
+# That replay CANNOT be automated by a cron — it needs an operator-supplied
+# corrected payload (the row was dropped precisely because its amount was a
+# DETERMINISTIC malformation; the sweep has no way to invent the correct integer).
+# So this scheduled handler is DETECT/ALERT-ONLY: it counts the still-pending
+# dead-letters and alerts Fazal when any exist (the F7 "scheduled job that
+# list_pending → alerts" prescription). NO replay, NO charge, NO send-of-money,
+# NO write — a read-only sweep, trivially idempotent (running it twice produces
+# the same count + the same best-effort alert; zero money effect either way).
+#
+# MONEY-SAFETY (the load-bearing invariant): the exactly-once guarantee for the
+# ACTUAL retry lives in razorpay_ingress — the razorpay_webhook_events.event_id
+# dedup row is the COMMIT POINT (ingress docstring Q1). A genuinely-PROCESSED
+# event re-arriving (the same event_id, processed_at set) CONFLICTs → no
+# re-processing → {"status": "duplicate", "action": "noop"}: fees never
+# double-count. Only an un-applied parse-drop (processed_at IS NULL AND
+# _status='dropped_parse_error') replays past the dedup and applies its fee
+# exactly once, then sets processed_at + flips the dead-letter row to 'replayed'.
+# This sweep surfaces the stuck drops; the ingress keystone makes any replay of
+# them exactly-once.
+#
+# 22:30 UTC / 04:00 IST — off-peak, after the 01:00 UTC VT-439 orphan-detect
+# backstop (same daily Razorpay-reconciliation batch).
+DEAD_LETTER_RETRY_SWEEP_CRON = "30 22 * * *"
+
+
+def dead_letter_retry_sweep_scheduled(
+    scheduled_time: datetime,
+    actual_time: datetime,
+) -> None:
+    """DBOS scheduled handler — daily 04:00 IST / 22:30 UTC (VT-440). The VT-352 F7
+    dead-letter backstop: counts still-pending Razorpay webhook dead-letters
+    (parse-dropped charge events awaiting an operator-supplied corrected replay)
+    and alerts Fazal when any exist. DETECT/ALERT-ONLY — NO replay, NO charge, NO
+    send-of-money, NO write (the actual replay is operator-driven
+    dead_letter.replay, which needs a corrected payload a cron can't synthesize).
+
+    Idempotent: read-only COUNT + best-effort alert; two runs produce the same
+    result and zero money effect. The exactly-once guarantee for any eventual
+    replay lives in razorpay_ingress (the event_id dedup keystone — a processed
+    event re-arriving is a noop, never a double-charge). Best-effort: a count
+    failure must not crash the scheduler (the next run re-catches)."""
+    from orchestrator.billing.dead_letter import count_pending
 
     try:
-        refund_inr = round(int(verdict.cumulative_fees_paise) / 100)
-        result = send_template_message(
-            tenant_id,
-            "refund_offer",
-            {"1": str(refund_inr), "2": "Reply REFUND, CONTINUE, or DISCUSS"},
-        )
-        if not result.success:
-            logger.warning(
-                "day39 offer: refund_offer template not sent (SID null / NEEDS-FAZAL) tenant=%s",
-                tenant_id,
+        pending = count_pending()
+        logger.info("VT-440 dead_letter_retry_sweep: pending=%d", pending)
+        if pending > 0:
+            from orchestrator.alerts.clients import alert_fazal
+
+            # PII-free: a count only (the dead-letter table is PII-free routing
+            # fields). No event_ids/payloads in the alert.
+            alert_fazal(
+                f"VT-352/VT-440 razorpay dead-letter backstop: {pending} pending "
+                "parse-dropped charge event(s) awaiting a corrected replay "
+                "(dead_letter.replay) — manual reconciliation needed."
             )
-    except Exception:  # noqa: BLE001 — notify is best-effort, never blocks the offer
-        logger.exception("day39 offer: refund_offer send raised tenant=%s", tenant_id)
+    except Exception:  # noqa: BLE001 — daily sweep is best-effort; next run retries
+        logger.exception("VT-440 dead_letter_retry_sweep scheduled run failed")
+
+
+# ---------------------------------------------------------------------------
+# VT-560: the boot-only reapers as STEADY-STATE scheduled sweeps
+# ---------------------------------------------------------------------------
+# reap_stalled_manager_tasks (VT-525/VT-557 retry ladder — VT-560 also wakes
+# reaper-parked tasks) and reap_orphan_runs (VT-481) previously ran EXACTLY ONCE
+# in the FastAPI lifespan (a boot catch-up). On a long-lived process they
+# therefore never re-swept — so the VT-557 retry ladder could never progress.
+# VT-560 registers BOTH on the @DBOS.scheduled substrate as the steady-state
+# sweeps; the main.py boot invocations stay as the startup catch-up. Both bodies
+# are already best-effort (never raise); the handler wrappers mirror the other
+# sweeps in this module. NO LLM — pure SQL reaper paths (Pillar 1).
+#
+# detect_silent_terminal_runs (VT-552) is DELIBERATELY NOT scheduled (batch-review
+# finding): no live code writes the final_outcome the detector keys on — the
+# close path stamps neither the column nor the JSONB key — so under traffic a
+# scheduled detector would open an incident + fire an alert for essentially every
+# completed run, every tick (a storm that also drowns real silent terminals). It
+# stays a boot-time catch-up (main.py); schedule it ONLY once the close-path
+# final_outcome writer lands (rostered follow-up).
+STALLED_TASK_SWEEP_CRON = "*/10 * * * *"  # every 10 min — VT-557 retry-ladder progression
+ORPHAN_RUN_REAPER_CRON = "0 * * * *"  # hourly — VT-481 stranded-'running' run reaper
+TEST_TENANT_REAPER_CRON = "15 * * * *"  # hourly (offset 15m) — VT-620 leaked convo-harness tenant GC
+
+
+def stalled_task_sweep_scheduled(
+    scheduled_time: datetime,
+    actual_time: datetime,
+) -> None:
+    """DBOS scheduled handler — every 10 min (VT-560). Runs the VT-557 manager-task
+    retry ladder: wakes reaper-parked tasks whose backoff elapsed (blocked->planned,
+    VT-560 Defect 1) and re-sweeps tasks stranded active with no runnable step, walking
+    them up the backoff ladder to dead_letter at the budget. NO LLM; the body is
+    best-effort (never raises). Best-effort: a sweep failure must not crash the scheduler."""
+    from orchestrator.orphan_reaper import reap_stalled_manager_tasks
+
+    try:
+        reap_stalled_manager_tasks()
+    except Exception:  # noqa: BLE001 — sweep is best-effort; next run retries
+        logger.exception("VT-560 stalled-task sweep scheduled run failed")
+
+
+def orphan_run_reaper_scheduled(
+    scheduled_time: datetime,
+    actual_time: datetime,
+) -> None:
+    """DBOS scheduled handler — hourly (VT-560). Runs the VT-481 orphan-run reaper:
+    closes pipeline_runs stranded status='running' past the >1h floor (a process died
+    mid-run; DBOS can't recover a prior-app-version row). NO LLM; the body is best-effort
+    (never raises). Best-effort: a reaper failure must not crash the scheduler."""
+    from orchestrator.orphan_reaper import reap_orphan_runs
+
+    try:
+        reap_orphan_runs()
+    except Exception:  # noqa: BLE001 — reaper is best-effort; next run retries
+        logger.exception("VT-560 orphan-run reaper scheduled run failed")
+
+
+def test_tenant_reaper_scheduled(
+    scheduled_time: datetime,
+    actual_time: datetime,
+) -> None:
+    """DBOS scheduled handler — hourly (VT-620). Runs the test-tenant reaper: FK-safely deletes
+    leaked ``convo-harness-…`` tenants (+ their runs/steps) past the >1h floor so they stop
+    flowing into the alert detectors as ops noise. STRICT scope: only the convo-harness name
+    pattern. NO LLM; the body is best-effort (never raises). Best-effort: a reaper failure must
+    not crash the scheduler."""
+    from orchestrator.test_tenant_reaper import reap_test_tenants
+
+    try:
+        reap_test_tenants()
+    except Exception:  # noqa: BLE001 — reaper is best-effort; next run retries
+        logger.exception("VT-620 test-tenant reaper scheduled run failed")
 
 
 # ---------------------------------------------------------------------------
@@ -833,7 +924,7 @@ def _scan_timed_out_approvals(now: datetime) -> list[dict[str, Any]]:
         cur.execute(
             """
             SELECT id::text AS id, tenant_id::text AS tenant_id,
-                   run_id::text AS run_id
+                   run_id::text AS run_id, approval_type
             FROM pending_approvals
             WHERE resolved_at IS NULL AND timeout_at <= %s
             ORDER BY timeout_at ASC
@@ -852,11 +943,21 @@ def run_approval_timeout_sweep_body(now: datetime | None = None) -> list[UUID]:
     'timeout'; the campaign does NOT send — Pillar 7). Returns the list of
     resolved approval ids for canary inspection.
 
-    Callable directly with an injected ``now`` (mirrors the other four bodies)
+    VT-609 fix round 2: a ``business_policy_grant`` approval has no LangGraph checkpoint to resume
+    (its ``run_id`` is a minimal ``pipeline_runs`` row) — it skips ``resume_run`` and closes that
+    run directly instead (same durable-state shape ``runner.try_resume_pending_approval`` uses).
+
+    VT-611 pre-work #7: an ``agent_customer_send`` approval ALSO has no LangGraph checkpoint
+    (a real dispatch run, but not a graph-invoke one) — it skips BOTH ``resume_run`` AND the
+    pipeline_runs close (that run belongs to the agent dispatch workflow, not this approval;
+    mirrors ``runner.try_resume_pending_approval``'s own agent_customer_send branch, which also
+    never closes it).
+
+    Callable directly with an injected ``now`` (mirrors the other bodies)
     so the canary can drive a past-timeout row without waiting for the cron.
 
     Per-approval try/except: one stuck resume must not halt the sweep
-    (observability-safe, matches attribution_close / day39 bodies).
+    (observability-safe, matches the attribution_close body).
     """
     from orchestrator.agent.approval_resume import mark_approval_resolved, resume_run
     from orchestrator.db import tenant_connection
@@ -868,18 +969,52 @@ def run_approval_timeout_sweep_body(now: datetime | None = None) -> list[UUID]:
         approval_id = approval["id"]
         tenant_id = approval["tenant_id"]
         run_id = approval["run_id"]
+        approval_type = approval.get("approval_type")
         try:
             # Set the tenant GUC for the resolve write (RLS).
             with tenant_connection(tenant_id) as conn:
                 mark_approval_resolved(conn, tenant_id, approval_id, "timeout")
-            # Resume the suspended run with the timeout decision, then close
-            # the original paused run.
-            resume_run(run_id, "timeout")
-            with tenant_connection(tenant_id) as conn:
-                conn.execute(
-                    "UPDATE pipeline_runs SET status = 'completed', ended_at = now() WHERE id = %s",
-                    (run_id,),
-                )
+            # VT-609 fix round 2: a business_policy_grant proposal's run_id is a MINIMAL
+            # pipeline_runs row (propose_business_policy_grant opens it only to satisfy the FK) —
+            # never a paused LangGraph run, so there is NO checkpoint for resume_run to resume
+            # (same shape as runner.try_resume_pending_approval's own business_policy_grant
+            # branch). The grant/no-grant decision already landed inside mark_approval_resolved's
+            # transaction above; calling resume_run here would just raise. Close the minimal run
+            # directly instead.
+            if approval_type == "business_policy_grant":
+                with tenant_connection(tenant_id) as conn:
+                    conn.execute(
+                        "UPDATE pipeline_runs SET status = 'completed', ended_at = now() "
+                        "WHERE id = %s",
+                        (run_id,),
+                    )
+            elif approval_type == "agent_customer_send":
+                # VT-611 pre-work #7 (the SAME class VT-609 fixed for business_policy_grant, but
+                # pre-existing/unrelated to VT-609): an agent_customer_send approval's run_id IS a
+                # REAL pipeline_runs row (l3_hold._resolve_batch_run_id resolves the agent
+                # dispatch's own deterministic run id — no fabricated FK-satisfying stub), but it
+                # has NO LangGraph checkpoint under that thread_id: "the agent dispatch workflow
+                # owns its own run lifecycle and picks the batch status up on its next
+                # deterministic step" (runner.try_resume_pending_approval's OWN agent_customer_send
+                # branch, which likewise never calls resume_run). Calling resume_run here would
+                # just raise (a guaranteed checkpoint-miss), get swallowed by this loop's own
+                # try/except below, and skip the close-update entirely — leaving the run stuck
+                # 'running' forever AND logging a false "resume failed". The owner-decision side
+                # (batch -> 'cancelled' on a timeout) already landed inside mark_approval_resolved's
+                # transaction above (approval_glue's shared resolution choke point) — there is
+                # nothing left to resume, and this run is NOT this approval's to close (mirrors
+                # runner.py's branch: no resume_run, no pipeline_runs UPDATE, just log + continue).
+                pass
+            else:
+                # Resume the suspended run with the timeout decision, then close
+                # the original paused run.
+                resume_run(run_id, "timeout")
+                with tenant_connection(tenant_id) as conn:
+                    conn.execute(
+                        "UPDATE pipeline_runs SET status = 'completed', ended_at = now() "
+                        "WHERE id = %s",
+                        (run_id,),
+                    )
             log_event(
                 event_type=APPROVAL_TIMED_OUT_EVENT,
                 run_id=UUID(run_id),
@@ -906,71 +1041,106 @@ def run_approval_timeout_sweep_body(now: datetime | None = None) -> list[UUID]:
 
 
 # ---------------------------------------------------------------------------
-# 6. Day-39 refund-OFFER timeout sweep — VT-85
+# VT-679 (§7A) — proactive planning: monthly plan-refresh + daily initiative
 # ---------------------------------------------------------------------------
-#
-# An un-answered day-39 refund offer defaults to CONTINUE after 48h (Pillar 7 —
-# the timeout NEVER auto-refunds; auto-refund without consent is financially
-# destabilizing, so the safe default keeps the tenant on). EXTENDS the
-# scheduled-trigger surface (CL-240), not a parallel poller.
-
-REFUND_OFFER_TIMEOUT_HOURS = 48
-REFUND_OFFER_TIMEOUT_SWEEP_CRON = "15 */6 * * *"  # every 6h, offset off the others
+# Two triggers, both gated behind TEAM_PROACTIVE_PLANNING (default OFF — the handlers below no-op
+# fast, before any DB scan, when unset; dev turns it ON, prod stays unset/Fazal per the VT-101
+# rollout pattern). Shared workspace scan: active paid/trial tenants only (an onboarding/lapsed/
+# cancelled tenant has no business reason for either a plan refresh or a daily initiative).
 
 
-def refund_offer_timeout_sweep_scheduled(
-    scheduled_time: datetime,
-    actual_time: datetime,
-) -> None:
-    """DBOS scheduled handler — defaults un-answered day-39 refund offers (>48h in
-    refund_offered) to CONTINUE. NO LLM — the timeout default is a fixed verb."""
-    run_refund_offer_timeout_sweep_body(now=actual_time)
-
-
-def _scan_timed_out_refund_offers(now: datetime) -> list[str]:
-    """Tenants parked in 'refund_offered' past the 48h deadline (service-role
-    workspace scan; the per-tenant default below sets the tenant GUC via RLS)."""
+def _scan_active_paid_or_trial_tenants() -> list[UUID]:
+    """The shared workspace scan for BOTH proactive-planning triggers below."""
     from orchestrator.graph import get_pool
     from psycopg.rows import dict_row
 
     with get_pool().connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-        cur.execute(
-            "SELECT id::text AS id FROM tenants "
-            " WHERE phase = 'refund_offered' "
-            "   AND phase_entered_at <= %s::timestamptz - make_interval(hours => %s) "
-            " ORDER BY phase_entered_at ASC",
-            (now, REFUND_OFFER_TIMEOUT_HOURS),
-        )
+        cur.execute("SELECT id FROM tenants WHERE phase = ANY(%s)", (["trial", "paid_active"],))
         return [row["id"] for row in cur.fetchall()]
 
 
-def run_refund_offer_timeout_sweep_body(now: datetime | None = None) -> list[UUID]:
-    """48h refund-offer timeout sweep body — VT-85. Defaults each un-answered offer
-    to CONTINUE (reuses the reply handler's continue path: day39_continue event +
-    transition refund_offered -> paid_active). Per-tenant try/except (one stuck
-    default must not halt the sweep). Returns the defaulted tenant ids (canary)."""
-    from orchestrator.owner_inputs.refund_reply import _resume_paid_active
+def plan_refresh_scheduled(scheduled_time: datetime, actual_time: datetime) -> None:
+    """DBOS scheduled handler — fires 1st of month 09:00 IST / 03:30 UTC (VT-679 D1.1). Behind
+    ``TEAM_PROACTIVE_PLANNING`` (no-op fast when unset, before any DB scan). NO LLM in THIS
+    handler — the LLM call lives inside the per-tenant ``refresh_business_plan_workflow`` child
+    workflow it starts."""
+    if not _proactive_planning_enabled():
+        return
+    run_plan_refresh_body(now=actual_time)
+
+
+def run_plan_refresh_body(now: datetime | None = None) -> list[UUID]:
+    """Workspace scan → per-tenant loop → per-tenant ``refresh_business_plan_workflow`` child-start
+    (VT-679 D1.1). Per-tenant try/except: one tenant's failure never halts the sweep (mirrors
+    ``monthly_impact``'s own posture). Keyed on ``monthly_workflow_id(tenant, YYYY-MM)`` so a
+    duplicate cron fire within the same month cannot double-start the SAME tenant's refresh
+    (``DBOS.start_workflow`` no-ops on a known workflow id). Returns the tenant ids the refresh was
+    STARTED for (the child workflow runs durably on its own — this does not wait for it)."""
+    from dbos import DBOS, SetWorkflowID
+
+    from orchestrator.business_plan.generator import refresh_business_plan_workflow
 
     now = now or datetime.now(timezone.utc)
-    defaulted: list[UUID] = []
-    for tid in _scan_timed_out_refund_offers(now):
+    year_month = now.strftime("%Y-%m")
+    started: list[UUID] = []
+    for tenant_id in _scan_active_paid_or_trial_tenants():
         try:
-            _resume_paid_active(UUID(tid), source="timeout")
-            log_event(
-                event_type="day39_refund_decision",
-                run_id=uuid4(),
-                tenant_id=UUID(tid),
-                severity="info",
-                component="scheduled_trigger",
-                payload={"tenant_id": tid, "decision": "continue", "source": "timeout"},
-            )
-            defaulted.append(UUID(tid))
-        except Exception:  # noqa: BLE001 — one stuck default must not halt the sweep
+            with SetWorkflowID(monthly_workflow_id(tenant_id, year_month)):
+                DBOS.start_workflow(refresh_business_plan_workflow, str(tenant_id))
+            started.append(tenant_id)
+        except Exception:  # noqa: BLE001 — one tenant's failure must not halt the sweep
             logger.exception(
-                "refund_offer_timeout_sweep: default-continue failed tenant=%s; sweep continues",
-                tid,
+                "VT-679 plan_refresh: failed to start refresh for tenant=%s", tenant_id
             )
-    return defaulted
+    return started
+
+
+# D1.2 belt: a mis-set cron must never fire the daily initiative outside owner waking hours. The
+# cron PLACEMENT (05:00 UTC = 10:30 IST) already guarantees this; this is a defensive runtime
+# assert, not the primary control (scout confirmed no runtime quiet-hours helper exists anywhere
+# in the codebase — building a general one is out of scope for this row).
+_DAILY_INITIATIVE_IST_HOUR_MIN = 10
+_DAILY_INITIATIVE_IST_HOUR_MAX = 19
+_IST_OFFSET = timedelta(hours=5, minutes=30)
+
+
+def _assert_ist_daytime(now: datetime) -> None:
+    ist_hour = (now.astimezone(timezone.utc) + _IST_OFFSET).hour
+    if not (_DAILY_INITIATIVE_IST_HOUR_MIN <= ist_hour < _DAILY_INITIATIVE_IST_HOUR_MAX):
+        raise RuntimeError(
+            "VT-679 daily_initiative_scheduled: fired outside the 10:00-19:00 IST belt "
+            f"(IST hour={ist_hour}) — refusing to run (cron mis-configuration guard)"
+        )
+
+
+def daily_initiative_scheduled(scheduled_time: datetime, actual_time: datetime) -> None:
+    """DBOS scheduled handler — fires daily 10:30 IST / 05:00 UTC (VT-679 D1.2). Behind
+    ``TEAM_PROACTIVE_PLANNING`` (no-op fast when unset, before any DB scan or the IST belt check).
+    NO LLM — the daily-initiative selection is fully deterministic (Pillar 1)."""
+    if not _proactive_planning_enabled():
+        return
+    _assert_ist_daytime(actual_time)
+    run_daily_initiative_body(now=actual_time)
+
+
+def run_daily_initiative_body(now: datetime | None = None) -> list[dict[str, Any]]:
+    """Workspace scan → per-tenant deterministic selection + dispatch (VT-679 D2/D3/D4, the real
+    logic lives in ``business_plan.daily_initiative.dispatch_daily_initiative`` — this is just the
+    trigger + sweep). Per-tenant try/except: one tenant's failure never halts the sweep. Returns
+    the per-tenant dispatch results for tenants that actually got something dispatched — most days
+    most tenants dispatch nothing (back-pressure skip / no plan / no accepted item left)."""
+    from orchestrator.business_plan.daily_initiative import dispatch_daily_initiative
+
+    now = now or datetime.now(timezone.utc)
+    results: list[dict[str, Any]] = []
+    for tenant_id in _scan_active_paid_or_trial_tenants():
+        try:
+            result = dispatch_daily_initiative(tenant_id, now=now)
+            if result is not None:
+                results.append(result)
+        except Exception:  # noqa: BLE001 — one tenant's failure must not halt the sweep
+            logger.exception("VT-679 daily_initiative: dispatch failed tenant=%s", tenant_id)
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -986,11 +1156,6 @@ def weekly_workflow_id(tenant_id: UUID | str, iso_week: str) -> str:
 def attribution_close_workflow_id(campaign_id: UUID | str) -> str:
     """``attribution_close:{campaign_id}`` — VT-28 §2."""
     return f"attribution_close:{campaign_id}"
-
-
-def day39_workflow_id(tenant_id: UUID | str) -> str:
-    """``day39:{tenant_id}`` — VT-28 §3."""
-    return f"day39:{tenant_id}"
 
 
 def monthly_workflow_id(tenant_id: UUID | str, year_month: str) -> str:
@@ -1029,37 +1194,98 @@ def register_scheduled_triggers() -> None:
     global _registered
     if _registered:
         return
-    DBOS.scheduled(WEEKLY_CADENCE_CRON)(weekly_cadence_scheduled)
-    DBOS.scheduled(ATTRIBUTION_CLOSE_CRON)(attribution_close_scheduled)
-    DBOS.scheduled(DAY39_EVALUATION_CRON)(day39_evaluation_scheduled)
-    # VT-90: 12th handler — daily trial-lifecycle sweep (extend/exhaust/warn).
-    DBOS.scheduled(TRIAL_EVALUATION_CRON)(trial_evaluation_scheduled)
-    DBOS.scheduled(MONTHLY_IMPACT_CRON)(monthly_impact_scheduled)
-    DBOS.scheduled(APPROVAL_TIMEOUT_SWEEP_CRON)(approval_timeout_sweep_scheduled)
-    DBOS.scheduled(L3_CONSTRUCTION_CRON)(l3_construction_scheduled)
+
+    # VT-464 D3: register each handler as a @DBOS.workflow BEFORE applying
+    # @DBOS.scheduled. In DBOS 2.x (we run 2.22), DBOS.scheduled() ONLY
+    # registers a cron POLLER — it does NOT also register the function as a
+    # workflow. When the poller fires, the scheduler enqueues the function by
+    # its registered workflow name and recovery looks it up in
+    # workflow_info_map; a function that was only scheduled (never decorated
+    # @DBOS.workflow) has no dbos_function_name, so the fire raises
+    # DBOSWorkflowFunctionNotFoundError ("not a registered workflow function")
+    # — observed every ~30 min for approval_timeout_sweep_scheduled +
+    # l2_approved_send_sweep_scheduled (their crons fire most often). The
+    # daily/nightly handlers carried the same latent gap; wrapping ALL of them
+    # is the correct, non-weakening fix (the approval-timeout sweep MUST run so
+    # stale Pillar-7 approvals clear). Idempotent via the _registered guard.
+    def _register_scheduled(cron: str, fn: Any) -> None:
+        DBOS.scheduled(cron)(DBOS.workflow()(fn))
+
+    _register_scheduled(WEEKLY_CADENCE_CRON, weekly_cadence_scheduled)
+    _register_scheduled(ATTRIBUTION_CLOSE_CRON, attribution_close_scheduled)
+    # VT-90 (VT-365): daily trial-lifecycle sweep — trial expiry to `lapsed`.
+    _register_scheduled(TRIAL_EVALUATION_CRON, trial_evaluation_scheduled)
+    _register_scheduled(MONTHLY_IMPACT_CRON, monthly_impact_scheduled)
+    _register_scheduled(APPROVAL_TIMEOUT_SWEEP_CRON, approval_timeout_sweep_scheduled)
+    _register_scheduled(L3_CONSTRUCTION_CRON, l3_construction_scheduled)
     # VT-76 (CL-240): 7th handler — opt-out reconstitution sweep. EXTENDS this
     # surface, NOT a parallel poller. The cron + body live in privacy/reconstitution.
     from orchestrator.privacy.reconstitution import RECONSTITUTION_CRON
 
-    DBOS.scheduled(RECONSTITUTION_CRON)(reconstitution_sweep_scheduled)
+    _register_scheduled(RECONSTITUTION_CRON, reconstitution_sweep_scheduled)
     # VT-304: 8th handler — nightly audit-chain verify. EXTENDS the surface
     # (same register-before-launch posture; app_version shifts once, here).
-    DBOS.scheduled(AUDIT_CHAIN_VERIFY_CRON)(audit_chain_verify_scheduled)
+    _register_scheduled(AUDIT_CHAIN_VERIFY_CRON, audit_chain_verify_scheduled)
     # VT-305: 9th handler — nightly PII-in-log sweep (VT-79 Detector-5).
-    DBOS.scheduled(PII_LOG_SWEEP_CRON)(pii_log_sweep_scheduled)
+    _register_scheduled(PII_LOG_SWEEP_CRON, pii_log_sweep_scheduled)
     # VT-307: 10th handler — nightly KG-events outbox-drain straggler sweep.
-    DBOS.scheduled(KG_DRAIN_SWEEP_CRON)(kg_drain_sweep_scheduled)
+    _register_scheduled(KG_DRAIN_SWEEP_CRON, kg_drain_sweep_scheduled)
     # VT-311: 11th handler — nightly L2 episodic retention soft-delete sweep.
-    DBOS.scheduled(L2_RETENTION_SWEEP_CRON)(l2_retention_sweep_scheduled)
-    # VT-85: 12th handler — day-39 refund-offer 48h timeout sweep (default CONTINUE).
-    DBOS.scheduled(REFUND_OFFER_TIMEOUT_SWEEP_CRON)(refund_offer_timeout_sweep_scheduled)
+    _register_scheduled(L2_RETENTION_SWEEP_CRON, l2_retention_sweep_scheduled)
     # VT-354: waitlist 6-month retention purge — ENFORCES the DPDP pre-launch PII bound (was
     # runbook-manual). EXTENDS this surface (same register-before-launch posture).
-    DBOS.scheduled(WAITLIST_RETENTION_PURGE_CRON)(waitlist_retention_purge_scheduled)
+    _register_scheduled(WAITLIST_RETENTION_PURGE_CRON, waitlist_retention_purge_scheduled)
     # VT-357: hourly SLA-breach sweep — 2nd Fazal alert on overdue open escalations (marker-gated).
-    DBOS.scheduled(SLA_BREACH_SWEEP_CRON)(sla_breach_sweep_scheduled)
+    _register_scheduled(SLA_BREACH_SWEEP_CRON, sla_breach_sweep_scheduled)
     # VT-280: daily VTR digest — de-identified, app_vtr_role + the VT-281 views only.
-    DBOS.scheduled(VTR_DIGEST_CRON)(vtr_digest_scheduled)
+    _register_scheduled(VTR_DIGEST_CRON, vtr_digest_scheduled)
+    # VT-374: daily expired-override cancel sweep (F8 next-run pin expiry bound).
+    # EXTENDS this surface (same register-before-launch posture), NOT a parallel poller.
+    _register_scheduled(OVERRIDE_EXPIRY_SWEEP_CRON, override_expiry_sweep_scheduled)
+    # VT-382: daily outbox-redaction backfill/backstop sweep (CL-437 ruling 3.3).
+    # EXTENDS this surface (same register-before-launch posture), NOT a parallel poller.
+    _register_scheduled(OUTBOX_REDACTION_SWEEP_CRON, outbox_redaction_sweep_scheduled)
+    # VT-432: daily implicit-attribution sweep (VT-198 feedback tier-1). Runs at
+    # 23:00 UTC / 04:30 IST — after attribution_close and the redaction/reconstitution
+    # batch. Pure SQL, NO LLM, NO SEND. EXTENDS this surface, NOT a parallel poller.
+    _register_scheduled(IMPLICIT_ATTRIBUTION_SWEEP_CRON, implicit_attribution_sweep_scheduled)
+    # VT-418: the L2 owner-approve→send reconciler sweep — recovery-only (heals the
+    # crash-between-commit-and-start residual where the runner's post-commit start_l2_send
+    # never ran). Idempotent on the l2_send_{batch_id} workflow-id; the per-draft ledger
+    # dedup makes a genuine re-drive no-double-send. EXTENDS this surface (same
+    # register-before-launch posture), NOT a parallel poller.
+    from orchestrator.agents.l2_send import (
+        L2_APPROVED_SEND_SWEEP_CRON,
+        l2_approved_send_sweep_scheduled,
+    )
+
+    _register_scheduled(L2_APPROVED_SEND_SWEEP_CRON, l2_approved_send_sweep_scheduled)
+    # VT-439: daily Razorpay orphan-DETECT backstop (VT-352 F7). DETECT-ONLY — no
+    # cancel, no charge, no send. Runs at 01:00 UTC / 06:30 IST (off-peak billing).
+    _register_scheduled(
+        RECONCILE_SUBSCRIPTION_ORPHANS_CRON, reconcile_subscription_orphans_scheduled
+    )
+    # VT-440: daily dead-letter retry backstop (VT-352 F7). DETECT/ALERT-ONLY — counts
+    # pending parse-dropped charge events + alerts Fazal; NO replay/charge/send/write.
+    # The actual replay is operator-driven (needs a corrected payload); exactly-once is
+    # guaranteed by the razorpay_ingress event_id dedup keystone. 22:30 UTC / 04:00 IST.
+    _register_scheduled(DEAD_LETTER_RETRY_SWEEP_CRON, dead_letter_retry_sweep_scheduled)
+    # VT-560: the boot-only reapers as STEADY-STATE scheduled sweeps — they previously ran
+    # ONLY at boot, so on a long-lived process the VT-557 retry ladder never progressed.
+    # EXTENDS this surface (same register-before-launch posture), NOT parallel pollers.
+    # NO LLM (pure SQL reaper). The VT-552 silent-terminal detector is deliberately NOT
+    # here — see the comment above STALLED_TASK_SWEEP_CRON (no final_outcome writer yet ⇒
+    # scheduling it would storm an incident/alert per completed run).
+    _register_scheduled(STALLED_TASK_SWEEP_CRON, stalled_task_sweep_scheduled)
+    _register_scheduled(ORPHAN_RUN_REAPER_CRON, orphan_run_reaper_scheduled)
+    # VT-620: hourly GC of leaked convo-harness test tenants (offset 15m from the orphan reaper).
+    # Pure SQL FK-safe delete, NO LLM, STRICT convo-harness-% scope. EXTENDS this surface.
+    _register_scheduled(TEST_TENANT_REAPER_CRON, test_tenant_reaper_scheduled)
+    # VT-679 (§7A proactive planning): monthly plan-refresh + daily initiative pick. Both
+    # unconditionally REGISTERED here (cron infrastructure is always-on); TEAM_PROACTIVE_PLANNING
+    # gates the HANDLER BODY (no-op fast when unset) — EXTENDS this surface, NOT parallel pollers.
+    _register_scheduled(PLAN_REFRESH_CRON, plan_refresh_scheduled)
+    _register_scheduled(DAILY_INITIATIVE_CRON, daily_initiative_scheduled)
     _registered = True
 
 
@@ -1069,39 +1295,55 @@ __all__ = [
     "ATTRIBUTION_CLOSED_EVENT",
     "ATTRIBUTION_CLOSE_CRON",
     "ATTRIBUTION_CLOSE_SHELL_EVENT",
-    "DAY39_CONTINUE_EVENT",
-    "DAY39_EVALUATION_CRON",
-    "DAY39_REFUND_TRIGGERED_EVENT",
+    "DEAD_LETTER_RETRY_SWEEP_CRON",
+    "IMPLICIT_ATTRIBUTION_SWEEP_CRON",
+    "RECONCILE_SUBSCRIPTION_ORPHANS_CRON",
     "L3_CONSTRUCTION_CRON",
-    "DAY39_SHELL_EVENT",
     "MONTHLY_IMPACT_CRON",
     "MONTHLY_IMPACT_SHELL_EVENT",
     "MONTHLY_IMPACT_STARTED_EVENT",
+    "ORPHAN_RUN_REAPER_CRON",
+    "OUTBOX_REDACTION_SWEEP_CRON",
+    "OVERRIDE_EXPIRY_SWEEP_CRON",
     "SHELL_STATUS",
+    "STALLED_TASK_SWEEP_CRON",
+    "TEST_TENANT_REAPER_CRON",
     "WEEKLY_CADENCE_CRON",
     "WEEKLY_CADENCE_EVENT",
     "approval_timeout_sweep_scheduled",
     "attribution_close_scheduled",
     "attribution_close_workflow_id",
-    "day39_evaluation_scheduled",
-    "day39_workflow_id",
     "AUDIT_CHAIN_VERIFY_CRON",
     "KG_DRAIN_SWEEP_CRON",
     "L2_RETENTION_SWEEP_CRON",
     "PII_LOG_SWEEP_CRON",
     "audit_chain_verify_scheduled",
+    "dead_letter_retry_sweep_scheduled",
+    "implicit_attribution_sweep_scheduled",
+    "reconcile_subscription_orphans_scheduled",
     "kg_drain_sweep_scheduled",
     "l2_retention_sweep_scheduled",
     "pii_log_sweep_scheduled",
     "monthly_impact_scheduled",
     "monthly_workflow_id",
+    "orphan_run_reaper_scheduled",
+    "outbox_redaction_sweep_scheduled",
+    "override_expiry_sweep_scheduled",
     "reconstitution_sweep_scheduled",
     "register_scheduled_triggers",
+    "stalled_task_sweep_scheduled",
+    "test_tenant_reaper_scheduled",
     "run_approval_timeout_sweep_body",
     "run_attribution_close_body",
-    "run_day39_evaluation_body",
     "run_monthly_impact_body",
     "run_weekly_cadence_body",
+    "TEAM_PROACTIVE_PLANNING_FLAG",
+    "PLAN_REFRESH_CRON",
+    "DAILY_INITIATIVE_CRON",
+    "plan_refresh_scheduled",
+    "run_plan_refresh_body",
+    "daily_initiative_scheduled",
+    "run_daily_initiative_body",
     "weekly_cadence_scheduled",
     "weekly_workflow_id",
 ]

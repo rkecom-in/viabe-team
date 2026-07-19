@@ -1,12 +1,13 @@
 name: Deploy dev
 
-# Triggered on push to main only. No untrusted event payload values
-# are interpolated into run: blocks — only repo secrets, which are
-# safe per the GitHub Actions security model.
+# Triggered on push to the `dev` branch (VT-363/CL-432: dev → Dev env / viabe-team-dev /
+# Seoul). `main` → Prod is a separate, manual deploy-prod.yml. No untrusted event payload
+# values are interpolated into run: blocks — only repo secrets, which are safe per the
+# GitHub Actions security model.
 
 on:
   push:
-    branches: [main]
+    branches: [dev]
     # VT-245 trigger-diet: don't redeploy dev when a merge touches ONLY
     # docs / sprint substrate / session exports / the ci.yml workflow —
     # none of that changes the deployed apps. paths-ignore skips only
@@ -48,43 +49,13 @@ jobs:
   # passing). Removed. Railway redeploys itself once this workflow is green.
   # Now-unused secrets: RAILWAY_TOKEN, RAILWAY_SERVICE_ID, RAILWAY_DEV_URL.
 
-  deploy-team-web:
-    name: Deploy team-web (Vercel)
-    needs: pre-deploy-checks
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      # VT-244-fix-2: the repo is a pnpm monorepo; the Vercel project's
-      # install command is `pnpm install --frozen-lockfile`, so `vercel
-      # build` needs pnpm on the runner (was failing `sh: 1: pnpm: not
-      # found`). Mirror ci.yml's proven setup — pnpm/action-setup reads
-      # the packageManager pin (pnpm@10.33.4) from package.json.
-      - uses: pnpm/action-setup@v6
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 22
-          cache: pnpm
-      # VT-244: amondnet/vercel-action@v25 pins vercel CLI 25.1.0, which
-      # Vercel's API now rejects ("requires version 47.2.2 or later").
-      # Replaced with the current official CLI flow (pull → build → deploy
-      # --prebuilt). Token via env (not ${{ }} in the run block) — GH
-      # Actions injection-safe. VERCEL_ORG_ID / VERCEL_PROJECT_ID are read
-      # by the CLI automatically from the environment.
-      #
-      # VT-244-fix-1: run at REPO ROOT, not apps/team-web. The Vercel
-      # project `viabe-team-dev` already has Root Directory = apps/team-web
-      # configured; setting working-directory: apps/team-web on top of that
-      # doubled the path (apps/team-web/apps/team-web/package.json ENOENT).
-      - name: Deploy to Vercel
-        env:
-          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
-          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
-          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
-        run: |
-          npm i -g vercel@latest
-          vercel pull --yes --environment=production --token="$VERCEL_TOKEN"
-          vercel build --prod --token="$VERCEL_TOKEN"
-          vercel deploy --prebuilt --prod --token="$VERCEL_TOKEN"
+  # team-web deploys NATIVELY via Vercel's Git integration (Fazal 2026-06-27 re-enabled "auto-build on
+  # push" for the viabe-team-web-dev project, dev branch). The old Vercel CLI `--prebuilt` deploy job here
+  # DOUBLE-built (CLI + native) = wasted minutes + a race, and the CLI deploy did NOT auto-attach the
+  # production domain (the stale-alias URL problem). Removed — Vercel now redeploys itself on the dev push
+  # and auto-attaches the production alias. Now-unused secrets: VERCEL_TOKEN / VERCEL_ORG_ID /
+  # VERCEL_PROJECT_ID. Railway "Wait for CI" still gates the orchestrator deploy on this workflow (the
+  # pre-deploy-checks job) being green.
 
   # VT-246: post-deploy-smoke removed. It (a) `needs:` the deleted Railway
   # job, and (b) curled RAILWAY_DEV_URL/health — but the orchestrator's

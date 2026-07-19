@@ -85,7 +85,6 @@ payload-level scrub is its own data-migration row.
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass
 from typing import Any, cast
 from uuid import UUID
@@ -94,14 +93,6 @@ from orchestrator.graph import get_pool
 from orchestrator.observability.audit_log import log_privacy_event
 
 logger = logging.getLogger(__name__)
-
-# VT-93 / Cowork-escalation 20260605T100800Z — refund_executions DSR mode. Default
-# HARD-DELETE (DPDP right-to-erasure). Set TEAM_REFUND_RETAIN_ON_DSR=1 to switch to
-# anonymize-retain: keep total_refund_paise + completed_at (Indian tax/accounting
-# retention may require refund amount+date 6-8 yrs even after an erasure request)
-# and scrub the Razorpay vendor detail. A config flip, not a refactor — Fazal's /
-# legal's ruling sets it. NEEDS-FAZAL: confirm the retention requirement.
-_REFUND_HARD_DELETE_ON_DSR = os.environ.get("TEAM_REFUND_RETAIN_ON_DSR", "0") != "1"
 
 
 # Anonymization values for the tenants row tombstone. Kept here (not
@@ -134,6 +125,42 @@ _TENANT_ANONYMIZE = {
 _PURGE_ORDER: tuple[str, ...] = (
     "l1_relationships",
     "l1_entities",
+    # VT-366: the Auto-Discovery DRAFT business profile (tenant business data — public-sourced but
+    # still tenant-scoped). Leaf table (FK to tenants only), no CASCADE, no other hard-delete path,
+    # so a tenant DSR-delete MUST sweep it here or the draft survives the purge.
+    "business_profile_draft",
+    # VT-367: the onboarding-journey cursor (holds owner-supplied business answers). Leaf (FK tenants
+    # only), no CASCADE — sweep on DSR or the journey answers survive the purge (the 2a lesson).
+    "onboarding_journey",
+    # VT-368: the business-plan spine (summary + roadmap + frozen fact bundle = owner business
+    # context, EVERY version). Leaf (FK tenants only), no CASCADE — hard-delete all versions on DSR.
+    "business_plan",
+    # VT-369: the agent surface. agent_drafts (customer-facing message params) → batches → work
+    # items, children-first; agent_customer_contacts is the per-customer contact ledger (customer
+    # linkage at rest). All FK tenants with CASCADE, but the tenant row is anonymized NOT deleted on
+    # DSR (the CASCADE never fires) — sweep explicitly or they survive the purge (the VT-366 lesson).
+    # VT-382 (CL-437.3, mig 135): owner_message_audit holds the EXACT owner-facing sent text — the
+    # ONE surface that retains it after the outbox redaction. Leaf (FK tenants only; CASCADE never
+    # fires), but it carries draft/batch linkage by value, so it sweeps FIRST among the agent
+    # tables (children-first hygiene). MUST be swept here or the exact text survives the purge.
+    "owner_message_audit",
+    "agent_drafts",
+    "agent_draft_batches",
+    "agent_work_items",
+    "agent_customer_contacts",
+    # VT-369 PR-2: the per-(tenant, agent) autonomy state (trust counters + grant evidence link).
+    # Leaf (FK tenants only; CASCADE never fires — the tenant row is anonymized, not deleted).
+    "tenant_agent_autonomy",
+    # VT-467: the per-(tenant, action_class) business-impact autonomy state (tier + thresholds +
+    # grant provenance). Leaf (FK tenants only; CASCADE never fires — tenant anonymized, not deleted),
+    # so a tenant DSR-delete MUST sweep it here or the business-autonomy grants survive the purge
+    # (the tenant_agent_autonomy lesson, on the new table).
+    "tenant_business_autonomy",
+    # VT-474: the per-tenant business POLICY (allowed action-types / segments / freq-caps / spend
+    # ceiling — the A2 machine-enforceable bound). Leaf (FK tenants only; CASCADE never fires — tenant
+    # anonymized, not deleted), so a tenant DSR-delete MUST sweep it here or the policy grant survives
+    # the purge (the tenant_business_autonomy lesson, on the new single-row-per-tenant table).
+    "tenant_business_policy",
     # VT-323: L2 episodic memory. Leaf (references tenants — anonymized, NOT
     # deleted — and no child tables point at it), so order-insensitive. payload
     # CAN carry PII at rest, and there is NO ON DELETE CASCADE + no other
@@ -153,30 +180,91 @@ _PURGE_ORDER: tuple[str, ...] = (
     # here or the outbox PII survives the purge (the episodic_events/platform_listings lesson).
     "kg_events_processed",
     "kg_events",
-    # VT-92: day-39 decision audit. Leaf (FK tenants only). Carries the tenant's
-    # ARRR/fees (subject billing data) → hard-deleted on DSR (CASCADE never fires on
-    # a DSR-anonymize). Order-insensitive.
-    "day39_evaluations",
-    # VT-93: refund execution ledger. Leaf (FK tenants only; day39_evaluation_id
-    # is an id-copy, not a FK), order-insensitive. Carries subject billing data
-    # (total_refund_paise + Razorpay refund ids in refund_responses) → hard-
-    # deleted on DSR; the immutable privacy_audit_log copy survives. The purge txn
-    # sets orchestrator.dsr_purge_in_progress so the completed-row immutability
-    # trigger (mig 099) permits this delete.
-    "refund_executions",
     "kyc_verification_log",  # VT-361 (mig 120): per-tenant verification attempts — leaf (FK tenants
     # only; anonymize never CASCADEs). Result-only (no payer names), but it's the subject's
     # verification history → hard-delete on DSR (the episodic_events/platform_listings lesson).
+    "tenant_mca_data",  # VT-449/VT-411 (mig 142): the parsed MCA company-master at rest. Leaf (no FK
+    # in/out — tenant_id-scoped, the tenant row is anonymized NOT deleted on DSR, so no CASCADE path).
+    # registered_address_encrypted + directors_encrypted hold ENCRYPTED PII (director names + address)
+    # — MUST be swept here or the subject's encrypted ownership PII survives erasure (the
+    # tenant_oauth_tokens credential lesson — encrypted-at-rest is still subject data). Hard-delete.
     "founding_tier_claims",  # VT-94: per-tenant founding claim (audit) — hard-delete on DSR
     "template_error_reports",  # VT-335: owner template-error reports (PII free text) — hard-delete
     "owner_inputs",
     "campaigns",
+    # VT-374 (mig 131): the run-control substrate. step_overrides carries redacted-at-write
+    # pinned_input/pinned_output/reason (still the tenant's control history — a PII-at-rest
+    # surface, F7); workflow_controls carries pause records + redacted reasons. Both leaf
+    # (FK tenants only, no CASCADE — the tenant row is anonymized, never deleted, so a sweep
+    # here is the ONLY hard-delete path). workflow_id/consumed_run_id point at pipeline_runs
+    # ids WITHOUT an FK, but they're swept BEFORE the pipeline tables anyway so control rows
+    # never outlive the runs they controlled.
+    "step_overrides",
+    "workflow_controls",
+    # VT-518 (DSR-purge gap, Cowork audit-after of VT-514/515): the two tenant-scoped
+    # PII-bearing observability tables added by VT-514/VT-515 were NEVER in this order →
+    # a right-to-erasure tenant survived in the audit + debug logs (redact-at-write +
+    # RLS is insufficient for erasure — redacted activity history is STILL the subject's
+    # data). Both swept here, BEFORE pipeline_runs:
+    #   * tm_audit_log (mig 147): run_id → pipeline_runs(id) NO ACTION, so it MUST precede
+    #     pipeline_runs or the runs delete fails on the dangling ref. parent_audit_id is a
+    #     self-FK (→ tm_audit_log.id) NO ACTION — a single `DELETE … WHERE tenant_id = %s`
+    #     removes parent+child in ONE statement, so the FK is checked at statement end with
+    #     both already gone (safe; no per-row RESTRICT). tenant_id NOT NULL.
+    #   * debug_events (mig 146): no FK at all (trace_id is bare TEXT), order-insensitive.
+    #     tenant_id is NULLABLE (pre-tenant failures carry no tenant) — the tenant-scoped
+    #     DELETE correctly sweeps only the subject's rows and leaves NULL-tenant rows (not
+    #     subject data). mig 147 documented "DSR-purge-scoped via the VT-185 path"; this row
+    #     is the impl that finally delivers it (the recurring hand-maintained-order drift).
+    "tm_audit_log",
+    "debug_events",
+    # VT-524 (B1): owner_notifications — the owner-notification delivery ledger. Tenant-scoped
+    # (tenant_id → tenants, FK; run_id is a soft NO-FK pointer per VT-521), so order-insensitive.
+    # Holds message_sid/template_name/status — tenant data → erased on right-to-erasure.
+    "owner_notifications",
+    # VT-525 (B2): the manager task/step spine. Both tenant-scoped (tenant_id → tenants). Steps
+    # FK task_id → manager_tasks ON DELETE CASCADE; listed steps-BEFORE-tasks (children first,
+    # house convention) though the CASCADE would also cover it. evidence_ref is a by-value
+    # pointer (NO FK), so order re: pipeline_runs is insensitive. Redacted objective/step detail
+    # is STILL the subject's data → erased on right-to-erasure (the VT-518 lesson).
+    "manager_task_steps",
+    "manager_tasks",
+    # VT-527 (B4): pending_questions — the owner-clarification ledger. Tenant-scoped; task_id/run_id
+    # are soft pointers (NO FK), so order-insensitive. Holds redacted question + the owner's redacted
+    # answer → tenant data, erased on right-to-erasure.
+    "pending_questions",
+    # VT-531 (C3): agent_corrections — the reviewer-correction store. Tenant-scoped; run_id/batch_id
+    # are soft pointers (NO FK), so order-insensitive. Holds the PII-redacted correction text →
+    # the subject's data, erased on right-to-erasure.
+    "agent_corrections",
+    # VT-550 (C3b): agent_memory — the seedable learnable-memory store. Only TENANT rows are the
+    # subject's data; the WHERE tenant_id=… purge erases those and naturally skips GLOBAL seeds
+    # (tenant_id IS NULL — archetype knowledge, not a subject's data).
+    "agent_memory",
+    # VT-552 (B1 part-2b): incidents — durable incident records (run_id soft, no FK), tenant data,
+    # erased on right-to-erasure.
+    "incidents",
+    # VT-579: conversation_log — the LIFETIME owner↔system conversation (both directions). Leaf (FK
+    # tenants ON DELETE CASCADE, but the tenant row is anonymized NOT deleted on DSR, so the CASCADE
+    # never fires) → order-insensitive; MUST be swept here or the subject's own conversation survives
+    # erasure (the episodic_events/agent_memory lesson). Retention = lifetime-of-relationship, DSR-only
+    # deletion (CL-2026-07-03-conversation-memory-architecture). Hard-delete.
+    "conversation_log",
     "pipeline_steps",
     "pipeline_runs",
     "subscriber_states",
     "phase_transitions",
     "subscriptions",
     "phone_token_resolutions",
+    # VT-422 (GAP-1, DPDP erasure bug): the per-(tenant, connector) ENCRYPTED OAuth
+    # credential (the Shopify offline access token et al — the tenant's credential =
+    # tenant PII per CL-390/425). Leaf (FK tenants only; the tenant row is anonymized,
+    # NOT deleted on DSR, so the FK CASCADE never fires) → order-insensitive. It was
+    # EXPORTED on DSR (dsr_export.py) but never ERASED — a real privacy-at-rest bug: a
+    # DSR-deleted tenant's encrypted token survived the purge. MUST be swept here or
+    # the credential outlives erasure (the episodic_events/platform_listings lesson,
+    # on the credential store). Hard-delete.
+    "tenant_oauth_tokens",
     # VT-8.5: customer consent proof (migration 067). Leaf table (no FK in or
     # out — phone_token-keyed, no customers FK), so order-insensitive; grouped
     # with the privacy surfaces. Tenant-wide DSR must sweep it.
@@ -234,10 +322,6 @@ def purge_tenant_data(ticket_id: UUID) -> PurgeResult:
         tenant_id = _resolve_tenant_id_or_raise(conn, ticket_id)
 
         with conn.transaction():
-            # VT-93: exempt this purge txn from the refund_executions immutability
-            # trigger so a completed refund row can be hard-deleted (DPDP right-to-
-            # erasure). The durable record survives in privacy_audit_log (mig 099).
-            conn.execute("SET LOCAL orchestrator.dsr_purge_in_progress = 'on'")
             if _ticket_already_completed(conn, ticket_id):
                 return PurgeResult(
                     ticket_id=ticket_id,
@@ -250,17 +334,7 @@ def purge_tenant_data(ticket_id: UUID) -> PurgeResult:
             _append_audit_event(conn, tenant_id, ticket_id)
 
             for table in _PURGE_ORDER:
-                if table == "refund_executions" and not _REFUND_HARD_DELETE_ON_DSR:
-                    # Anonymize-retain mode: keep amount+date (tax/accounting),
-                    # scrub vendor detail. Rows are RETAINED (0 deleted). Runs
-                    # under the dsr_purge_in_progress flag set above, so the
-                    # completed-row immutability trigger permits the UPDATE.
-                    from orchestrator.db import refund_executions as _refund_ledger
-
-                    _refund_ledger.anonymize_retain(conn, tenant_id)
-                    rows_deleted = 0
-                else:
-                    rows_deleted = _delete_where_tenant(conn, table, tenant_id)
+                rows_deleted = _delete_where_tenant(conn, table, tenant_id)
                 deleted_counts[table] = rows_deleted
                 # VT-185 Q1 Option A: per-table audit row written AFTER
                 # each successful DELETE. Combined with the intent row

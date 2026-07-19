@@ -109,8 +109,16 @@ def _pool(
     return pool, executed
 
 
-def _customer(last_inbound_at: datetime | None, phone: str = "+919990000001") -> dict:
-    return {"phone_e164": phone, "last_inbound_at": last_inbound_at}
+def _customer(
+    last_inbound_at: datetime | None,
+    phone: str = "+919990000001",
+    opt_out_status: str | None = None,
+) -> dict:
+    return {
+        "phone_e164": phone,
+        "last_inbound_at": last_inbound_at,
+        "opt_out_status": opt_out_status,
+    }
 
 
 def _input(**over: Any):
@@ -155,6 +163,42 @@ def test_happy_path_sent() -> None:
 
     # Ledger INSERT must be present.
     assert any("INSERT INTO send_idempotency_keys" in s for s in sql_list)
+
+
+# ---------------------------------------------------------------------------
+# Test 1b (VT-369 Gap-5 PR-1 fix): opted-out customer refused EVEN IN-WINDOW
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("status", ["opted_out", "blocked", "owner_excluded"])
+def test_opted_out_recipient_refused_even_in_window(status: str) -> None:
+    """CL-421/VT-369: an opted-out customer who messages in re-opens a 24h
+    *window*, not consent — the freeform path was missing this gate. The refuse
+    fires BEFORE any window/rate evaluation and the sender is never called."""
+    from orchestrator.agent.tools.send_whatsapp_message import send_whatsapp_message
+
+    last_inbound = _now_utc() - timedelta(hours=2)  # squarely IN-window
+    pool, _ = _pool(customer_row=_customer(last_inbound, opt_out_status=status))
+    send_fn = MagicMock(return_value="SM_should_not_be_called")
+
+    out = send_whatsapp_message(_input(), pool=pool, send_fn=send_fn)
+
+    assert out.status == "unauthorized"
+    assert out.error_envelope is not None
+    assert out.error_envelope.code == "recipient_opted_out"
+    send_fn.assert_not_called()
+
+
+def test_subscribed_recipient_still_sends_in_window() -> None:
+    """The new gate must not over-block: an explicitly 'subscribed' customer
+    in-window still sends."""
+    from orchestrator.agent.tools.send_whatsapp_message import send_whatsapp_message
+
+    last_inbound = _now_utc() - timedelta(hours=2)
+    pool, _ = _pool(customer_row=_customer(last_inbound, opt_out_status="subscribed"))
+
+    out = send_whatsapp_message(_input(), pool=pool, send_fn=_send_fn)
+
+    assert out.status == "sent"
 
 
 # ---------------------------------------------------------------------------
@@ -225,6 +269,82 @@ def test_idempotency_dedup() -> None:
     assert out2.message_sid == "SM_first_call"
     # send_fn was only called once across both invocations.
     assert send_fn.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# Test 4a (VT-410, sibling of VT-387): a cached 'error' row is NOT an
+# idempotent hit — RETRYABLE.
+#
+# A freeform send that TRANSIENTLY failed cached send_status='error' under the
+# caller's idempotency_key. With 'error' OUT of _IDEMPOTENT_HIT_STATUSES, a retry
+# within the 24h window re-evaluates the gates and SENDS, instead of echoing the
+# cached error and silently no-opping.
+# ---------------------------------------------------------------------------
+
+def test_errored_row_is_retryable_not_idempotent_hit() -> None:
+    from orchestrator.agent.tools.send_whatsapp_message import send_whatsapp_message
+
+    last_inbound = _now_utc() - timedelta(hours=2)  # squarely IN-window
+    # A prior attempt cached 'error' under this key, 5 min ago (well inside 24h).
+    errored_idem = {
+        "id": "idem-row-vt410",
+        "message_sid": None,
+        "send_status": "error",
+        "created_at": _now_utc() - timedelta(minutes=5),
+    }
+    send_fn = MagicMock(return_value="SM_retry_sent")
+    pool, executed = _pool(customer_row=_customer(last_inbound), idem_row=errored_idem)
+
+    out = send_whatsapp_message(_input(), pool=pool, send_fn=send_fn)
+
+    # The retry SENDS — the cached 'error' did NOT short-circuit it.
+    assert out.status == "sent"
+    assert out.message_sid == "SM_retry_sent"
+    send_fn.assert_called_once()
+
+    # And the retry wrote a ledger row (ON CONFLICT DO NOTHING is harmless — the
+    # key already exists with 'error', but the re-send happened).
+    sql_list = [sql for sql, _ in executed]
+    assert any("INSERT INTO send_idempotency_keys" in s for s in sql_list)
+
+
+def test_errored_row_status_not_in_hit_set() -> None:
+    """Direct guard on the set itself: 'error' is excluded; the deliverable/terminal
+    statuses stay IN so completed sends never re-fire (VT-410)."""
+    from orchestrator.agent.tools.send_whatsapp_message import _IDEMPOTENT_HIT_STATUSES
+
+    assert "error" not in _IDEMPOTENT_HIT_STATUSES
+    # The dedup contract: a genuinely-delivered send ('sent') and the other
+    # non-retryable terminal states STAY hits → never re-processed.
+    assert {
+        "sent", "window_closed", "rate_limited", "unauthorized",
+    } <= _IDEMPOTENT_HIT_STATUSES
+
+
+# ---------------------------------------------------------------------------
+# Test 4b (VT-410 regression guard — LOAD-BEARING): a 'sent' row STAYS an
+# idempotent hit. The no-double-send invariant: a freeform message that already
+# delivered must NEVER re-send on a retry within the window.
+# ---------------------------------------------------------------------------
+
+def test_sent_row_still_dedups_no_resend() -> None:
+    from orchestrator.agent.tools.send_whatsapp_message import send_whatsapp_message
+
+    sent_idem = {
+        "id": "idem-row-vt410-sent",
+        "message_sid": "SM_already_delivered",
+        "send_status": "sent",
+        "created_at": _now_utc() - timedelta(minutes=5),
+    }
+    send_fn = MagicMock(return_value="SM_should_not_fire")
+    pool, _ = _pool(idem_row=sent_idem)
+
+    out = send_whatsapp_message(_input(), pool=pool, send_fn=send_fn)
+
+    # Idempotent hit: returns the cached 'sent' WITHOUT calling send_fn again.
+    assert out.status == "sent"
+    assert out.message_sid == "SM_already_delivered"
+    send_fn.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

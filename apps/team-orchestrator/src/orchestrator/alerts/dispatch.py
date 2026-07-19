@@ -6,9 +6,12 @@ scheduler retries on its next tick. Idempotent: a non-NULL
 sent timestamp blocks re-send.
 
 Channel routing (Cowork-locked):
-- Canary tenant (``TEAM_CANARY_TENANT_IDS`` env) → DEV bot only;
-  never email; never OPS bot
-- Real ops traffic → critical = OPS bot + email immediately;
+- Dev-routed (VT-489 ``is_dev_routed``): canary tenant
+  (``TEAM_CANARY_TENANT_IDS`` env) OR non-prod env (``EXPECTED_ENV != prod``,
+  VT-362 sentinel) → DEV bot only; never email; never the ViabeOps OPS bot.
+  A dev/test volume_spike (e.g. the 63211ce5 re-drive burst) thus never pages
+  Fazal. PROD is unaffected — on ``EXPECTED_ENV=prod`` this is canary-only.
+- Real ops traffic (prod, non-canary) → critical = OPS bot + email immediately;
   warning = batched into hourly digest unless 3+ in 5 min (force-immediate)
 
 Dedup: same ``(tenant_id, trigger_kind)`` firing within 5-min sliding
@@ -47,6 +50,29 @@ def _canary_tenant_ids() -> frozenset[str]:
 def is_canary_tenant(tenant_id: UUID) -> bool:
     """Per Cowork CORRECTION-1: env-var whitelist, NOT name match."""
     return str(tenant_id) in _canary_tenant_ids()
+
+
+def is_dev_routed(tenant_id: UUID) -> bool:
+    """VT-489 (c): True when this alert must NOT page a real person on the ViabeOps
+    OPS channel — route to the DEV bot (or suppress email) instead.
+
+    An alert is dev-routed when EITHER:
+      - the tenant is an explicit canary (``TEAM_CANARY_TENANT_IDS`` — existing
+        Cowork lock), OR
+      - the environment is NOT prod (``EXPECTED_ENV != prod``, the VT-362 sentinel
+        via ``dev_send_guard.is_prod_env``). On dev/CI a volume_spike is dev/test
+        traffic (e.g. the 63211ce5 re-drive burst) and must never page Fazal.
+
+    PROD IS UNAFFECTED: on ``EXPECTED_ENV=prod`` this is True only for explicit
+    canary tenants — exactly today's behaviour — so a real prod volume spike still
+    pages the OPS channel + email. The env arm is the new, fail-safe addition:
+    it only ever DOWNGRADES dev alerts to the dev bot; it never touches prod.
+    """
+    if is_canary_tenant(tenant_id):
+        return True
+    from orchestrator.utils.dev_send_guard import is_prod_env
+
+    return not is_prod_env()
 
 
 def _dedup_key(trigger: Trigger) -> str:
@@ -139,16 +165,20 @@ def _format_alert(trigger: Trigger) -> tuple[str, str]:
 
 
 async def _dispatch_telegram(
-    alert_id: UUID, scrubbed_text: str, is_canary: bool, tenant_id: UUID | None = None
+    alert_id: UUID, scrubbed_text: str, is_dev: bool, tenant_id: UUID | None = None
 ) -> None:
-    """Route to DEV bot for canary tenants; OPS bot + assigned-VTR fan-out otherwise.
+    """Route to DEV bot for dev-routed alerts; OPS bot + assigned-VTR fan-out otherwise.
 
-    VT-298 (Cowork DECISION 2 = BOTH): non-canary alerts go to the OPS chat (unchanged,
+    VT-298 (Cowork DECISION 2 = BOTH): non-dev alerts go to the OPS chat (unchanged,
     retry-tracked via telegram_sent_at) AND are pushed to each assigned VTR's VERIFIED
     Telegram chat (best-effort immediate; Fazal: "report to VTR on Telegram immediately").
-    Canary tenants stay DEV-bot-only — NEVER real VTR chats (Cowork canary lock).
+
+    VT-489 (c): ``is_dev`` = canary tenant OR non-prod env (``is_dev_routed``). A
+    dev-routed alert stays DEV-bot-only — NEVER the ViabeOps OPS channel, NEVER real
+    VTR chats — so dev/test volume never pages a real person. On prod this is the
+    prior canary-only behaviour (PROD OPS paging intact).
     """
-    if is_canary:
+    if is_dev:
         bot_token = os.environ.get("TELEGRAM_DEV_BOT_TOKEN", "")
         chat_id = os.environ.get("TELEGRAM_DEV_CHAT_ID", "")
         ok = await send_telegram(bot_token, chat_id, scrubbed_text)
@@ -205,7 +235,11 @@ def dispatch_alert(trigger: Trigger) -> UUID | None:
     text, subject = _format_alert(trigger)
     alert_id = _persist_alert(trigger, text)
 
-    is_canary = is_canary_tenant(trigger.tenant_id)
+    # VT-489 (c): dev-routed = canary tenant OR non-prod env. Dev-routed alerts go
+    # to the DEV bot only, never the ViabeOps OPS channel + never real email — so a
+    # dev/test volume_spike (e.g. 63211ce5 re-drive) never pages Fazal. PROD is
+    # unaffected: on EXPECTED_ENV=prod this equals the prior canary-only behaviour.
+    is_dev = is_dev_routed(trigger.tenant_id)
     force_immediate = trigger.severity == "critical" or _warning_burst_force_immediate(trigger)
 
     # Build a tiny inline-style HTML body for the email path (criticals + bursts).
@@ -217,9 +251,9 @@ def dispatch_alert(trigger: Trigger) -> UUID | None:
     )
 
     async def _runner() -> None:
-        await _dispatch_telegram(alert_id, text, is_canary, trigger.tenant_id)
-        # Canary path NEVER hits real email (Cowork lock).
-        if force_immediate and not is_canary:
+        await _dispatch_telegram(alert_id, text, is_dev, trigger.tenant_id)
+        # Dev-routed path NEVER hits real email (Cowork canary lock + VT-489 env arm).
+        if force_immediate and not is_dev:
             await _dispatch_email(alert_id, subject, html)
 
     try:
@@ -261,12 +295,14 @@ def retry_pending_sends() -> int:
         tenant_id = UUID(str(rd["tenant_id"]))
         text = rd["message_text"]
         severity = rd["severity"]
-        is_canary = is_canary_tenant(tenant_id)
+        # VT-489 (c): retry routing mirrors first-send routing — dev-routed (canary
+        # OR non-prod env) retries via the DEV bot, never the OPS channel/email.
+        is_dev = is_dev_routed(tenant_id)
 
         async def _retry() -> None:
             nonlocal sent_count
             if rd["telegram_sent_at"] is None:
-                if is_canary:
+                if is_dev:
                     bot_token = os.environ.get("TELEGRAM_DEV_BOT_TOKEN", "")
                     chat_id = os.environ.get("TELEGRAM_DEV_CHAT_ID", "")
                 else:
@@ -278,7 +314,7 @@ def retry_pending_sends() -> int:
             if (
                 rd["email_sent_at"] is None
                 and severity == "critical"
-                and not is_canary
+                and not is_dev
             ):
                 api_key = os.environ.get("RESEND_API_KEY", "")
                 from_addr = os.environ.get("RESEND_FROM_EMAIL", "")
@@ -300,5 +336,6 @@ def retry_pending_sends() -> int:
 __all__ = [
     "dispatch_alert",
     "is_canary_tenant",
+    "is_dev_routed",
     "retry_pending_sends",
 ]

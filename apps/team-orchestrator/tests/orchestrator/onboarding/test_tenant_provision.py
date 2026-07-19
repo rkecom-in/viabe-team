@@ -68,11 +68,13 @@ def _row(dsn: str, num: str):
 @_DB
 def test_create_new_then_merge_same_number(db_ctx):
     num = _num()
-    r1 = create_tenant_if_unknown(num, business_name="Asha Store", created_via="whatsapp")
-    assert r1.created is True
-    # Same business_contact → SAME tenant (merge, not new).
+    # VT-408: a NEW number is provisioned ONLY through the verified (OTP+GSTIN) gate.
+    r1 = create_tenant_if_unknown(num, business_name="Asha Store", created_via="whatsapp", verified=True)
+    assert r1.created is True and r1.provisioned is True
+    # Same business_contact → SAME tenant (merge, not new). The KNOWN-number merge path is
+    # UNAFFECTED by VT-408 — it proceeds even unverified (it's an existing verified tenant).
     r2 = create_tenant_if_unknown(num)
-    assert r2.created is False and r2.tenant_id == r1.tenant_id
+    assert r2.created is False and r2.tenant_id == r1.tenant_id and r2.provisioned is True
     # Exactly one row for the number (unique identity enforced).
     rows = _row(db_ctx.dsn, num)
     assert len(rows) == 1 and rows[0]["phase"] == "onboarding"
@@ -82,23 +84,36 @@ def test_create_new_then_merge_same_number(db_ctx):
 @_DB
 def test_owner_contact_optional_and_backfills(db_ctx):
     num = _num()
-    r1 = create_tenant_if_unknown(num)  # no owner_contact
+    r1 = create_tenant_if_unknown(num, verified=True)  # VT-408: gated create, no owner_contact
     assert _row(db_ctx.dsn, num)[0]["owner_contact"] is None  # nullable
     owner = "+9199" + uuid4().int.__str__()[:8]
-    r2 = create_tenant_if_unknown(num, owner_contact=owner)  # backfill
+    r2 = create_tenant_if_unknown(num, owner_contact=owner)  # backfill on a KNOWN number (unverified OK)
     assert r2.tenant_id == r1.tenant_id
     assert _row(db_ctx.dsn, num)[0]["owner_contact"] == owner
 
 
 @_DB
 def test_distinct_numbers_distinct_tenants(db_ctx):
-    a = create_tenant_if_unknown(_num())
-    b = create_tenant_if_unknown(_num())
+    a = create_tenant_if_unknown(_num(), verified=True)
+    b = create_tenant_if_unknown(_num(), verified=True)
     assert a.tenant_id != b.tenant_id and a.created and b.created
 
 
 @_DB
 def test_default_business_name_is_the_number(db_ctx):
     num = _num()
-    create_tenant_if_unknown(num)  # no business_name
+    create_tenant_if_unknown(num, verified=True)  # no business_name
     assert _row(db_ctx.dsn, num)[0]["business_name"] == num  # placeholder
+
+
+@_DB
+def test_vt408_unknown_unverified_number_refused(db_ctx):
+    """VT-408: an UNKNOWN inbound number without a verified GSTIN gets NO tenant — the
+    inbound backdoor is closed. No row is created; provisioned is False."""
+    num = _num()
+    res = create_tenant_if_unknown(num, business_name="Walk-in", created_via="whatsapp")
+    assert res.provisioned is False
+    assert res.created is False
+    assert res.tenant_id is None
+    # And NOTHING was persisted for the number.
+    assert _row(db_ctx.dsn, num) == []

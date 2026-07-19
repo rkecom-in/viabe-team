@@ -1,0 +1,23 @@
+{
+  "name": "i_sheets_shopify_decline_pivot_to_sheets",
+  "domain": "integration",
+  "critical": false,
+  "setup_args": ["--onboarded", "--flow", "ready_asked"],
+  "expected_fail": false,
+  "notes": "The paced post-profile flow's easiest-first offer is always Shopify for a fresh tenant (agent_data_needs.next_best_integration ranks by effort — Shopify=1, Sheets=2, and sales_recovery's plan_requires is identical across both, so effort ASC always picks Shopify first). When the owner explicitly declines Shopify by name and states their data is in a Google Sheet, the system must pivot honestly toward Sheets (never claim Shopify got connected anyway). Setup: `setup --onboarded --flow ready_asked` (mirrors mind_change_integration.json's setup — the readiness ask resolves into the Shopify offer on turn 1) then `script <tenant> i_sheets_shopify_decline_pivot_to_sheets.json`.",
+  "steps": [
+    {
+      "message": "Yes lets connect",
+      "assert_no_silent": true,
+      "note": "Resolves the readiness ask into the easiest-first integration offer (Shopify)."
+    },
+    {
+      "message": "I don't use Shopify, my customer and sales data is all in a Google Sheet instead",
+      "assert_no_silent": true,
+      "assert_not_d1": true,
+      "assert_contains": ["sheet"],
+      "assert_not_contains": ["shopify is connected", "connected your shopify", "shopify store is set up", "i've connected your shopify"],
+      "note": "Mind-change away from the offered Shopify connector toward Sheets (which, unlike Amazon in mind_change_integration.json, IS a real built connector) — expect an honest pivot toward Sheets (e.g. the real authorize_url or the registry's 'reply sheet' instructions), never a fabricated Shopify connection."
+    }
+  ]
+}
