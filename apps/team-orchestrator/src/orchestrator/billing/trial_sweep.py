@@ -11,7 +11,7 @@ VT-365 (Fazal 2026-06-09): NO trial extensions, no money clawback. A trial that
 elapses without an explicit owner `subscribe` simply EXPIRES to `lapsed`
 (dormant, re-subscribable). The old extend/exhaust + clawback paths are removed.
 
-NO LLM (Pillar 1). The owner notify is an INJECTABLE seam — the real owner-WABA
+NO model calls (Pillar 1). The owner notify is an INJECTABLE seam — the real owner-WABA
 send is gate-live (NEEDS-FAZAL: provision the Meta SIDs); the default stub logs.
 Idempotent: expire → `lapsed` (re-scan skips it — scope is phase='trial' only).
 apply_transition is the SOLE phase mutator.
@@ -262,7 +262,7 @@ def _preferred_language(tenant_id: UUID) -> str:
     ``preferred_language ?? language_preference`` RLS read), which returns ``None`` on
     any read failure. We coerce that ``None`` to ``"en"`` here so the registry lookup
     always has a concrete variant to resolve. Lazy-imported (runner pulls in DBOS + the
-    graph) to keep this zero-LLM sweep light; ANY import/read error → ``"en"`` (a
+    graph) to keep this zero-model sweep light; ANY import/read error → ``"en"`` (a
     language-read hiccup must never break the daily sweep)."""
     try:
         from orchestrator.runner import _load_preferred_language
@@ -329,7 +329,7 @@ def _apply_trial_transition(tenant_id: UUID, event: str) -> None:
 def run_trial_evaluation_body(
     now: datetime | None = None, *, notify_fn: NotifyFn | None = None,
 ) -> list[Any]:
-    """Daily trial sweep body. Returns the verdicts acted on. NO LLM."""
+    """Daily trial sweep body. Returns the verdicts acted on. No model calls (Pillar 1)."""
     from orchestrator.billing.trial_evaluator import evaluate_trial
 
     now = now or datetime.now(timezone.utc)

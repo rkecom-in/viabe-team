@@ -731,6 +731,9 @@ def build_supervisor_graph(
         # roster node uniformly (function or compiled sub-graph) — a future lane
         # appended to ROSTER inherits the net with no further wiring.
         node = _wrap_lane_node_exceptions(node, lane=spec.name)
+        # observability:opt-out reason=hook applied conditionally above (spec.wrap_node wraps with
+        # with_state_transition_hook; wrap_node=False specs are compiled sub-graphs whose internal
+        # nodes carry their own hooks) — the AST gate cannot see the loop-level conditional.
         graph.add_node(spec.agent_name, node)
 
     graph.add_node(
