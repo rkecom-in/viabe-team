@@ -56,6 +56,23 @@ def register_all_modules() -> list[str]:
         ).ComplianceToolsModule(),
     ):
         impl = _load()
+        # FULL conformance at boot (Codex finding, 2026-07-19): ``register()`` deliberately stays
+        # permissive (structural validate + tool deny-list only — test fixtures and staged
+        # third-party modules may register incomplete), so a module with a defaulted category/tags/
+        # brief would register fine and just be SILENTLY omitted from the Manager's directory. For
+        # the boot roster that silence is the failure mode: a first-party module missing its
+        # identity card is a wiring bug, not a preference. Run all conformance checks (incl. #10
+        # brief_complete) BEFORE registering and crash boot loudly on the first violation —
+        # register-before-launch fail-closed, same posture as the manifest validate.
+        from orchestrator.agent_framework.conformance import check_module_conformance
+
+        report = check_module_conformance(impl)
+        if not report.passed:
+            first = report.failures[0]
+            raise ModuleRegistrationError(
+                f"boot conformance FAILED for module {report.module_name!r}: "
+                f"check {first.name!r} — {first.detail}"
+            )
         try:
             registered = register_agent(impl)
         except ModuleRegistrationError:

@@ -120,6 +120,15 @@ For a structured, non-raising report (CI gating, diffing compliance over time) u
 | `proposer_gate_readonly` | a proposer's facade raises `CapabilityNotDeclared` on every gated method |
 | `gated_capabilities_serviced` | every declared gated capability has a real facade method (no orphan) |
 | `name_registerable` | non-empty name; registers cleanly into a fresh registry |
+| `required_tools_reachable` | every `tools=(...)` entry exists in the generated tool catalog |
+| `brief_complete` | VT-686 identity card complete: `category` ∈ `AGENT_CATEGORIES`, non-empty `tags`, every `AgentBrief` field filled |
+
+**Conformance vs registration:** `register_agent()` runs only `manifest_valid` + `tool_surface_safe`
++ `role_methods_present` (permissive by design — a staged/incomplete module may register; it is
+silently omitted from the Manager's agent directory until its card is complete). The full 10-check
+suite is enforced in tests (`assert_conforms`) AND at process boot for every first-party module
+(`modules.register_all_modules` raises `ModuleRegistrationError` on the first violation — boot
+fails loudly, never a silently card-less agent).
 
 ---
 
@@ -127,6 +136,9 @@ For a structured, non-raising report (CI gating, diffing compliance over time) u
 
 Import **everything** from `orchestrator.agent_framework` (never a submodule-deep path). The full
 SDK is its `__all__`: `AgentManifest`, `AgentRole`, `Capability` / `GATED_CAPABILITIES` / `is_gated`,
+`AgentBrief` / `AGENT_CATEGORIES` (the VT-686 identity-card taxonomy: `category` must be one of the
+closed `AGENT_CATEGORIES` set; `tags` lowercase free-form; `brief` the five-field `AgentBrief` the
+Manager's agent directory renders),
 `ModuleContext` / `ModuleResult` / `TenantResolutionError`, `GateFacade` / `CapabilityNotDeclared`,
 `ProposerModule` / `ExecutorModule`, `register_agent` / `register_activation_prereqs`,
 `check_module_conformance` / `assert_conforms` (+ `ConformanceReport` / `CheckResult`),

@@ -109,7 +109,7 @@ The shape (see `reference_plugin.py` for the minimal real one):
 
 ```python
 from orchestrator.agent_framework import (
-    AgentManifest, AgentRole, Capability, ModuleContext, ModuleResult, GateFacade,
+    AgentBrief, AgentManifest, AgentRole, Capability, ModuleContext, ModuleResult, GateFacade,
 )
 
 class MyModule:
@@ -118,6 +118,17 @@ class MyModule:
         roles=frozenset({AgentRole.PROPOSER, AgentRole.EXECUTOR}),
         description="...",
         capabilities=frozenset({Capability.READ_CUSTOMER_LEDGER, Capability.REQUEST_CUSTOMER_SEND}),
+        # VT-686 identity card — REQUIRED for a directory-visible agent (conformance #10
+        # brief_complete; also enforced at BOOT for every first-party module):
+        category="Sales",                       # ONE of AGENT_CATEGORIES (closed set)
+        tags=frozenset({"winback", "lapsed"}),  # lowercase, free-form
+        brief=AgentBrief(
+            what_it_does="Wins back lapsed customers with owner-approved campaigns.",
+            actions=("draft_campaign", "arm_approval"),
+            business_activities=("win back lapsed customers",),
+            when_to_use="Route here when the owner asks about lapsed/dormant customers.",
+            limits=("never sends directly — arms the approval gate",),
+        ),
         # optional: prerequisites=AgentPrerequisites(...), tools=(...), entitlement_key="..."
     )
     def propose(self, ctx: ModuleContext, gate: GateFacade) -> ModuleResult: ...   # no side effect
@@ -125,6 +136,14 @@ class MyModule:
         gate.request_customer_send(draft_id, autonomy_level="L2")
         return ModuleResult(role=AgentRole.EXECUTOR, status="sent", work_item_status="sent")
 ```
+
+**Registration vs conformance (know the difference):** `register()` is deliberately permissive —
+it runs the structural manifest validate + the tool deny-list only, so a module with a defaulted
+`category`/`tags`/`brief` still registers; it is just silently omitted from the Manager's agent
+directory. The FULL 10-check suite (incl. `brief_complete`) runs (a) in your tests via
+`assert_conforms`, and (b) at process BOOT for every first-party module (`register_all_modules`
+crashes boot loudly on the first violation). A drop-in module that skips its identity card is
+invisible to the Manager — complete the card.
 
 Rules the contract enforces for you: a gated capability is legal only with the `EXECUTOR` role; the
 module never imports `customer_send`/`twilio` (its only door is the injected `gate`); it never picks its
