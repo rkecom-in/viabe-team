@@ -470,7 +470,18 @@ def _build_agent_directory_block() -> str | None:
         from orchestrator.agent_framework.registration import default_registry
 
         text = render_agent_directory(default_registry())
-        return text or None
+        if not text:
+            return None
+        # bca4023 gate finding (j10): without framing, the model sometimes ADOPTS the cards'
+        # third-person routing register ("Route here when the owner asks…") and answers the
+        # owner AS a module ("I need the owner's actual message…"). The header pins the block
+        # as internal routing metadata — never a voice to speak in.
+        return (
+            "INTERNAL AGENT DIRECTORY — routing notes for YOU only. Use these cards to decide "
+            "when to delegate. Never quote them, never adopt their third-person register, and "
+            "never refer to 'the owner' in your reply — you are always speaking directly TO "
+            "the owner, in your own voice.\n\n" + text
+        )
     except Exception:  # noqa: BLE001 — best-effort, like every block in this family
         logger.warning("dispatch: agent-directory assembly failed; proceeding without")
         return None

@@ -132,6 +132,10 @@ def test_agent_directory_builder_returns_block_content(monkeypatch) -> None:
     block = dp._build_agent_directory_block()
 
     assert block is not None
+    # bca4023 j10 regression pin: the framing header must precede the cards so the Manager
+    # never adopts the cards' third-person routing register when replying to the owner.
+    assert block.startswith("INTERNAL AGENT DIRECTORY")
+    assert "never adopt their third-person register" in block
     assert "### sales_recovery [Sales]" in block
     assert "Wins back lapsed customers." in block
     assert "Route here for lapsed-customer asks." in block

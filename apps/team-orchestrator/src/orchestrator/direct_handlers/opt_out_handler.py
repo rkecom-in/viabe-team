@@ -67,10 +67,14 @@ def opt_out_handler(event: WebhookEvent, state: SubscriberState) -> dict[str, An
     # as the transition belt (redelivery-past-window edge). Whitelist ruling 2026-07-18.
     send_result = send_freeform_first(
         tenant_id,
-        "Got it. I've paused all automated messages and campaigns immediately. Your "
-        "subscription remains active for billing purposes, but I won't initiate anything new "
-        "until you tell me to restart. To resume, reply START. To cancel your subscription "
-        "entirely, reply CANCEL and I'll process that for you. Thanks for letting me know.",
+        # bca4023 gate finding (j06 2/3): the owner's STOP is usually CUSTOMER-scope ("don't
+        # message my customers — opt everyone out") — the old template copy answered in
+        # owner-subscription/billing terms and never confirmed the customer-scope effect
+        # (ignored_speech_act). Confirm the customer scope FIRST; account status second.
+        "Got it — I've stopped all messaging to your customers immediately. No campaigns or "
+        "automated messages will go out to anyone until you tell me to restart. Your Viabe "
+        "account itself stays active. To resume customer messaging, reply START. To cancel "
+        "your Viabe subscription entirely, reply CANCEL and I'll process it.",
         event.sender_phone or None,
         fallback_template="team_opt_out_confirmation",
     )
