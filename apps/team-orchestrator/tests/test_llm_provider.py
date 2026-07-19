@@ -30,7 +30,7 @@ from orchestrator.llm import provider as p  # noqa: E402
 def _clean_llm_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Guarantee unset TEAM_MODEL_* / service-tier / budget / GLM_BASE_URL / XAI_BASE_URL /
     TEAM_ENABLE_WEB_SEARCH env so tests see the built-in defaults, and dummy OPENAI_API_KEY /
-    GOOGLE_API_KEY / GLM_API_KEY / XAI_API_KEY so the ChatOpenAI / ChatGoogleGenerativeAI / GLM /
+    GEMINI_API_KEY / GLM_API_KEY / XAI_API_KEY so the ChatOpenAI / ChatGoogleGenerativeAI / GLM /
     Grok ctors never fail on a missing credential."""
     for var in (
         "TEAM_MODEL_ROUTINE",
@@ -46,7 +46,7 @@ def _clean_llm_env(monkeypatch: pytest.MonkeyPatch) -> None:
     ):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test-not-real")
-    monkeypatch.setenv("GOOGLE_API_KEY", "gk-test-not-real")
+    monkeypatch.setenv("GEMINI_API_KEY", "gk-test-not-real")
     monkeypatch.setenv("GLM_API_KEY", "glm-test-not-real")
     monkeypatch.setenv("XAI_API_KEY", "xai-test-not-real")
 

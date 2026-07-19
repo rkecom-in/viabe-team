@@ -53,7 +53,7 @@ Provider is inferred from the id prefix (`claude-*`→anthropic, `gpt-*`→opena
 | ------------------ | ------------------------------------------------------------- | -------------------------- |
 | `ANTHROPIC_API_KEY`| any `claude-*` call                                           | working (app runs on it)   |
 | `OPENAI_API_KEY`   | any `gpt-5.6-*` call                                          | canary-proven on dev       |
-| `GOOGLE_API_KEY`   | any `gemini-*` call                                           | needed for the Gemini canary |
+| `GEMINI_API_KEY`   | any `gemini-*` call (explicit pass; renamed from GOOGLE_API_KEY, Fazal 2026-07-19) | needed for the Gemini canary |
 | `GLM_API_KEY`      | `glm-5.2` call                                               | needed for the GLM canary  |
 | `XAI_API_KEY`      | any `grok-*` call + web/X-search                             | needed for the Grok canary |
 | `GLM_BASE_URL`     | GLM endpoint. **Single self-host switch** — point at a self-hosted vLLM/sglang OpenAI-compatible endpoint, zero code change. | default `https://api.z.ai/api/paas/v4/` |
