@@ -6,7 +6,7 @@
 > status-changing event, same moment as the to-cowork signal). Cowork audits (Rule #14).
 > Bar lines are Fazal's — never edited without a ruling; Now/Gate/status lines are CC's.
 > Statuses: MET · MET–INCIDENT OPEN · IN PROGRESS · AT RISK · PENDING · HELD/PARKED.
-> Last updated: 2026-07-19 (promotion called — PR #526 open) · prev: 2026-07-18 20:05 IST · dev d2340ed · VT-683 P1 LANDED (session-window truth + 3 reactive handlers freeform-first; template surface shrinking to the whitelist) · P2 awaits Fazal point A (queued-approval timeout at DELIVERY).
+> Last updated: 2026-07-19 (**PROMOTION GATE GREEN on aee9021 — Tier-1=0, Tier-2 100%, fully-acceptable 30/30, best full pack yet**) · prev: gate iter-2 · dev aee9021 · Fix chain bca4023→green: j10 directory framing header (462fe33) + j06 customer-scope-first opt-out copy (462fe33) + j06 CANCEL-promise removal (b78f301) + VT-687 walker answered-ack & broad-answer-resolves-clarify (aee9021). **PR #526 ready — merge is Fazal's button.** Fazal pinged (Telegram).
 
 ## O0 · NORTH STAR — Claude Code for Business — IN PROGRESS (the objective all others compose into)
 - Bar (Fazal, ratified 2026-07-01 — Track C first-class): an owner hands the Team-Manager a
@@ -97,11 +97,15 @@
 - Bar: prod Mumbai live (VT-231), framework flags promoted, billing ₹5000/agent + per-agent
   trials, Meta template set approved, prod failed-workflow ops (VT-634 — VT-668 is its dev
   seed), signup exposure gate, ownership VTR gate.
-- Now: **PROMOTION CALLED (Fazal "promote", 2026-07-19) — PR #526 OPEN (dev→main, 781
-  commits, the measured gate-green snapshot).** Merge = Fazal's button (Pillar 7). Prod env
-  pre-flight run: DATABASE_URL/EXPECTED_ENV confirmed; remaining critical names need Fazal's
-  console eyeball (sealed vars read unset via injection). Post-merge: migrations auto-apply →
-  parity check → Fazal authorizes framework flags → prod smoke.
+- Now: **PROMOTION CALLED (Fazal "promote", 2026-07-19) — PR #526 OPEN (dev→main). MERGE
+  HELD: the bca4023 promotion gate came back RED (3 Tier-1 — j06 ×2 opt-out confirmation
+  answered in owner-subscription terms without confirming the customer-scope stop; j10 ×1
+  Manager adopted the VT-686 directory's third-person routing register). Both fixed in
+  462fe33 (customer-scope-first copy + INTERNAL framing header); full pack ×3 re-running.**
+  On green: Fazal merges (Pillar 7). Prod env pre-flight run: DATABASE_URL/EXPECTED_ENV
+  confirmed; remaining critical names need Fazal's console eyeball (sealed vars read unset
+  via injection). Post-merge: migrations auto-apply → parity check → Fazal authorizes
+  framework flags → prod smoke.
 
 ## O8 · Learning loop & moat (Track C) — PARKED (post-trust-floor)
 - Bar: the Manager learns per-tenant from the audit log; KG/RAG wired; per-capability
