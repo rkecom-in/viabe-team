@@ -524,6 +524,25 @@ def _prefix_defer_ack(reply: dict[str, Any]) -> dict[str, Any]:
     return reply
 
 
+# VT-687 — the answered-ack twin of _DEFER_ACK: when the walker RECORDS an answer and moves to the
+# next question, say so. A bare next-question after a substantive owner answer reads as "you ignored
+# me" (the j05 cold-pivot breaker on turn-brain-fallback turns). Deliberately short + generic — the
+# walker is the no-LLM path, so it cannot paraphrase the answer back; "noted that down" is honest
+# for every recorded value.
+_ANSWER_ACK = {
+    "en": "Got it — noted that down.",
+    "hi": "ठीक है — नोट कर लिया।",
+}
+
+
+def _prefix_answer_ack(reply: dict[str, Any]) -> dict[str, Any]:
+    """Prefix the deterministic answered-ack to a next-question reply (both locales) — same shape as
+    ``_prefix_defer_ack``."""
+    reply["reply_en"] = f"{_ANSWER_ACK['en']} {reply.get('reply_en', '')}".strip()
+    reply["reply_hi"] = f"{_ANSWER_ACK['hi']} {reply.get('reply_hi', '')}".strip()
+    return reply
+
+
 # --- VT-660: honest journey completion — gate on profile_collection_complete, not queue-exhaustion ---
 #
 # handle_reply historically declared the journey DONE on QUEUE-EXHAUSTION (``_current is None``). That
@@ -695,6 +714,10 @@ def handle_reply(
         # DF7(a) — a bare affirmation to a gap question carries no value → re-present, don't record.
         return _reprompt_gap_after_affirm(q)
 
+    # VT-687 — did THIS turn record a real answer? Drives the deterministic answered-ack prefix on
+    # the next-question reply below (the walker's cold-pivot defect: a substantive answer was
+    # recorded, then the next question presented BARE — judge reads "ignored what I just said").
+    recorded_answer = False
     if is_skip:
         if field and field not in skipped:
             skipped.append(field)
@@ -720,6 +743,7 @@ def handle_reply(
         value = q.get("draft_value") if (toks & _YES) else body.strip()
         if field and value not in (None, ""):
             answers[field] = value
+            recorded_answer = True
             # DF7(b) — a business_type CONFIRM is PROMOTED to canonical ONLY when the value is a valid
             # taxonomy key (CL-390 never-assert; mirrors _apply_turn_plan / confirm_field_answer). An
             # off-taxonomy free-text correction is RECORDED as the journey answer and advanced past
@@ -739,6 +763,7 @@ def handle_reply(
     else:  # gap question — the body IS the value
         if field and body.strip():
             answers[field] = body.strip()
+            recorded_answer = True
 
     # VT-601 (VT-598 opus-judge finding, repeat_question_guard): a DESCRIPTIVE
     # business_type/category answer ("Probe Traders, a hardware shop in Pune")
@@ -788,6 +813,13 @@ def handle_reply(
     if is_skip:
         # R9 item 1 — acknowledge the skip before the next ask (never on the completion closer above).
         reply = _prefix_defer_ack(reply)
+    elif recorded_answer:
+        # VT-687 — acknowledge the RECORDED answer before the next ask (symmetric with the skip
+        # defer-ack; never on the completion closer). Without this, a turn-brain-fallback turn
+        # presents the next template question cold after the owner just gave substantive info —
+        # the measured j05 ignored_speech_act/cold-pivot breaker (2/3 on the b78f301 re-drive).
+        # Deterministic; holds with the LLM down (that is exactly when this path runs).
+        reply = _prefix_answer_ack(reply)
     return reply
 
 
