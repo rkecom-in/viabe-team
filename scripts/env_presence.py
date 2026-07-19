@@ -98,7 +98,16 @@ def _resolve(spec: str, environment: str | None, service: str | None) -> str | N
             print("env_presence: railway:* spec needs --environment and --service", file=sys.stderr)
             raise SystemExit(2)
         return _railway_value(environment, service, rest)
-    print(f"env_presence: unknown spec kind {kind!r} (use env:/railway:/literal:)", file=sys.stderr)
+    if kind.startswith("railway@"):
+        # Cross-environment spec ``railway@ENV:NAME`` — compare a var ACROSS Railway envs (the
+        # dev↔prod parity audit) in one ``equal`` call. Same guarantee as ``railway:``: the value
+        # is resolved internally and only the MATCH/MISMATCH bit ever escapes.
+        env = kind.split("@", 1)[1]
+        if not (env and service):
+            print("env_presence: railway@ENV:* spec needs an env in the spec and --service", file=sys.stderr)
+            raise SystemExit(2)
+        return _railway_value(env, service, rest)
+    print(f"env_presence: unknown spec kind {kind!r} (use env:/railway:/railway@ENV:/literal:)", file=sys.stderr)
     raise SystemExit(2)
 
 
