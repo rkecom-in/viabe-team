@@ -26,8 +26,8 @@ GPT-5.6 facts (OpenAI docs, 2026-07-13):
     for gpt-*, so no temperature is sent (same guard that keeps sonnet/opus off the deprecated param).
 
 Gemini facts (langchain-google-genai==4.2.5, SDK-verified 2026-07-13):
-  * Constructed via ``ChatGoogleGenerativeAI``; API key is ``GOOGLE_API_KEY`` from the env (the
-    integration's default — no new var name). ``max_tokens`` maps to the ctor's ``max_output_tokens``.
+  * Constructed via ``ChatGoogleGenerativeAI``; API key is ``GEMINI_API_KEY``, passed explicitly
+    (Fazal 2026-07-19 rename — GOOGLE_API_KEY left free for future Google services). ``max_tokens`` maps to the ctor's ``max_output_tokens``.
   * Gemini ACCEPTS ``temperature`` — ``llm_config.sampling_kwargs`` pins ``{"temperature": 0.0}`` for
     gemini-* (determinism posture, same as haiku).
   * flex/batch service tiers are NOT wired for google in v1 — TEAM_OPENAI_SERVICE_TIER is
@@ -421,14 +421,20 @@ def _build_google_chat_model(
 ) -> BaseChatModel:
     from langchain_google_genai import ChatGoogleGenerativeAI
 
-    # API key: GOOGLE_API_KEY from the env — langchain-google-genai's default (do NOT invent a new
-    # var name), so it is NOT passed explicitly here. max_tokens maps to the ctor's
-    # ``max_output_tokens`` (langchain-google-genai==4.2.5; ``max_tokens`` is its alias). Gemini
-    # ACCEPTS temperature, so sampling_kwargs pins {"temperature": 0.0} for gemini-* (determinism
-    # posture, same as haiku). Service tier: Gemini flex/batch are NOT wired in v1 — google calls
-    # always record service_tier='standard' (the ledger's default; the callback passes no tier).
+    # API key: GEMINI_API_KEY, passed EXPLICITLY (Fazal 2026-07-19: the var is the Gemini LLM key
+    # only — GOOGLE_API_KEY stays free for future Google services like Maps; supersedes the old
+    # "use the library default env name" comment). langchain-google-genai would otherwise read
+    # GOOGLE_API_KEY itself, so the rename REQUIRES the explicit pass (``google_api_key`` field,
+    # alias ``api_key`` — verified against the installed SDK). Clean cut, no old-name fallback:
+    # the key is dormant (no model tier maps to gemini-*) and one canonical NAME is the standing
+    # rule. max_tokens maps to the ctor's ``max_output_tokens`` (langchain-google-genai==4.2.5;
+    # ``max_tokens`` is its alias). Gemini ACCEPTS temperature, so sampling_kwargs pins
+    # {"temperature": 0.0} for gemini-* (determinism posture, same as haiku). Service tier: Gemini
+    # flex/batch are NOT wired in v1 — google calls always record service_tier='standard' (the
+    # ledger's default; the callback passes no tier).
     return ChatGoogleGenerativeAI(  # type: ignore[call-arg]
         model=model_id,
+        google_api_key=os.environ.get("GEMINI_API_KEY") or None,
         max_output_tokens=max_tokens,
         callbacks=callbacks,
         **sampling_kwargs(model_id),

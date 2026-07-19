@@ -48,7 +48,7 @@ def _search_env(monkeypatch: pytest.MonkeyPatch) -> None:
     ):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test-not-real")
-    monkeypatch.setenv("GOOGLE_API_KEY", "gk-test-not-real")
+    monkeypatch.setenv("GEMINI_API_KEY", "gk-test-not-real")
     monkeypatch.setenv("GLM_API_KEY", "glm-test-not-real")
     monkeypatch.setenv("XAI_API_KEY", "xai-test-not-real")
     monkeypatch.setenv("TEAM_ENABLE_WEB_SEARCH", "1")
