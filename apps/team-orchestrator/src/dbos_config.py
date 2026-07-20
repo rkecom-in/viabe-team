@@ -120,10 +120,10 @@ def launch_dbos() -> None:
 
     database_url = get_database_url()
 
-    # VT-171 hot-fix (CL-56): configure Logfire BEFORE DBOS launch so the
-    # OTel exporter env vars (OTEL_EXPORTER_OTLP_ENDPOINT +
-    # OTEL_EXPORTER_OTLP_HEADERS) are set when DBOS starts emitting
-    # workflow + step spans. No-op when LOGFIRE_TOKEN is unset.
+    # VT-690 (was VT-171/CL-56): configure OTel tracing → Honeycomb BEFORE DBOS launch, so the
+    # global TracerProvider (with the Honeycomb span processor) is registered when DBOS starts
+    # emitting workflow + step spans and its OTel exporter picks it up. No-op when
+    # HONEYCOMB_API_KEY is unset (graceful — no spans, pipeline runs).
     from orchestrator.observability.logfire import configure_logfire
 
     configure_logfire()
