@@ -1,29 +1,37 @@
-"""Pydantic Logfire client + tracing helpers (VT-171, hot-fix CL-56).
+"""OpenTelemetry tracing → Honeycomb EU (VT-690; supersedes the Logfire-SaaS backend of VT-171/CL-56).
 
-Replaces VT-101's LangSmith integration. CL-56 (Standing 2026-05-16) directs
-all OTel span emission to Logfire (EU project). The redactor seam from
-VT-104 is preserved byte-identical — only the sink backend changes.
+We KEEP the Pydantic ``logfire`` LIBRARY (it is free/OSS and has the best auto-instrumentation —
+``instrument_anthropic`` captures every Claude call's full prompt→response, the agent's thinking
+I/O) but STOP sending to the paid Logfire SaaS. ``configure`` runs with ``send_to_logfire=False``
+and an ``additional_span_processors`` OTLP exporter pointed at Honeycomb's EU ingest — so every
+span (DBOS workflow/step, app spans, LLM I/O, Pydantic validation) lands in Honeycomb, at zero
+vendor cost. The module + function names stay ``logfire`` / ``configure_logfire`` to avoid a
+tree-wide import churn; the BACKEND is Honeycomb.
 
-Pillar 1 — orchestrator generates ``run_id`` (UUID v4) at entry and threads
-it down. This module surfaces ``run_id`` as a span attribute so a single
-value links every span end-to-end.
+Enable-switch: presence of ``HONEYCOMB_API_KEY`` (the Ingest Key — Key ID + Key Secret concatenated,
+no separator, per Honeycomb's OTLP contract). Absent → graceful no-op (spans dropped, pipeline
+runs). Different key VALUE per env (dev key → dev Honeycomb Environment, prod key → prod), same
+NAME — that keeps dev/prod traces cleanly separated (the mistake the Logfire config had).
 
-Pillar 8 — one tracing namespace. ``run_id`` is the only identifier this
-module accepts.
+EU region (DPDP residency, carried over from the Logfire EU choice): the default OTLP endpoint is
+``https://api.eu1.honeycomb.io``. Override via ``OTEL_EXPORTER_OTLP_ENDPOINT`` if the residency
+posture changes. Dataset is DERIVED from ``service.name`` (Environments & Services mode) — no
+dataset env needed.
 
-Graceful degradation — every span creation is wrapped in try/except.
-Failure logs to stderr; never propagates. A Logfire ingest outage cannot
-kill the pipeline (regression contract from VT-101 preserved).
+Pillar 1 — orchestrator generates ``run_id`` (UUID v4) at entry and threads it down; surfaced as a
+span attribute so one value links every span end-to-end. Pillar 8 — one tracing namespace.
 
-DBOS OTLP plumbing (Q3 verdict: env-var driven). :func:`configure_logfire`
-programmatically exports ``OTEL_EXPORTER_OTLP_ENDPOINT`` +
-``OTEL_EXPORTER_OTLP_HEADERS`` from ``LOGFIRE_TOKEN`` BEFORE
-``launch_dbos()`` runs. DBOS's OTel exporter picks up the env vars at
-startup; survives DBOS SDK version drift (no DBOSConfig kwarg coupling).
+Graceful degradation — every span creation is wrapped in try/except; failure logs to stderr, never
+propagates. A Honeycomb ingest outage cannot kill the pipeline (regression contract from VT-101).
 
-EU region (Fazal-set 2026-05-26) — ``LOGFIRE_BASE_URL`` defaults to
-``https://logfire-eu.pydantic.dev``. Override via env when DPDP / data
-residency posture changes.
+DBOS spans: ``logfire.configure`` registers the global OTel TracerProvider (with our Honeycomb
+processor attached); DBOS's OTel exporter picks up that global provider, so DBOS workflow/step spans
+route to Honeycomb transparently — no ``OTEL_EXPORTER_OTLP_*`` env coupling.
+
+Content policy (Fazal 2026-07-21): full LLM I/O + business content ships (the whole point is to see
+what the agent read + decided). ``logfire``'s DEFAULT scrubbing still redacts secret-shaped fields
+(our own API keys/tokens never land in a span); the app's ``redact_for_otel_span`` still runs on the
+explicit app-span attributes below. Customer business content stays visible under EU residency.
 """
 
 from __future__ import annotations
@@ -42,46 +50,46 @@ P = ParamSpec("P")
 R = TypeVar("R")
 
 
-_DEFAULT_BASE_URL = "https://logfire-eu.pydantic.dev"
-_DEFAULT_PROJECT = "viabe-team-dev"
+# VT-690 — Honeycomb EU OTLP HTTP ingest (dataset derived from service.name; no dataset env).
+_HONEYCOMB_EU_ENDPOINT = "https://api.eu1.honeycomb.io"
 _DEFAULT_SERVICE = "team-orchestrator"
 
 _configured: bool = False
 
 
 def get_project_name() -> str:
-    """Return the Logfire project from ``LOGFIRE_PROJECT`` env (default ``viabe-team-dev``)."""
-    return os.environ.get("LOGFIRE_PROJECT", _DEFAULT_PROJECT)
+    """Return the Honeycomb service/dataset name (``OTEL_SERVICE_NAME``, default the service).
+
+    Modern Honeycomb (Environments & Services) derives the dataset from ``service.name``; this is
+    that name. Retained under the historical function name for the call sites that display it.
+    """
+    return os.environ.get("OTEL_SERVICE_NAME", _DEFAULT_SERVICE)
 
 
 def is_enabled() -> bool:
-    """Logfire ingestion requires ``LOGFIRE_TOKEN``.
+    """Tracing requires ``HONEYCOMB_API_KEY`` (VT-690; was ``LOGFIRE_TOKEN``).
 
-    Absence is a graceful no-op — wrapped functions still execute, just
-    without spans. CI runs without the token; the graceful-degradation
-    test proves the pipeline survives.
+    Absence is a graceful no-op — wrapped functions still execute, just without spans. CI + any env
+    lacking the key runs span-free; the graceful-degradation test proves the pipeline survives.
     """
-    return bool(os.environ.get("LOGFIRE_TOKEN"))
+    return bool(os.environ.get("HONEYCOMB_API_KEY"))
 
 
 def configure_logfire() -> bool:
-    """Idempotent Logfire setup. Returns True iff configured (token present).
+    """Idempotent tracing setup → Honeycomb EU (VT-690). Returns True iff configured (key present).
 
-    Side effects (when token present):
-      1. Programmatically exports ``OTEL_EXPORTER_OTLP_ENDPOINT`` +
-         ``OTEL_EXPORTER_OTLP_HEADERS`` so DBOS's OTel exporter picks up
-         the Logfire EU endpoint at ``launch_dbos()`` (Q3 contract).
-      2. Calls ``logfire.configure`` with EU base URL + service name.
-      3. Calls ``logfire.instrument_anthropic`` (catches both the direct
-         ``anthropic.Anthropic`` SDK calls and LangChain's
-         ``langchain_anthropic.ChatAnthropic`` which delegates through the
-         same SDK under the hood — verified at PICKUP per Cond 1).
-      4. Calls ``logfire.instrument_pydantic`` for pydantic model
-         instrumentation.
+    Side effects (when ``HONEYCOMB_API_KEY`` present):
+      1. Builds an OTLP-HTTP span exporter to Honeycomb EU (``…/v1/traces``, ``x-honeycomb-team``
+         header = the concatenated Ingest Key).
+      2. Calls ``logfire.configure`` with ``send_to_logfire=False`` (the paid SaaS is OFF — free)
+         and that exporter as an ``additional_span_processor``. This registers the global OTel
+         TracerProvider, so DBOS's OTel exporter routes workflow/step spans to Honeycomb too.
+      3. Calls ``logfire.instrument_anthropic`` (direct ``anthropic.Anthropic`` AND LangChain's
+         ``ChatAnthropic``, which delegates through the same SDK) — the LLM prompt→response capture.
+      4. Calls ``logfire.instrument_pydantic`` for model-validation spans.
 
-    Bypass: not possible from caller code; ``configure_logfire`` is the
-    only configuration entry point. Missing token → stderr breadcrumb +
-    no-op (graceful degradation, regression contract from VT-101).
+    Bypass: not possible from caller code; this is the only configuration entry point. Missing key
+    → stderr breadcrumb + no-op (graceful degradation, regression contract from VT-101).
     """
     global _configured
     if _configured:
@@ -89,52 +97,52 @@ def configure_logfire() -> bool:
 
     if not is_enabled():
         print(
-            "[observability] LOGFIRE_TOKEN unset; Logfire disabled (no spans emitted)",
+            "[observability] HONEYCOMB_API_KEY unset; tracing disabled (no spans emitted)",
             file=sys.stderr,
         )
         return False
 
-    base_url = os.environ.get("LOGFIRE_BASE_URL", _DEFAULT_BASE_URL)
-    token = os.environ["LOGFIRE_TOKEN"]
+    api_key = os.environ["HONEYCOMB_API_KEY"]
+    endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", _HONEYCOMB_EU_ENDPOINT).rstrip("/")
     service = os.environ.get("OTEL_SERVICE_NAME", _DEFAULT_SERVICE)
 
     try:
         import logfire
-        from logfire import AdvancedOptions
+        from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+        from opentelemetry.sdk.trace.export import BatchSpanProcessor
     except ImportError as exc:
         print(
-            f"[observability] logfire import failed: {type(exc).__name__}: {exc}",
+            f"[observability] tracing import failed: {type(exc).__name__}: {exc}",
             file=sys.stderr,
         )
         return False
 
     try:
+        exporter = OTLPSpanExporter(
+            endpoint=f"{endpoint}/v1/traces",
+            headers={"x-honeycomb-team": api_key},
+        )
         logfire.configure(
             service_name=service,
-            token=token,
-            advanced=AdvancedOptions(base_url=base_url),
+            # The paid Logfire SaaS is OFF — we keep only the logfire LIBRARY (free, best-in-class
+            # auto-instrumentation) and export spans to Honeycomb via the processor below.
+            send_to_logfire=False,
+            additional_span_processors=[BatchSpanProcessor(exporter)],
+            # logfire's DEFAULT scrubbing stays ON — it redacts secret-shaped fields so our OWN
+            # API keys/tokens never land in a span; business content (the agent's I/O) stays visible.
         )
     except Exception as exc:  # noqa: BLE001 - graceful degradation
         print(
-            f"[observability] logfire.configure failed: {type(exc).__name__}: {exc}",
+            f"[observability] tracing configure failed: {type(exc).__name__}: {exc}",
             file=sys.stderr,
         )
         return False
 
-    # DBOS OTLP wiring — Logfire registers itself as the global
-    # OpenTelemetry tracer provider during configure(). DBOS's OTel
-    # exporter, when enabled, picks up the global provider and routes
-    # spans through Logfire transparently. We avoid setting
-    # OTEL_EXPORTER_OTLP_ENDPOINT / _HEADERS here because the env-var
-    # path would auto-register a SECOND exporter alongside Logfire's,
-    # and the two compete (Logfire's token-derived endpoint vs our
-    # AdvancedOptions(base_url) override). Single-provider routing is
-    # the simpler invariant. If DBOS's OTel exporter requires explicit
-    # endpoint env vars on some installed dbos version, that wiring
-    # ships as a follow-up VT row with on-the-wire verification.
+    # DBOS spans: logfire.configure registered the global OTel TracerProvider (with our Honeycomb
+    # BatchSpanProcessor attached). DBOS's OTel exporter picks up that global provider and routes
+    # workflow/step spans to Honeycomb transparently — no OTEL_EXPORTER_OTLP_* env coupling.
 
-    # First-party instrumentations. Each wrapped so a single failure
-    # doesn't take the whole observability layer down.
+    # First-party instrumentations. Each wrapped so a single failure doesn't take the layer down.
     for instrument_name in ("instrument_anthropic", "instrument_pydantic"):
         instrument = getattr(logfire, instrument_name, None)
         if instrument is None:
