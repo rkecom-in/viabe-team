@@ -15,6 +15,7 @@ close the wire-level proof.
 from __future__ import annotations
 
 import time
+from typing import Any
 from uuid import uuid4
 
 
@@ -36,15 +37,53 @@ def main() -> int:
     with logfire.span("vt690_honeycomb_canary", vt690_canary_marker=marker) as span:
         span.set_attribute("note", "VT-690 Honeycomb EU export proof — synthetic, no customer data")
         time.sleep(0.05)
+    logfire.force_flush()  # best-effort async flush of the app path (return value is unreliable)
 
-    # BatchSpanProcessor exports async; force_flush blocks until the batch is sent (or times out).
-    flushed = logfire.force_flush()
-    print(f"[{'PASS' if flushed else 'FAIL'}] span emitted + force_flush -> {flushed}")
+    # AUTHORITATIVE check: build one span via a SimpleSpanProcessor (synchronous) whose exporter is
+    # the SAME Honeycomb OTLP exporter the app uses, and read the actual SpanExportResult. This is a
+    # definitive yes/no on "did Honeycomb ACCEPT the span" — no reliance on force_flush's return.
+    import os
+
+    from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor, SpanExportResult
+
+    endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "https://api.eu1.honeycomb.io").rstrip("/")
+    inner = OTLPSpanExporter(
+        endpoint=f"{endpoint}/v1/traces",
+        headers={"x-honeycomb-team": os.environ["HONEYCOMB_API_KEY"]},
+    )
+    results: list[Any] = []
+
+    class _Capture:
+        def export(self, spans: Any) -> Any:
+            r = inner.export(spans)
+            results.append(r)
+            return r
+
+        def shutdown(self) -> Any:
+            return inner.shutdown()
+
+        def force_flush(self, timeout_millis: int = 30000) -> bool:
+            return inner.force_flush(timeout_millis)
+
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(_Capture()))
+    tracer = provider.get_tracer("vt690-canary")
+    with tracer.start_as_current_span("vt690_honeycomb_direct") as sp:
+        sp.set_attribute("vt690_canary_marker", marker)
+    provider.force_flush()
+    provider.shutdown()
+
+    accepted = bool(results) and results[-1] == SpanExportResult.SUCCESS
+    print(f"[{'PASS' if accepted else 'FAIL'}] direct OTLP export -> "
+          f"{results[-1] if results else 'no result'}")
     print(f"  marker attribute: vt690_canary_marker={marker}")
-    print("  -> confirm this marker appears in Honeycomb EU (service 'team-orchestrator') to close "
-          "the wire proof")
+    if accepted:
+        print("  Honeycomb ACCEPTED the span (HTTP 2xx). Confirm the marker in Honeycomb EU "
+              "(service 'team-orchestrator') to eyeball the data.")
     obs.shutdown()
-    return 0 if flushed else 1
+    return 0 if accepted else 1
 
 
 if __name__ == "__main__":
