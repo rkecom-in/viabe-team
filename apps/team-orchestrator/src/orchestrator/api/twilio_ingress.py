@@ -26,6 +26,7 @@ from orchestrator.error_router import route_failure
 from orchestrator.failures import FailureRecord, FailureType
 from orchestrator.graph import get_pool
 from orchestrator.integrations.customer_inbound import customer_inbound_run
+from orchestrator.onboarding.whatsapp_signup import whatsapp_signup_run
 from orchestrator.privacy.consent import record_consent
 from orchestrator.runner import webhook_pipeline_run
 from orchestrator.utils.phone_token import hash_phone
@@ -38,6 +39,10 @@ _PER_TENANT_LIMIT = 30
 _WORKSPACE_LIMIT = 500
 # All-zeros sentinel tenant_id for the workspace-wide bucket (see migration 013).
 _WORKSPACE_SENTINEL = "00000000-0000-0000-0000-000000000000"
+# VT-691 — dedicated sentinel bucket for unknown-sender SIGNUP prompts (any number on earth can
+# hit this path, so it gets its own, much tighter workspace-wide budget than owner traffic).
+_SIGNUP_SENTINEL = "00000000-0000-0000-0000-000000000001"
+_SIGNUP_WORKSPACE_LIMIT = 10  # consent-flow starts per minute, workspace-wide
 
 
 class TwilioIngressBody(BaseModel):
@@ -222,6 +227,19 @@ def _within_rate_limits(tenant_id: str) -> bool:
         return _bump_bucket(conn, _WORKSPACE_SENTINEL, _WORKSPACE_LIMIT)
 
 
+def _within_signup_rate_limit() -> bool:
+    """VT-691 — the unknown-sender signup budget (10/min workspace-wide, own sentinel bucket).
+    Per-number cooldown/idempotency lives in whatsapp_signup_sessions; this is the coarse
+    transport-level flood valve. Fail-CLOSED: an unreadable bucket refuses the prompt (an
+    unknown number never has a delivery guarantee to protect)."""
+    try:
+        with get_pool().connection() as conn:
+            return _bump_bucket(conn, _SIGNUP_SENTINEL, _SIGNUP_WORKSPACE_LIMIT)
+    except Exception:  # noqa: BLE001 — fail-closed on the abuse valve
+        logger.warning("twilio-ingress: signup rate-bucket read failed (fail-closed)")
+        return False
+
+
 @router.post("/api/orchestrator/twilio-ingress")
 def twilio_ingress(
     body: TwilioIngressBody,
@@ -280,6 +298,41 @@ def twilio_ingress(
                         str(fields.get("Body", "")),
                     )
                 return {"workflow_id": workflow_id, "reason": _ingress_reason(prior)}
+            # VT-691 — WhatsApp-initiated signup: an unknown sender BECOMES a signup, behind
+            # ENABLE_WHATSAPP_SIGNUP (default OFF → the unknown_sender fall-through below is
+            # byte-identical to today). Transport-only here (Pillar 1): flag + rate gate, then
+            # hand to the durable workflow — consent CLASSIFICATION never runs in this endpoint.
+            # SetWorkflowID(wa_signup_{sid}) makes a Twilio redelivery a no-op replay.
+            # ``customer_tenant is None`` is LOAD-BEARING (adversarial-verify finding B): a
+            # message addressed TO a live business WABA is that business's CUSTOMER — when the
+            # branch above declines it (e.g. the tenant is rate-limited), it must fall through
+            # to the silent drop, NEVER into a Viabe signup solicitation of a third party's
+            # customer (whose new tenant would then cross-route their future messages).
+            from orchestrator.feature_flags import whatsapp_signup_enabled
+
+            if whatsapp_signup_enabled() and from_phone and customer_tenant is None:
+                if _within_signup_rate_limit():
+                    # whatsapp_signup_run is imported at module top (register-before-launch —
+                    # the customer_inbound_run pattern; a lazily-registered workflow would land
+                    # after app_version is hashed, the VT-464 recovery hazard).
+                    workflow_id = f"wa_signup_{message_sid}"
+                    prior = DBOS.get_workflow_status(workflow_id)
+                    with SetWorkflowID(workflow_id):
+                        DBOS.start_workflow(
+                            whatsapp_signup_run,
+                            from_phone,
+                            str(fields.get("Body", "")),
+                            message_sid,
+                        )
+                    logger.info(
+                        "twilio-ingress: whatsapp_signup from=%s sid=%s",
+                        hash_phone(from_phone), message_sid,
+                    )
+                    return {"workflow_id": workflow_id, "reason": _ingress_reason(prior)}
+                logger.warning(
+                    "twilio-ingress: whatsapp_signup rate_limit_exceeded sid=%s", message_sid
+                )
+                return {"workflow_id": None, "reason": "rate_limit_exceeded"}
             logger.info(
                 "twilio-ingress: unknown_sender from=%s sid=%s",
                 hash_phone(from_phone) if from_phone else "<empty>",

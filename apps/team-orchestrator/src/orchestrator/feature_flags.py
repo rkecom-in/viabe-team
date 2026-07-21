@@ -32,3 +32,11 @@ def llm_discovery_enabled() -> bool:
     returned GSTINs are NEVER trusted — they flow into the existing pick → Sandbox GST verify, which
     stays the sole authoritative gate (the leg cannot weaken or bypass it)."""
     return _on("ENABLE_LLM_DISCOVERY")
+
+
+def whatsapp_signup_enabled() -> bool:
+    """VT-691 — WhatsApp-initiated signup: an unknown_sender inbound becomes a consent-gated
+    signup flow (whatsapp_signup_run). Default OFF — the unknown_sender drop stays byte-identical
+    until this is dev-proven; distinct from team-web's ENABLE_PUBLIC_SIGNUP (the page front door).
+    Prod enablement is a Fazal call (consent/legal-adjacent)."""
+    return _on("ENABLE_WHATSAPP_SIGNUP")
