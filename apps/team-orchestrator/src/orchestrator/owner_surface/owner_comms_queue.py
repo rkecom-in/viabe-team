@@ -141,6 +141,49 @@ def mark_delivered(
         own.execute(sql, params)
 
 
+def has_queued_task_ref(tenant_id: UUID | str, task_id: str, *, conn: Any = None) -> bool:
+    """True iff a still-queued item already references this manager_task (the task_outcome
+    deferred-enqueue dedup guard — a settle replay must not queue the same outcome twice)."""
+    sql = (
+        "SELECT 1 FROM owner_comms_queue "
+        "WHERE tenant_id = %s AND status = 'queued' "
+        "  AND payload->>'manager_task_id' = %s LIMIT 1"
+    )
+    params = (str(tenant_id), str(task_id))
+    if conn is not None:
+        return conn.execute(sql, params).fetchone() is not None
+    from orchestrator.db.tenant_connection import tenant_connection
+
+    with tenant_connection(tenant_id) as own:
+        return own.execute(sql, params).fetchone() is not None
+
+
+def drop_item(
+    tenant_id: UUID | str,
+    item_id: UUID | str,
+    *,
+    reason: str,
+    conn: Any = None,
+) -> int:
+    """Drop ONE still-queued item (tenant-scoped; the RLS UPDATE policy covers it — there is
+    deliberately no tenant DELETE). Used by arm_pause_request's send-failure rollback
+    (reason='send_failed') and the drainer's resolved-elsewhere skip. NEVER a silent vanish —
+    the row stays for audit. Returns rows updated (0 = already delivered/dropped)."""
+    sql = (
+        "UPDATE owner_comms_queue SET status = 'dropped', dropped_reason = %s "
+        "WHERE tenant_id = %s AND id = %s AND status = 'queued'"
+    )
+    params = (reason, str(tenant_id), str(item_id))
+    if conn is not None:
+        cur = conn.execute(sql, params)
+        return cur.rowcount if getattr(cur, "rowcount", None) is not None else 0
+    from orchestrator.db.tenant_connection import tenant_connection
+
+    with tenant_connection(tenant_id) as own:
+        cur = own.execute(sql, params)
+        return cur.rowcount if getattr(cur, "rowcount", None) is not None else 0
+
+
 def drop_stale(*, max_age: timedelta = MAX_QUEUE_AGE, pool: Any = None) -> int:
     """Honest-expiry: drop every still-'queued' item never delivered within ``max_age`` (the owner
     never opened a session). Service-role cross-tenant. Returns the number dropped. NEVER a silent
@@ -189,8 +232,10 @@ __all__ = [
     "DECISION_TTL",
     "DEFAULT_PRIORITY",
     "MAX_QUEUE_AGE",
+    "drop_item",
     "drop_stale",
     "enqueue",
+    "has_queued_task_ref",
     "mark_delivered",
     "next_deliverable",
     "overdue_delivered_approvals",

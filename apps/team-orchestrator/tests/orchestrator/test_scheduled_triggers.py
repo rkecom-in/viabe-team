@@ -952,12 +952,14 @@ def test_register_scheduled_triggers_idempotent(monkeypatch) -> None:
     # test tenants so they stop paging ops as noise): 22 → 23.
     # VT-679 added two (plan_refresh + daily_initiative — §7A proactive planning, both behind
     # TEAM_PROACTIVE_PLANNING; the cron registration itself is unconditional): 23 → 25.
-    assert first == 25, "expected 25 triggers registered on first call"
-    assert second == 25, "second call must short-circuit (idempotent)"
+    # VT-683 P2b added one (owner_comms_sweep — the */10 owner-comms queue drain +
+    # drop-stale + POINT A NULL-clock belt): 25 → 26.
+    assert first == 26, "expected 26 triggers registered on first call"
+    assert second == 26, "second call must short-circuit (idempotent)"
     # VT-464 D3: every scheduled handler MUST also be registered as a workflow
     # (one DBOS.workflow() wrap per DBOS.scheduled() call) — otherwise the cron
     # fire raises DBOSWorkflowFunctionNotFoundError.
-    assert first_wf == 25, "expected 25 handlers wrapped as @DBOS.workflow"
+    assert first_wf == 26, "expected 26 handlers wrapped as @DBOS.workflow"
     st._registered = False
 
 
@@ -1153,4 +1155,124 @@ def test_run_daily_initiative_body_delegates_per_tenant(monkeypatch) -> None:
 
     assert out == [{"task_id": "abc", "item_id": "item-1", "owning_agent": "reputation"}], (
         "t1's failure must not halt the sweep; only t2's result recorded"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 8. VT-683 P2b — owner-comms sweep (deliver + drop-stale + NULL-clock belt)
+# ---------------------------------------------------------------------------
+
+
+def _wire_comms_sweep(monkeypatch, *, tenants, open_session, idle, drain_result):
+    """Patch every seam of run_owner_comms_sweep_body; returns the capture dict."""
+    seen = {"drained": [], "dropped": 0, "belt_sql": []}
+    monkeypatch.setattr(st, "_tenants_with_queued_comms", lambda: tenants)
+    monkeypatch.setattr(st, "_owner_recipient_phone", lambda t: "+919811112222")
+
+    import orchestrator.owner_surface.session_window as sw
+    import orchestrator.owner_surface.owner_comms_drainer as dr
+    import orchestrator.owner_surface.owner_comms_queue as cq
+    import orchestrator.owner_surface.freeform_acks as fa
+
+    monkeypatch.setattr(sw, "session_open", lambda _t: open_session)
+    monkeypatch.setattr(sw, "idle_minutes", lambda _t: idle)
+    monkeypatch.setattr(fa, "resolve_owner_locale", lambda _t: "en")
+
+    def _drain(tenant_id, recipient, *, lang="en"):
+        seen["drained"].append((tenant_id, recipient, lang))
+        return drain_result
+
+    monkeypatch.setattr(dr, "drain_one", _drain)
+    monkeypatch.setattr(cq, "drop_stale", lambda **k: 3)
+
+    class _BeltCur:
+        rowcount = 2
+
+    class _BeltConn:
+        def execute(self, sql, params=None):
+            seen["belt_sql"].append(" ".join(sql.split()))
+            return _BeltCur()
+
+    class _BeltPool:
+        def connection(self):
+            conn = _BeltConn()
+
+            class _CM:
+                def __enter__(self_inner):
+                    return conn
+
+                def __exit__(self_inner, *exc):
+                    return False
+
+            return _CM()
+
+    import orchestrator.graph as graph_mod
+
+    monkeypatch.setattr(graph_mod, "get_pool", lambda: _BeltPool())
+    return seen
+
+
+def test_owner_comms_sweep_delivers_when_open_and_idle(monkeypatch) -> None:
+    seen = _wire_comms_sweep(
+        monkeypatch, tenants=["t1", "t2"], open_session=True, idle=9.0,
+        drain_result={"delivered": True},
+    )
+    out = st.run_owner_comms_sweep_body()
+    assert out["scanned"] == 2 and out["delivered"] == 2
+    assert len(seen["drained"]) == 2
+    assert out["dropped"] == 3
+    # POINT A NULL-clock belt ran, scoped to open NULL-clock rows past the grace bound.
+    assert out["belted"] == 2
+    belt = "\n".join(seen["belt_sql"])
+    assert "timeout_at IS NULL" in belt and "resolved_at IS NULL" in belt
+
+
+def test_owner_comms_sweep_skips_mid_exchange_tenants(monkeypatch) -> None:
+    """Idle below the gate (or unreadable) → never interleave into an active exchange."""
+    seen = _wire_comms_sweep(
+        monkeypatch, tenants=["t1"], open_session=True, idle=1.0,
+        drain_result={"delivered": True},
+    )
+    out = st.run_owner_comms_sweep_body()
+    assert out["delivered"] == 0 and seen["drained"] == []
+
+    seen2 = _wire_comms_sweep(
+        monkeypatch, tenants=["t1"], open_session=True, idle=None,
+        drain_result={"delivered": True},
+    )
+    assert st.run_owner_comms_sweep_body()["delivered"] == 0 and seen2["drained"] == []
+
+
+def test_owner_comms_sweep_skips_closed_sessions(monkeypatch) -> None:
+    seen = _wire_comms_sweep(
+        monkeypatch, tenants=["t1"], open_session=False, idle=60.0,
+        drain_result={"delivered": True},
+    )
+    out = st.run_owner_comms_sweep_body()
+    assert out["delivered"] == 0 and seen["drained"] == []
+
+
+def test_owner_comms_sweep_one_tenant_failure_does_not_halt(monkeypatch) -> None:
+    _wire_comms_sweep(
+        monkeypatch, tenants=["bad", "good"], open_session=True, idle=9.0,
+        drain_result={"delivered": True},
+    )
+    import orchestrator.owner_surface.session_window as sw
+
+    def _open(t):
+        if t == "bad":
+            raise RuntimeError("tenant read down")
+        return True
+
+    monkeypatch.setattr(sw, "session_open", _open)
+    out = st.run_owner_comms_sweep_body()
+    assert out["scanned"] == 2 and out["delivered"] == 1  # 'good' still served
+
+
+def test_owner_comms_sweep_handler_signature_smoke(monkeypatch) -> None:
+    """The @DBOS.scheduled handler shape (scheduled_time, actual_time) -> None; never raises."""
+    monkeypatch.setattr(st, "run_owner_comms_sweep_body", lambda now=None: {"scanned": 0})
+    st.owner_comms_sweep_scheduled(
+        datetime(2026, 7, 22, 0, 0, tzinfo=timezone.utc),
+        datetime(2026, 7, 22, 0, 0, 5, tzinfo=timezone.utc),
     )

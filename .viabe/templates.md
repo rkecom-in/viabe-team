@@ -270,6 +270,21 @@ Hi {{1}}, I couldn't send this week's campaign: {{2}} of the targeted customers 
 
 ---
 
+### `team_approval_buttons`  *(VT-683 P2c — INTERACTIVE in-session approval ask; NOT a Meta-approved 24h-window template)*
+
+- **Twilio Content SIDs:** en `HX6b8aa56b3497301f86152983686064d7` · hi `HX3b0f0c7926f557e4de1d007682cdaabe`
+- **Content type:** `twilio/quick-reply` (two decision buttons) · **Approval:** NONE NEEDED — in-session interactive content (≤3 buttons) needs no Meta template approval; the HX pair is a Twilio Content-API registration only (created by CC 2026-07-22, canary `canaries/vt683_approval_buttons_create.py`).
+- **Sent by:** `agent/tools/request_owner_approval.arm_pause_request` when the owner's 24h session is OPEN, via `twilio_send.send_interactive_message` — replacing the load-bearing approval TEMPLATE send in-window. The Meta template (`team_weekly_approval` / `team_agent_draft_approval`) stays as the OUT-of-window belt until P3 wake-up + P4 whitelist retire it.
+- **Variables:** `{{1}}` = the PII-safe approval ask text (`payload.summary`, composed by the arming caller).
+- **Button `id` payloads:** `approval_yes` / `approval_no` (same both langs). **LOAD-BEARING:** the button TITLE flows back as the inbound `Body`, which `try_resume_pending_approval` → `classify_approval_reply` resolves deterministically against the SAME open `pending_approvals` row: en "Yes, approve"→approved / "No, reject"→rejected · hi "हाँ, मंज़ूर है"→approved / "नहीं, रहने दो"→rejected. No title collides with the opt-out/DSR guard; none is weak-ack-only. Never change a title without re-verifying both classifiers.
+
+```
+{{1}}
+[ Yes, approve ]  [ No, reject ]
+```
+
+---
+
 ## Implications for code
 
 When code in `apps/team-orchestrator/` starts sending WhatsApp messages (currently only the orchestrator + supervisor + SR-Agent skeleton exist; output composer VT-30 is Backlog), it needs:

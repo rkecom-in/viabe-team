@@ -124,3 +124,30 @@ def test_overdue_delivered_approvals_reads_past_deadline() -> None:
     sql = conn.calls[0][0]
     assert "status = 'delivered'" in sql and "kind = 'approval'" in sql
     assert "decision_deadline_at < now()" in sql
+
+
+# ---------------------------------------------------------------------------
+# VT-683 P2c additions — drop_item + has_queued_task_ref
+# ---------------------------------------------------------------------------
+
+
+def test_drop_item_only_flips_queued_rows() -> None:
+    conn = _FakeConn(rowcount=1)
+    n = q.drop_item(_TID, "item-1", reason="send_failed", conn=conn)
+    assert n == 1
+    sql, params = conn.calls[0]
+    s = " ".join(sql.split())
+    assert "SET status = 'dropped'" in s
+    assert "AND status = 'queued'" in s, "a delivered/dropped row must never be re-dropped"
+    assert params == ("send_failed", _TID, "item-1")
+
+
+def test_has_queued_task_ref_true_and_false() -> None:
+    hit = _FakeConn(rows=[(1,)])
+    assert q.has_queued_task_ref(_TID, "task-9", conn=hit) is True
+    sql, params = hit.calls[0]
+    s = " ".join(sql.split())
+    assert "payload->>'manager_task_id' = %s" in s and "status = 'queued'" in s
+    assert params == (_TID, "task-9")
+    miss = _FakeConn(rows=[])
+    assert q.has_queued_task_ref(_TID, "task-9", conn=miss) is False
