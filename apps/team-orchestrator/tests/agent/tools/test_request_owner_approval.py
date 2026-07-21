@@ -221,3 +221,154 @@ def test_dry_run_skips_send_but_inserts():
 def test_pause_result_typing():
     r = PauseRequestResult(status="armed", approval_id=uuid4())
     assert r.status == "armed"
+
+
+# ---------------------------------------------------------------------------
+# VT-683 P2c — in-session interactive ask + POINT A (clock at delivery)
+# ---------------------------------------------------------------------------
+# The pre-P2c tests above run with session_open fail-closed (no DB → False), so they
+# prove the out-of-window TEMPLATE BELT byte-identically. These prove the in-window
+# interactive path + the delivery-time decision clock.
+
+
+def _wire_interactive(monkeypatch, *, open_session: bool, interactive_raises=None):
+    """Patch the in-window seam: session_open / locale / registry / interactive sender."""
+    import orchestrator.owner_surface.session_window as sw
+    import orchestrator.owner_surface.freeform_acks as fa
+    import orchestrator.templates_registry as tr
+    import orchestrator.utils.twilio_send as ts
+
+    sent: list[dict] = []
+    monkeypatch.setattr(sw, "session_open", lambda _t: open_session)
+    monkeypatch.setattr(fa, "resolve_owner_locale", lambda _t: "en")
+    monkeypatch.setattr(tr, "content_sid_for", lambda name, lang="en": "HXfeedbeef" + lang)
+
+    def _interactive(content_sid, recipient, *, content_variables=None, tenant_id=None, surface=None):
+        if interactive_raises is not None:
+            raise interactive_raises
+        sent.append({"content_sid": content_sid, "recipient": recipient,
+                     "content_variables": content_variables})
+        return "SMinteractive" + "0" * 22
+
+    monkeypatch.setattr(ts, "send_interactive_message", _interactive)
+    return sent
+
+
+def _clock_start_queries(conn) -> list[str]:
+    return [q for q in conn.queries
+            if "SET timeout_at = now() + make_interval" in " ".join(q.split())]
+
+
+def test_in_window_sends_interactive_not_template(monkeypatch):
+    """Session OPEN → the load-bearing ask goes out as the in-session interactive
+    quick-reply (team_approval_buttons); the Meta template is NOT sent. POINT A: the
+    decision clock starts after the delivery, and the arm INSERTed timeout_at NULL."""
+    conn = _FakeConn()
+    send = _OkSend()
+    sent = _wire_interactive(monkeypatch, open_session=True)
+    res = arm_pause_request(_input(), conn_factory=_ConnFactory(conn), send_fn=send)
+    assert res.status == "armed"
+    assert send.calls == [], "in-window: the Meta template must NOT be sent"
+    assert len(sent) == 1 and sent[0]["content_sid"] == "HXfeedbeefen"
+    assert sent[0]["content_variables"] == {"1": "Approve send to 3 customers?"}
+    # POINT A: the INSERT carried timeout_at=None …
+    insert_sql, insert_params = conn.inserts[0]
+    cols = insert_sql.split("(")[1]
+    assert "timeout_at" in cols
+    # … and the clock started at delivery (the start_decision_clock UPDATE ran).
+    assert _clock_start_queries(conn), "decision clock must start at delivery"
+
+
+def test_in_window_interactive_failure_falls_back_to_template(monkeypatch):
+    """Interactive send failure NEVER loses the ask — the Meta template belt fires."""
+    conn = _FakeConn()
+    send = _OkSend()
+    _wire_interactive(monkeypatch, open_session=True, interactive_raises=RuntimeError("content 4xx"))
+    res = arm_pause_request(_input(), conn_factory=_ConnFactory(conn), send_fn=send)
+    assert res.status == "armed"
+    assert send.calls == [(APPROVAL_TEMPLATE_NAME, "+919811112222")], "belt must fire"
+    assert _clock_start_queries(conn), "clock still starts at (template) delivery"
+
+
+def test_out_of_window_uses_template_belt(monkeypatch):
+    """Session CLOSED → template exactly as pre-P2c; no interactive attempt."""
+    conn = _FakeConn()
+    send = _OkSend()
+    sent = _wire_interactive(monkeypatch, open_session=False)
+    res = arm_pause_request(_input(), conn_factory=_ConnFactory(conn), send_fn=send)
+    assert res.status == "armed"
+    assert sent == [], "closed window must never attempt an interactive session send"
+    assert send.calls == [(APPROVAL_TEMPLATE_NAME, "+919811112222")]
+    assert _clock_start_queries(conn), "clock starts at delivery on the belt too"
+
+
+def test_send_failure_drops_ledger_record(monkeypatch):
+    """Total send failure → arm rollback ALSO drops the owner_comms_queue ledger record
+    (status='dropped', reason='send_failed') — no phantom queued approval survives."""
+    conn = _FakeConn()
+    _wire_interactive(monkeypatch, open_session=False)
+
+    def failing_send(tenant_id, template_name, params, *, recipient_phone=None):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(success=False, error_code="boom", error_message="x")
+
+    res = arm_pause_request(_input(), conn_factory=_ConnFactory(conn), send_fn=failing_send)
+    assert res.status == "error"
+    assert len(conn.deletes) == 1
+    drop_updates = [q for q in conn.queries
+                    if "owner_comms_queue SET status = 'dropped'" in " ".join(q.split())]
+    assert drop_updates, "the ledger record must be dropped on rollback"
+
+
+def test_dry_run_starts_clock_at_arm(monkeypatch):
+    """dry_run (canary/CI): no send, but the clock starts at arm so a synthetic row can
+    never sit NULL-clocked (the sweep belt would flag it as a crash orphan)."""
+    conn = _FakeConn()
+    send = _OkSend()
+    res = arm_pause_request(_input(), conn_factory=_ConnFactory(conn), send_fn=send, dry_run=True)
+    assert res.status == "armed"
+    assert send.calls == []
+    assert _clock_start_queries(conn), "dry_run must start the clock at arm"
+
+
+def test_approval_buttons_registry_entry_resolves():
+    """The team_approval_buttons registry entry is REAL (canary-created HX pair) — the
+    in-window path resolves it for both owner locales, no hardcoded SID in code."""
+    from orchestrator.templates_registry import content_sid_for
+
+    en = content_sid_for("team_approval_buttons", "en")
+    hi = content_sid_for("team_approval_buttons", "hi")
+    assert en and en.startswith("HX")
+    assert hi and hi.startswith("HX")
+    assert en != hi
+
+
+def test_button_titles_resolve_deterministically_in_every_send_intent_mode(monkeypatch):
+    """VT-683 P2c — the button fast-path: an EXACT team_approval_buttons title resolves
+    deterministically even under TEAM_SEND_INTENT_LLM=enforce (a tap is not free text; the
+    LLM gate must never own it). Free text containing a title still takes the normal paths."""
+    from orchestrator.agent.approval_resume import resolve_decision_from_reply
+    from orchestrator.owner_inputs import send_intent as si
+
+    monkeypatch.setattr(si, "get_send_intent_mode", lambda: "enforce")
+    monkeypatch.setattr(
+        si, "decide_send_intent_enforce",
+        lambda text, tenant_id=None: (_ for _ in ()).throw(AssertionError("LLM gate must not own a button tap")),
+    )
+    tid = uuid4()
+    assert resolve_decision_from_reply("Yes, approve", tenant_id=tid, approval_type="campaign_send") == "approved"
+    assert resolve_decision_from_reply("No, reject", tenant_id=tid, approval_type="campaign_send") == "rejected"
+    assert resolve_decision_from_reply("हाँ, मंज़ूर है", tenant_id=tid, approval_type="campaign_send") == "approved"
+    assert resolve_decision_from_reply("नहीं, रहने दो", tenant_id=tid, approval_type="campaign_send") == "rejected"
+
+
+def test_button_fast_path_never_matches_free_text():
+    """Full-string only: a sentence CONTAINING a title is free text, not a tap."""
+    from orchestrator.owner_inputs.approval_reply import classify_button_decision
+
+    assert classify_button_decision("Yes, approve") == "approved"
+    assert classify_button_decision("  yes, approve  ") == "approved"  # trim + casefold
+    assert classify_button_decision("Yes, approve the diwali one but change the copy") is None
+    assert classify_button_decision("well ok — no, reject I guess?") is None
+    assert classify_button_decision("") is None

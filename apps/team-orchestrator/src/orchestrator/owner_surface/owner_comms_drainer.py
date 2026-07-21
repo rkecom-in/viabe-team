@@ -47,6 +47,37 @@ def drain_one(
             return None
 
         payload = item.get("payload") or {}
+
+        # VT-683 P2c — an 'approval' item whose underlying pending_approvals row is no longer OPEN
+        # (resolved by reply, timeout sweep, or rollback) must NEVER be delivered: the owner would
+        # tap a button against a row that cannot resolve (the exact VT-615 dropped-campaign shape).
+        # Drop it honestly and let the next drain pick the next item.
+        if item.get("kind") == "approval":
+            ref = item.get("decision_ref") or {}
+            ref_id = ref.get("id") if isinstance(ref, dict) else None
+            still_open = None
+            if ref_id:
+                from orchestrator.db.wrappers import PendingApprovalsWrapper
+
+                still_open = PendingApprovalsWrapper().get_open_by_id(tenant_id, ref_id)
+            if not still_open:
+                q.drop_item(tenant_id, item["id"], reason="resolved_elsewhere")
+                logger.info(
+                    "owner_comms drain: approval item %s dropped (underlying ask no longer open)",
+                    item["id"],
+                )
+                return None
+            # POINT A duplicate guard: a RUNNING decision clock (timeout_at non-NULL) means the
+            # ask already reached the owner (the arm delivered it but its fail-soft
+            # mark_delivered didn't land) — re-sending would be a duplicate ask. Drop the
+            # ledger straggler; the open row stays fully resolvable.
+            if still_open.get("timeout_at") is not None:
+                q.drop_item(tenant_id, item["id"], reason="already_delivered")
+                logger.info(
+                    "owner_comms drain: approval item %s dropped (ask already delivered — "
+                    "clock running)", item["id"],
+                )
+                return None
         body = (
             payload.get(f"text_{lang}")
             or payload.get("text_en")
@@ -71,6 +102,21 @@ def drain_one(
         sid = res.get("message_sid") if isinstance(res, dict) else None
         # POINT A: mark_delivered starts an approval's decision clock (delivered_at + TTL).
         q.mark_delivered(tenant_id, item["id"], kind=item["kind"], message_sid=sid)
+        # VT-683 P2c — a deferred task-outcome item (task_outcome's 63016 window-closed path
+        # enqueued it) flips the manager_task's own "owner told" status on delivery, so the
+        # settle ledger stays truthful. Fail-soft: the delivery already happened.
+        task_ref = payload.get("manager_task_id")
+        if task_ref:
+            try:
+                from orchestrator.owner_surface.task_outcome import (
+                    mark_deferred_outcome_delivered,
+                )
+
+                mark_deferred_outcome_delivered(tenant_id, task_ref, sid)
+            except Exception:  # noqa: BLE001 — ledger flip only; never unwind the delivery
+                logger.warning(
+                    "owner_comms drain: deferred-outcome flip failed (fail-soft) task=%s", task_ref
+                )
         return {
             "delivered": True,
             "item_id": item["id"],

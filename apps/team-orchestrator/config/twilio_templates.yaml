@@ -133,14 +133,38 @@ onboarding_confirm_yesno:
   # a free-text "yes" parse. NOT a Meta-approved 24h-window template — in-session interactive content
   # needs NO Meta approval (≤3 buttons); the HX is a Twilio Content-API registration only. Variable
   # {{1}} = the confirm question text. Button `id` payloads: confirm_yes / confirm_no / confirm_skip
-  # (the journey reads the inbound ButtonPayload as the answer). Sent via send_interactive_message,
-  # NOT send_template_message. OWNER-facing (onboarding).
+  # (a tap echoes the button TITLE back as the inbound Body — there is no ButtonPayload reader;
+  # handle_reply matches the title against its _YES/_NO/_SKIP token sets). Sent via
+  # send_interactive_message, NOT send_template_message. OWNER-facing (onboarding).
   audience: owner
   agent_selectable: false
   variables:
     - question_text
   languages:
     en: HX60ace8008b02439ca0db444dee6327d2
+
+team_approval_buttons:
+  # VT-683 P2c: the IN-SESSION interactive approval ask (twilio/quick-reply, two decision buttons).
+  # When the owner's 24h session is open, arm_pause_request sends THIS via send_interactive_message
+  # instead of the Meta approval template (the template stays as the out-of-window belt until
+  # P3 wake-up + P4 whitelist retire it). NOT Meta-approved — in-session interactive content needs
+  # no Meta approval; the HX is a Twilio Content-API registration only (canary
+  # canaries/vt683_approval_buttons_create.py). Variable {{1}} = the PII-safe approval ask text.
+  # LOAD-BEARING BUTTON CONTRACT: a tap echoes the button TITLE back as the inbound Body, which
+  # try_resume_pending_approval classifies deterministically (classify_approval_reply) against the
+  # SAME open pending_approvals row the arm wrote. Titles are verified against the token sets:
+  #   en "Yes, approve" -> approved · "No, reject" -> rejected
+  #   hi "हाँ, मंज़ूर है" -> approved · "नहीं, रहने दो" -> rejected
+  # None collides with the opt-out/DSR guard; none is weak-ack-only. NEVER change a title without
+  # re-verifying classify_approval_reply + matches_opt_out_or_dsr on the new text.
+  # Button `id` payloads: approval_yes / approval_no (stable, same both langs).
+  audience: owner
+  agent_selectable: false
+  variables:
+    - approval_ask_text
+  languages:
+    en: HX6b8aa56b3497301f86152983686064d7
+    hi: HX3b0f0c7926f557e4de1d007682cdaabe
 
 team_weekly_approval:
   audience: customer
