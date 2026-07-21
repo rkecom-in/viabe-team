@@ -47,6 +47,7 @@ The emit generates the row ``id`` client-side (no ``RETURNING``) so the
 
 from __future__ import annotations
 
+import json
 import logging
 import sys
 from typing import TYPE_CHECKING, Any
@@ -126,6 +127,16 @@ def emit_tm_audit(
     audit_id = uuid4()
     if event_layer not in _LAYERS:
         _warn(f"unknown event_layer={event_layer!r} (kind={event_kind!r}) — inserting anyway")
+
+    # VT-690 phase 2 — mirror this decision-audit event onto the live OTel span (best-effort,
+    # independent of the DB write below, so the trace captures the reasoning even if the audit
+    # DB is unavailable). This is what makes "why did the agent decide X" visible in Honeycomb
+    # alongside the LLM prompt/response + workflow spans.
+    _mirror_to_span(
+        event_layer=event_layer, event_kind=event_kind, actor=actor, run_id=run_id,
+        severity=severity, status=status, tenant_id=tenant_id, summary=summary, input=input,
+        decision=decision, reasoning_ref=reasoning_ref, action=action, result=result,
+    )
 
     def _prep() -> tuple[Any, ...]:
         # Redaction + param-build can raise (registry build is itself fail-soft,
@@ -236,6 +247,67 @@ def _redact_fields(
         "action": _r_obj(action),
         "result": _r_obj(result),
     }
+
+
+# VT-690 phase 2 — cap each JSON-encoded field so a large assembled context can't bloat a span.
+_SPAN_ATTR_MAX = 4096
+
+
+def _mirror_to_span(
+    *,
+    event_layer: str,
+    event_kind: str,
+    actor: str,
+    run_id: UUID | str | None,
+    severity: str,
+    status: str,
+    tenant_id: UUID | str,
+    summary: str | None,
+    input: dict[str, Any] | None,  # noqa: A002 — mirrors emit_tm_audit's param name
+    decision: dict[str, Any] | None,
+    reasoning_ref: dict[str, Any] | None,
+    action: dict[str, Any] | None,
+    result: dict[str, Any] | None,
+) -> None:
+    """VT-690 phase 2 — mirror a decision-audit event onto the CURRENT OTel span as a span event,
+    so the GETS->KNOWS->DECIDES->DOES progression (incl. ``reasoning_ref`` = the WHY) rides the
+    Honeycomb trace alongside the LLM prompt/response (``instrument_anthropic``) + DBOS workflow
+    spans, correlated by ``run_id``. PII passes through the SAME ``_redact_fields`` the DB write
+    uses. NEVER raises (a parallel observability sink must never affect the audit path). No-op when
+    tracing is off (no ``HONEYCOMB_API_KEY``) or no span is currently recording.
+    """
+    try:
+        from orchestrator.observability.logfire import is_enabled
+
+        if not is_enabled():
+            return
+        from opentelemetry import trace as _otel_trace
+
+        span = _otel_trace.get_current_span()
+        if span is None or not span.is_recording():
+            return
+        redacted = _redact_fields(
+            tenant_id=tenant_id, summary=summary, input=input, decision=decision,
+            reasoning_ref=reasoning_ref, action=action, result=result,
+        )
+        attrs: dict[str, Any] = {
+            "tm_audit.layer": event_layer,
+            "tm_audit.kind": event_kind,
+            "tm_audit.actor": actor,
+            "tm_audit.severity": severity,
+            "tm_audit.status": status,
+        }
+        if run_id is not None:
+            attrs["run_id"] = str(run_id)
+        for field in ("summary", "reasoning_ref", "input", "decision", "action", "result"):
+            v = redacted.get(field)
+            if v is None:
+                continue
+            s = v if isinstance(v, str) else json.dumps(v, default=str, ensure_ascii=False)
+            attrs[f"tm_audit.{field}"] = s[:_SPAN_ATTR_MAX]
+        span.add_event(f"tm_audit.{event_layer}.{event_kind}", attributes=attrs)
+    except Exception:  # noqa: BLE001 — parallel observability sink; never touch the audit write
+        pass
 
 
 def _build_params(
