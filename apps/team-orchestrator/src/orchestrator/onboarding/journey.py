@@ -643,6 +643,23 @@ def _complete_or_hold(
             "done": False,
             "re_present": True,
         }
+    # VT-692 completion belt — a WhatsApp-created tenant with ALL core answers captured, an empty
+    # draft, and NO discovery in flight would hold ("give us a moment") FOREVER (the measured
+    # first-customer opener loop). FIRST give discovery its chance (covers answers that landed
+    # BEFORE the kick-hook existed — the live first-customer recovery: a fresh kick makes the
+    # hold message honest and the next turn surfaces the draft confirms). Only when discovery
+    # is done/impossible and the draft is still empty does the belt complete with the honest
+    # recap of what the owner gave us.
+    from orchestrator.onboarding.whatsapp_journey import (
+        maybe_kick_discovery,
+        should_force_complete,
+    )
+
+    if not maybe_kick_discovery(tenant_id, answers or {}) and should_force_complete(
+        tenant_id, answers
+    ):
+        _complete(tenant_id)
+        return _completion_message(answers)
     opener = _opener()
     return {
         "reply_en": opener["prompt_en"],
@@ -830,6 +847,13 @@ def _advance(tenant_id, cursor, answers, skipped, message_sid) -> None:
             "last_message_sid = %s, updated_at = now() WHERE tenant_id = %s AND status = 'active'",
             (cursor, Jsonb(answers), Jsonb(skipped), message_sid, str(tenant_id)),
         )
+    # VT-692 — the WhatsApp-journey post-answer hook (fail-soft, cheap no-op for web tenants):
+    # kick name-anchored auto-discovery (the Fazal LLM+WebSearch ruling) + promote captured core
+    # answers to canonical. Both call sites that funnel answers (deterministic walker + turn-brain)
+    # pass through THIS write, so the hook lives here.
+    from orchestrator.onboarding.whatsapp_journey import on_answers_advanced
+
+    on_answers_advanced(tenant_id, answers or {})
 
 
 def _confirm(tenant_id, confirmed_fields: dict[str, Any]) -> None:
@@ -864,6 +888,10 @@ def _write_answers_skipped(tenant_id: UUID | str, answers: dict[str, Any], skipp
             "WHERE tenant_id = %s AND status = 'active'",
             (Jsonb(answers), Jsonb(skipped), str(tenant_id)),
         )
+    # VT-692 — same post-answer hook as _advance (the specialist tools bypass _advance).
+    from orchestrator.onboarding.whatsapp_journey import on_answers_advanced
+
+    on_answers_advanced(tenant_id, answers or {})
 
 
 def _is_bare_rejection_value(value: str) -> bool:
