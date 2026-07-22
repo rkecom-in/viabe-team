@@ -374,6 +374,22 @@ def accept_gst_identity(tenant_id: UUID | str) -> None:
     except Exception:  # noqa: BLE001
         logger.warning("whatsapp_journey: post-accept populate failed tenant=%s", tenant_id)
     gstin = str(attrs.get("gstin_candidate") or "").strip()
+    if not gstin:
+        # Self-heal (live first-customer gap): a draft whose discovery predated the hint-persist
+        # (or whose hint was lost) re-runs the flag-gated candidates leg NOW, anchored on the
+        # owner-CONFIRMED identity — still only a single-candidate HINT into the formal verify.
+        name = str(attrs.get("legal_name") or attrs.get("trade_name") or "").strip()
+        addr = str(attrs.get("principal_address") or "")
+        city = addr.split(",")[-2].strip() if addr.count(",") >= 2 else None
+        if name:
+            gstin = _gstin_candidate(name, city) or ""
+            if gstin:
+                try:
+                    from orchestrator.onboarding.draft_profile import write_draft
+
+                    write_draft(tenant_id, {"gstin_candidate": gstin}, source="llm_hint")
+                except Exception:  # noqa: BLE001
+                    pass
     if gstin:
         try:
             from orchestrator.onboarding.entity_match import confirm_and_verify
