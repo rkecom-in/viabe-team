@@ -162,6 +162,28 @@ journey_suggest_3:
   languages:
     en: HX41f744c4e398e5d09fd69243a766871c
 
+journey_gst_card:
+  # VT-695 (Fazal 2026-07-22: "the message could have been better formatted, especially
+  # considering we are in session and free to have rich media cards"): the GST identity
+  # confirm as a STRUCTURED card — WhatsApp bold/emoji formatting lives in the STATIC body
+  # (Meta forbids newlines in variables, so layout is template-side; every variable is a
+  # single-line field). {{1}} name, {{2}} constitution, {{3}} address, {{4}} nature of
+  # business, {{5}} GSTIN tail. Fixed Yes/No/Skip buttons — titles round-trip through the
+  # journey's _YES/_NO/_SKIP token sets unchanged (hi titles हां/नहीं are in those sets).
+  # NOT Meta-approved — in-session interactive registration only (canary
+  # canaries/vt695_gst_card_create.py). Button ids: gst_yes/gst_no/gst_skip.
+  audience: owner
+  agent_selectable: false
+  variables:
+    - business_name
+    - constitution
+    - address
+    - nature_of_business
+    - gstin_tail
+  languages:
+    en: HXdf097aab878f962d3621b619f3f1c0f0
+    hi: HXfcf1872a751b277a7c8a49e6a89a91d9
+
 team_signup_consent_buttons:
   # VT-691 (Fazal 2026-07-22): the WhatsApp-signup consent ask as an IN-SESSION interactive
   # quick-reply — the signup does NOT start unless the person explicitly presses "I agree";

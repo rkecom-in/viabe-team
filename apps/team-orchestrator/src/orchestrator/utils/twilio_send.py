@@ -568,6 +568,50 @@ def send_template_message(
     )
 
 
+def send_typing_indicator(inbound_message_sid: str) -> None:
+    """VT-697 (Fazal: 10s+ waits with no feedback) — fire the WhatsApp TYPING indicator for an
+    inbound message. Twilio v3 Indicators endpoint (Public Beta): marks the referenced inbound
+    as READ (blue ticks) and shows "typing…" until our reply lands or 25s, whichever first.
+
+    Fire-and-forget on a daemon thread: the ingress hot path gains ZERO latency and NO failure
+    mode — missing creds / mock mode / HTTP errors all reduce to a debug log. Never raises.
+    The SDK has no v3 Indicators surface yet, so this posts directly.
+    """
+    sid = os.environ.get("TEAM_TWILIO_ACCOUNT_SID", "")
+    tok = os.environ.get("TEAM_TWILIO_AUTH_TOKEN", "")
+    if not sid or not tok or not inbound_message_sid:
+        return
+    if os.environ.get("TEAM_TWILIO_MOCK_MODE", "0") == "1":
+        logger.info("[TEAM_TWILIO_MOCK_MODE] would-send typing indicator for %s", inbound_message_sid)
+        return
+
+    def _fire() -> None:
+        try:
+            import base64
+            import urllib.request
+
+            req = urllib.request.Request(
+                "https://messaging.twilio.com/v3/Indicators/Typing.json",
+                # channel MUST be uppercase — lowercase 400s (canary-proved 2026-07-23).
+                data=json.dumps(
+                    {"channel": "WHATSAPP", "messageId": inbound_message_sid}
+                ).encode(),
+                headers={
+                    "Authorization": "Basic "
+                    + base64.b64encode(f"{sid}:{tok}".encode()).decode(),
+                    "Content-Type": "application/json",
+                },
+                method="POST",
+            )
+            urllib.request.urlopen(req, timeout=5).read()
+        except Exception:  # noqa: BLE001 — a typing indicator is never worth a failure
+            logger.debug("typing indicator failed sid=%s (fail-soft)", inbound_message_sid)
+
+    import threading
+
+    threading.Thread(target=_fire, name="wa-typing-indicator", daemon=True).start()
+
+
 def send_freeform_message(
     body: str,
     recipient_phone: str,

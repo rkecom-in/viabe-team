@@ -40,10 +40,30 @@ CL-390: no owner text logged beyond field NAMES.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 from uuid import UUID
 
 logger = logging.getLogger(__name__)
+
+# VT-696 — a real link inside a web-presence answer. Alpha TLD required so free text with
+# embedded numbers ("8.30 to 9") never reads as a domain; scheme optional (owners paste bare
+# "rkecom.in" / "instagram.com/rkecom").
+_WEB_URL_RE = re.compile(
+    r"(?:https?://)?(?:www\.)?[\w-]+(?:\.[\w-]+)*\.[A-Za-z]{2,}(?:/\S*)?", re.IGNORECASE
+)
+
+
+def extract_web_presence_url(text: str) -> str:
+    """The first URL-ish token in a web-presence answer, https-normalized — '' when the answer
+    is a refusal ('No website', 'skip') or free text with no link."""
+    m = _WEB_URL_RE.search((text or "").strip())
+    if not m:
+        return ""
+    url = m.group(0).rstrip(".,;)")
+    if not url.lower().startswith(("http://", "https://")):
+        url = f"https://{url}"
+    return url[:300]
 
 #: The journey answer fields whose arrival triggers a kick/promotion attempt.
 CORE_FIELDS = ("business_name", "owner_name", "business_type", "city")
@@ -227,6 +247,19 @@ def promote_answers_to_tenant(tenant_id: UUID | str, answers: dict[str, Any]) ->
         except Exception:  # noqa: BLE001
             logger.warning("whatsapp_journey: owner_name promote failed tenant=%s", tenant_id)
 
+    # VT-696 — the web-presence link (Fazal: THE highest-value capture; a website / FB /
+    # LinkedIn / IndiaMART page yields the rest). URL-validated: a refusal ("No website",
+    # "skip") or free text never lands in the profile; the draft `website` field also
+    # suppresses the question on every later recompose (covered_by_draft).
+    url = extract_web_presence_url(str(answers.get("web_presence") or ""))
+    if url:
+        try:
+            from orchestrator.onboarding.draft_profile import write_draft
+
+            write_draft(tenant_id, {"website": url}, source="owner")
+        except Exception:  # noqa: BLE001
+            logger.warning("whatsapp_journey: web_presence promote failed tenant=%s", tenant_id)
+
 
 def on_answers_advanced(tenant_id: UUID | str, answers: dict[str, Any]) -> None:
     """The single post-answer hook (called from journey._advance AND the specialist write path):
@@ -280,16 +313,37 @@ _GST_PAYLOAD_FIELDS = (
 )
 
 
+def _clean_addr(addr: str) -> str:
+    """Human-readable form of a GST registered address (VT-695): the raw payload arrives
+    ALLCAPS with duplicate city segments ("… MUMBAI, Mumbai, Maharashtra …"). Split on commas,
+    drop case-insensitive duplicate segments (order kept), and title-case pure-alpha ALLCAPS
+    words — tokens carrying digits (unit/plot/pincode like "A/403", "400054") stay verbatim."""
+    segs: list[str] = []
+    seen: set[str] = set()
+    for raw in addr.split(","):
+        seg = raw.strip()
+        if not seg or seg.lower() in seen:
+            continue
+        seen.add(seg.lower())
+        words = [
+            w.title() if w.isalpha() and w.isupper() else w
+            for w in seg.split()
+        ]
+        segs.append(" ".join(words))
+    return ", ".join(segs)
+
+
 def _gst_display(draft_attrs: dict[str, Any]) -> dict[str, str]:
     name = str(draft_attrs.get("trade_name") or draft_attrs.get("legal_name") or "").strip()
-    addr = str(draft_attrs.get("principal_address") or "").strip()
+    addr = _clean_addr(str(draft_attrs.get("principal_address") or "").strip())
     nature = draft_attrs.get("nature_of_business")
     if isinstance(nature, list):
         nature = ", ".join(str(x) for x in nature[:3])
     nature = str(nature or "").strip()
     gstin = str(draft_attrs.get("gstin_candidate") or "").strip()
     return {"name": name, "addr": addr[:120], "nature": nature[:120],
-            "gstin_tail": gstin[-4:] if gstin else ""}
+            "gstin_tail": gstin[-4:] if gstin else "",
+            "constitution": str(draft_attrs.get("constitution") or "").strip()[:60]}
 
 
 def gst_identity_pending(tenant_id: UUID | str, answers: dict[str, Any] | None) -> bool:
@@ -334,6 +388,15 @@ def gst_identity_card_question(tenant_id: UUID | str) -> dict[str, Any] | None:
             "draft_value": "yes",
             "prompt_en": "; ".join(bits_en) + ". Is this your business?",
             "prompt_hi": "; ".join(bits_hi) + "। क्या यही आपका बिज़नेस है?",
+            # VT-695 — single-line per-field values for the STRUCTURED card object
+            # (journey_gst_card); the blob prompts above stay as the send fallback.
+            "card_vars": {
+                "1": d["name"],
+                "2": d["constitution"] or "—",
+                "3": d["addr"] or "—",
+                "4": d["nature"] or "—",
+                "5": f"…{d['gstin_tail']}" if d["gstin_tail"] else "—",
+            },
         }
     except Exception:  # noqa: BLE001
         return None
@@ -465,9 +528,14 @@ def push_next_question_after_discovery(tenant_id: UUID | str) -> bool:
                 "text_hi": head.get("prompt_hi", ""),
             }
             if head.get("field") == "gst_identity":
-                # VT-693 — the identity card delivers as tappable Yes/No buttons (the VT-479
-                # in-session object; the drainer falls back to freeform on any failure).
-                payload["interactive_template"] = "onboarding_confirm_yesno"
+                # VT-693 — the identity card delivers as tappable Yes/No buttons; VT-695 — with
+                # per-field values it rides the FORMATTED card object (the drainer falls back to
+                # freeform on any failure either way).
+                if head.get("card_vars"):
+                    payload["interactive_template"] = "journey_gst_card"
+                    payload["interactive_variables"] = dict(head["card_vars"])
+                else:
+                    payload["interactive_template"] = "onboarding_confirm_yesno"
         elif j._journey_profile_complete(tenant_id, business_type, answers, skipped):
             j._complete(tenant_id)
             done = j._completion_message(answers)
@@ -492,6 +560,7 @@ def push_next_question_after_discovery(tenant_id: UUID | str) -> bool:
 
 __all__ = [
     "CORE_FIELDS",
+    "extract_web_presence_url",
     "maybe_kick_discovery",
     "on_answers_advanced",
     "promote_answers_to_tenant",
