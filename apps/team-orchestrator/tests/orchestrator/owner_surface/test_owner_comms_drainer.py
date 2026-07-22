@@ -185,3 +185,53 @@ def test_approval_item_dropped_when_clock_already_running(monkeypatch) -> None:
     assert d.drain_one(_TID, "+919999999999") is None
     assert calls["sent"] is None, "a delivered ask must never go out twice"
     assert calls["dropped"] == {"item_id": "q8", "reason": "already_delivered"}
+
+
+# --- VT-699: journey-push staleness guard (live: the GST card re-sent 10 min post-completion) ---
+
+
+def _wire_journey(monkeypatch, journey):
+    import orchestrator.onboarding.journey as j
+
+    monkeypatch.setattr(j, "get_journey", lambda _t: journey)
+
+
+def _push_item(field: str = "gst_identity"):
+    return {"id": "qp1", "kind": "notice",
+            "payload": {"journey_push": "true", "field": field, "text_en": "Is this your business?"}}
+
+
+def test_journey_push_dropped_when_journey_complete(monkeypatch) -> None:
+    calls = _wire(monkeypatch, open_session=True, item=_push_item(), send_result={"success": True})
+    _wire_journey(monkeypatch, {"status": "complete", "answers": {}})
+    assert d.drain_one(_TID, "+919999999999") is None
+    assert calls["dropped"] == {"item_id": "qp1", "reason": "stale_journey_push"}
+    assert calls["sent"] is None, "a stale push must never reach the owner"
+
+
+def test_journey_push_dropped_when_field_already_answered(monkeypatch) -> None:
+    calls = _wire(monkeypatch, open_session=True, item=_push_item(), send_result={"success": True})
+    _wire_journey(monkeypatch, {"status": "active", "answers": {"gst_identity": "yes"}})
+    assert d.drain_one(_TID, "+919999999999") is None
+    assert calls["dropped"] == {"item_id": "qp1", "reason": "stale_journey_push"}
+    assert calls["sent"] is None
+
+
+def test_journey_push_delivers_when_still_pending(monkeypatch) -> None:
+    calls = _wire(monkeypatch, open_session=True, item=_push_item(), send_result={"success": True})
+    _wire_journey(monkeypatch, {"status": "active", "answers": {"business_name": "X"}})
+    d.drain_one(_TID, "+919999999999")
+    assert calls["dropped"] is None
+    assert calls["sent"] is not None, "a live pending push still delivers"
+
+
+def test_journey_push_guard_fails_open(monkeypatch) -> None:
+    calls = _wire(monkeypatch, open_session=True, item=_push_item(), send_result={"success": True})
+    import orchestrator.onboarding.journey as j
+
+    def _boom(_t):
+        raise RuntimeError("journey read down")
+
+    monkeypatch.setattr(j, "get_journey", _boom)
+    d.drain_one(_TID, "+919999999999")
+    assert calls["sent"] is not None, "guard failure must never block a legitimate drain"

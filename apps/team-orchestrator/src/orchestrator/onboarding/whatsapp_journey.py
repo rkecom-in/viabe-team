@@ -524,6 +524,9 @@ def push_next_question_after_discovery(tenant_id: UUID | str) -> bool:
             head = queue[0]
             payload = {
                 "journey_push": "true",
+                # VT-699 — the pushed FIELD rides the payload so the drainer's staleness guard
+                # can drop this push once the field is answered (or the journey completes).
+                "field": str(head.get("field") or ""),
                 "text_en": head.get("prompt_en", ""),
                 "text_hi": head.get("prompt_hi", ""),
             }
