@@ -228,7 +228,12 @@ def test_every_template_entry_still_parses_and_resolves(
             assert resolved.audience in ("customer", "owner"), (
                 f"{name} audience must be customer|owner"
             )
-            assert resolved.variables, f"{name} must declare variables"
+            # VT-691: an EXPLICIT empty variables list is valid for static-body in-session
+            # interactive objects (team_signup_consent_buttons — no {{n}} slots); a MISSING
+            # declaration is still an error (canary_load enforces the distinction).
+            assert resolved.variables is not None and isinstance(resolved.variables, tuple | list), (
+                f"{name} must declare variables (an explicit empty list is allowed)"
+            )
 
 
 def test_canary_load_passes_on_real_yaml() -> None:
