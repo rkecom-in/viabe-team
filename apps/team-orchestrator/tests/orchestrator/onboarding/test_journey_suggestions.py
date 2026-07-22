@@ -114,3 +114,50 @@ def test_pending_gst_card_outranks_stale_queue(monkeypatch) -> None:
     out = j.handle_reply(tid, "Consulting and BI work", "SMx1", lang="en")
     assert installed["fields"] == ["gst_identity"], "card replaces the stale queue"
     assert "is this your business" in out["reply_en"].lower()
+
+
+def test_turn_brain_path_card_priority(monkeypatch) -> None:
+    """VT-693 live-proven gap: the TURN-BRAIN path must also yield to a pending GST card —
+    after recording this turn's answer, the card replaces the plan's next question and goes
+    out as the Yes/No confirm."""
+    from uuid import uuid4
+
+    tid = str(uuid4())
+    state = {
+        "status": "active", "cursor": 0, "last_message_sid": None,
+        "question_queue": [{"field": "key_business_challenges", "kind": "gap",
+                            "prompt_en": "Challenges?", "prompt_hi": "?"}],
+        "answers": {}, "skipped": [],
+    }
+    monkeypatch.setattr(j, "get_journey", lambda t: dict(state))
+    monkeypatch.setattr(j, "_advance", lambda *a, **k: None)
+    monkeypatch.setattr(j, "_append_recent_turns", lambda *a, **k: None)
+    monkeypatch.setattr(j, "_capture_missed_about_gap", lambda *a, **k: None)
+    monkeypatch.setattr(j, "_advance_cursor_past_answered", lambda g, a, s: 1)
+    installed: dict = {}
+    monkeypatch.setattr(j, "_install_recomposed_queue",
+                        lambda t, q, sid: installed.__setitem__("fields", [x["field"] for x in q]))
+
+    import orchestrator.onboarding.whatsapp_journey as wj
+
+    monkeypatch.setattr(wj, "gst_identity_pending", lambda t, a: True)
+    monkeypatch.setattr(wj, "gst_identity_card_question",
+                        lambda t: {"field": "gst_identity", "kind": "confirm", "draft_value": "yes",
+                                   "prompt_en": "Found Rkecom — is this your business?",
+                                   "prompt_hi": "क्या यही आपका बिज़नेस है?"})
+
+    import orchestrator.onboarding.turn_brain as tb
+    from types import SimpleNamespace
+
+    plan = SimpleNamespace(reply_text="And your team size?", buttons=(), extracted_answers={},
+                           mark_confirmed=[], mark_rejected=[], done_hint=False, reasoning="")
+    monkeypatch.setattr(tb, "compose_turn", lambda *a, **k: plan)
+    monkeypatch.setattr(j, "populate_profile_from_draft", lambda t: {})
+    import orchestrator.onboarding.draft_profile as dp
+
+    monkeypatch.setattr(dp, "get_draft", lambda t: {"attributes": {}, "provenance": {}})
+
+    r = j._handle_reply_with_turn_brain(tid, "Customer reach", "SMtb1", lang="en")
+    assert r.get("turn_brain") is True and r.get("buttons") == ["Yes", "No", "Skip"]
+    assert "is this your business" in r["reply_text"].lower()
+    assert installed.get("fields") == ["gst_identity"], "card replaces the plan's queue"

@@ -1979,6 +1979,38 @@ def _handle_reply_with_turn_brain(
     new_cursor = _advance_cursor_past_answered(g, answers, skipped)
     _advance(tenant_id, new_cursor, answers, skipped, message_sid)
 
+    # VT-693/694 card-priority (TURN-BRAIN path — the walker seam alone missed it, live-proven):
+    # a PENDING GST identity card outranks whatever the plan wanted to ask next. This turn's
+    # answer was recorded above; the card replaces the (possibly stale pre-694) queue and goes
+    # out as the deterministic Yes/No confirm — the LLM never freelances past a pending
+    # identity decision. Post-card, the exhaustion path recomposes the residual under the new
+    # rules.
+    if "gst_identity" not in answers:
+        from orchestrator.onboarding.whatsapp_journey import (
+            gst_identity_card_question,
+            gst_identity_pending,
+        )
+
+        if gst_identity_pending(tenant_id, answers):
+            _card_q = gst_identity_card_question(tenant_id)
+            if _card_q:
+                _install_recomposed_queue(tenant_id, [_card_q], message_sid)
+                _append_recent_turns(
+                    tenant_id, {"role": "owner", "text": body},
+                    {"role": "bot", "text": _card_q["prompt_en"]},
+                    message_sid=message_sid,
+                )
+                return {
+                    # turn_brain-style so the consumer routes through _send_turn — the
+                    # Yes/No/Skip set rides the registered confirm Content object (buttons).
+                    "turn_brain": True,
+                    "reply_text": _card_q["prompt_hi"] if lang == "hi" else _card_q["prompt_en"],
+                    "reply_en": _card_q["prompt_en"],
+                    "reply_hi": _card_q["prompt_hi"],
+                    "buttons": ["Yes", "No", "Skip"],
+                    "done": False,
+                }
+
     done = new_cursor >= len(g.get("question_queue") or [])
     if done:
         if card:
