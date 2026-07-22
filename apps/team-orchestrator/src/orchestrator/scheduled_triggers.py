@@ -1177,6 +1177,78 @@ def run_owner_comms_sweep_body(now: datetime | None = None) -> dict[str, int]:
 
 
 # ---------------------------------------------------------------------------
+# VT-683 P3 — the daily wake-up loop (team_wakeup2)
+# ---------------------------------------------------------------------------
+# EXTENDS the scheduled-trigger surface (CL-240 — never a parallel poller). Fires ONCE daily at
+# 05:00 UTC = 10:30 IST — owner waking hours BY CRON PLACEMENT (the same shape DAILY_INITIATIVE_CRON
+# uses; _assert_ist_daytime is the belt-and-suspenders runtime guard). It wakes a tenant with the
+# whitelisted team_wakeup2 template iff ALL of:
+#   (a) the 24h owner session is CLOSED — an OPEN session drains via owner_comms_sweep, not a wake-up;
+#   (b) the tenant has >= 1 queued owner-comms item — the scan is queued-only, so this is honest by
+#       construction, and the count becomes the pending_count var ("{{2}} item(s) waiting");
+#   (c) <= 1 wake-up per day — durable via tenants.last_wakeup_at (mig 181), WAKEUP_MIN_INTERVAL;
+#   (d) owner hours IST — cron placement + the _assert_ist_daytime belt.
+# Any reply (or the Review button) opens the session -> owner_comms_sweep drains the queue (P2b).
+# NO LLM (the wake-up selection is fully deterministic — Pillar 1).
+
+WAKEUP_SWEEP_CRON = "0 5 * * *"  # 05:00 UTC = 10:30 IST — owner-hours daily slot (VT-683 P3)
+
+
+def wakeup_sweep_scheduled(scheduled_time: datetime, actual_time: datetime) -> None:
+    """DBOS scheduled handler — fires daily 10:30 IST / 05:00 UTC (VT-683 P3). The IST belt mirrors
+    daily_initiative's guard: a mis-set cron must never wake owners outside daytime hours. NO LLM."""
+    _assert_ist_daytime(actual_time)
+    run_wakeup_sweep_body(now=actual_time)
+
+
+def run_wakeup_sweep_body(now: datetime | None = None) -> dict[str, int]:
+    """Daily wake-up sweep body — REAL (VT-683 P3). Returns counts for canary inspection.
+
+    Scans tenants holding queued owner-comms (condition (b) by construction) and, for each whose 24h
+    session is CLOSED (a) and that has not been woken within WAKEUP_MIN_INTERVAL (c), sends
+    team_wakeup2 then records the send (the ≤1/day durable mark). Per-tenant try/except: one broken
+    tenant must not halt the sweep (matches the owner_comms + approval-timeout bodies). ``now`` is
+    injectable for the canary; the session/idle gates read live DB state regardless."""
+    from orchestrator.owner_surface import wakeup
+    from orchestrator.owner_surface.session_window import session_open
+
+    now = now or datetime.now(timezone.utc)
+    scanned = 0
+    sent = 0
+    for tenant_id in _tenants_with_queued_comms():
+        scanned += 1
+        try:
+            # (a) only wake a CLOSED session (an open session drains via owner_comms_sweep).
+            if session_open(tenant_id):
+                continue
+            # (c) ≤1/day durable gate.
+            if not wakeup.wakeup_due(tenant_id, now=now):
+                continue
+            # (b) honest pending count (>= 1 since the scan is queued-only; fail-soft 0 → skip).
+            pending_count = wakeup.queued_comms_count(tenant_id)
+            if pending_count < 1:
+                continue
+            owner_phone, owner_name = wakeup.owner_contact(tenant_id)
+            if not owner_phone:
+                logger.warning("wakeup_sweep: no owner phone for tenant=%s; skipping", tenant_id)
+                continue
+            result = wakeup.send_wakeup(
+                tenant_id,
+                owner_phone=owner_phone,
+                owner_name=owner_name,
+                pending_count=pending_count,
+            )
+            # Only record on a CONFIRMED send — a reported failure (unapproved SID, transport 4xx)
+            # leaves last_wakeup_at untouched so the next slot retries (still ≤1/day).
+            if result is not None and result.success:
+                wakeup.mark_wakeup_sent(tenant_id, now=now)
+                sent += 1
+        except Exception:  # noqa: BLE001 — one tenant must not halt the sweep
+            logger.exception("wakeup_sweep: tenant %s failed; sweep continues", tenant_id)
+    return {"scanned": scanned, "sent": sent}
+
+
+# ---------------------------------------------------------------------------
 # VT-679 (§7A) — proactive planning: monthly plan-refresh + daily initiative
 # ---------------------------------------------------------------------------
 # Two triggers, both gated behind TEAM_PROACTIVE_PLANNING (default OFF — the handlers below no-op
@@ -1425,6 +1497,9 @@ def register_scheduled_triggers() -> None:
     # gates the HANDLER BODY (no-op fast when unset) — EXTENDS this surface, NOT parallel pollers.
     _register_scheduled(PLAN_REFRESH_CRON, plan_refresh_scheduled)
     _register_scheduled(DAILY_INITIATIVE_CRON, daily_initiative_scheduled)
+    # VT-683 P3: the daily wake-up loop (team_wakeup2) — fires 10:30 IST; wakes a CLOSED-session
+    # tenant with queued owner-comms, ≤1/day. EXTENDS this surface (CL-240), NOT a parallel poller.
+    _register_scheduled(WAKEUP_SWEEP_CRON, wakeup_sweep_scheduled)
     _registered = True
 
 
@@ -1483,6 +1558,9 @@ __all__ = [
     "run_plan_refresh_body",
     "daily_initiative_scheduled",
     "run_daily_initiative_body",
+    "WAKEUP_SWEEP_CRON",
+    "wakeup_sweep_scheduled",
+    "run_wakeup_sweep_body",
     "weekly_cadence_scheduled",
     "weekly_workflow_id",
 ]

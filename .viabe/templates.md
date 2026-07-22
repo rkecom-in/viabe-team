@@ -36,11 +36,11 @@ the 24h conversation session (queued, idle-paced — VT-683). CC maintains this 
 | `team_status_ping` | reactive to owner ping | → freeform NOW (P1) |
 | `team_dsr_acknowledgment` | reactive to owner DSR keyword | → freeform NOW (P1) |
 | `team_error_handler` | async Twilio failure callback | keep as system fallback until P4 review |
-| `team_reengage` | manager stale-task nudge | → MERGE into `team_wakeup` (Fazal point B, pending) |
-| `team_monthly_report` | **ORPHANED — no code sends it** (report ships via email/PDF) | mark deprecated at P4 |
+| `team_reengage` | ~~manager stale-task nudge~~ | **DONE — MERGED into `team_wakeup2`** (VT-683 point B, Fazal 2026-07-22): `stale_resume.reengage_stale_task` now sends `team_wakeup2`. Deprecated; retained for back-compat. |
+| `team_monthly_report` | **ORPHANED — no code sends it** (report ships via email/PDF) | **DONE — deprecated (VT-683 P4)**; retained for back-compat |
 
 ### DEPRECATED (never send)
-`team_welcome` · `team_welcome2` · `team_welcome3` · **`team_wakeup` v1** (en `HXd6c8cb13…` hi `HX26d778c5…` hing `HX08b86198…` — Meta force-converted UTILITY→MARKETING 2026-07-18, the welcome2/3 class; superseded by `team_wakeup2`).
+`team_welcome` · `team_welcome2` · `team_welcome3` · **`team_wakeup` v1** (en `HXd6c8cb13…` hi `HX26d778c5…` hing `HX08b86198…` — Meta force-converted UTILITY→MARKETING 2026-07-18, the welcome2/3 class; superseded by `team_wakeup2`) · **`team_reengage`** (VT-683 point B — merged into `team_wakeup2`) · **`team_monthly_report`** (VT-683 P4 — orphaned; report ships via email/PDF).
 
 ---
 
@@ -225,6 +225,8 @@ Hi {{1}}, things are running. Last activity on your account: {{2}}. {{3}} is up 
 
 ### `team_reengage`  *(VT-486 — owner-facing OUT-OF-WINDOW (>24h) re-engagement; system-invoked, NOT agent-selectable)*
 
+> **DEPRECATED (VT-683 point B, Fazal 2026-07-22):** merged into the daily wake-up — `manager/stale_resume.reengage_stale_task` now sends **`team_wakeup2`** (one re-engage surface). Retained for history/back-compat resolution only; no live path sends this.
+
 - **Twilio Content SID (en):** `HXbdb250089fafc02a0d75ce6817e9ce11`
 - **Twilio Content SID (hi):** `HX27a50d65fedbb7b6a3c2fb6a6a24f13c`
 - **Category:** Utility · **Audience:** owner · **NO STOP line** (STOP is a customer-marketing opt-out, not an owner utility)
@@ -325,6 +327,8 @@ Per CL-5: target counts are 5 Tier-A launch-blocking + 17 Tier-B concierge-until
 Twilio issues a SEPARATE SID per language; the registry key is `(template_name, language) -> content_sid` (config/twilio_templates.yaml). Keywords (YES/NO/EDIT/START/CANCEL/ESCALATE) stay English (literal handler triggers).
 
 ### `team_monthly_report`  *(VT-163-fix-2 — system-invoked by VT-86, not agent-selectable)*
+
+> **DEPRECATED (VT-683 P4, 2026-07-22):** ORPHANED — zero call sites in `src/`; the monthly report ships via email/PDF, never a WhatsApp template. Retained for history/back-compat resolution only.
 
 - **Twilio Content SID:** `HX7a247e236782425866a8e20fd78df275` (en) / `HX252be212f9372e187caa03df117adc02` (hi)
 - **Type:** Media (document/PDF header) + body. Category: Utility.
