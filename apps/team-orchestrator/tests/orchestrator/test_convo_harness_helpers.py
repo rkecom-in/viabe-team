@@ -367,12 +367,18 @@ def test_evaluate_db_asserts_dispatches_each_present_key(monkeypatch):
         "assert_route": {"expect_sr_delegation": True},
         "assert_grounded_count": {"expected_count": 8},
     }
-    failures = ch._evaluate_db_asserts("dsn", "tenant-x", "run-1", step)
+    failures = ch._evaluate_db_asserts("dsn", "tenant-x", "run-1", step, turn_sid="SMsid1")
     assert failures == []
     kinds = [c[0] for c in calls]
     assert kinds == ["route", "grounded"]  # assert_side_effects key absent -> not called
-    assert calls[0] == ("route", "tenant-x", "run-1", {"expect_sr_delegation": True})
-    assert calls[1] == ("grounded", "tenant-x", "run-1", {"expected_count": 8})
+    # VT-683 P2d: turn_sid rides along so the run-scoped campaigns lookup can follow the
+    # async manager_dispatch draft (manager_tasks.source_message_ref join).
+    assert calls[0] == (
+        "route", "tenant-x", "run-1", {"expect_sr_delegation": True, "turn_sid": "SMsid1"}
+    )
+    assert calls[1] == (
+        "grounded", "tenant-x", "run-1", {"expected_count": 8, "turn_sid": "SMsid1"}
+    )
 
 
 def test_evaluate_db_asserts_merges_failures_from_every_present_key(monkeypatch):
@@ -405,7 +411,8 @@ def test_evaluate_db_asserts_tenant_wide_flag_is_never_forwarded_to_the_assert_f
     failures = ch._evaluate_db_asserts("dsn", "tenant-x", "run-N+1", step)
     assert failures == []
     assert captured["rid"] is None  # resolved to tenant-wide
-    assert captured["kw"] == {"expect_sent_count": 2}  # tenant_wide never leaked into the call
+    # tenant_wide never leaks; turn_sid (P2d) is the only kwarg _evaluate_db_asserts adds.
+    assert captured["kw"] == {"expect_sent_count": 2, "turn_sid": None}
 
 
 def test_evaluate_db_asserts_without_tenant_wide_still_scopes_to_the_turn(monkeypatch):
