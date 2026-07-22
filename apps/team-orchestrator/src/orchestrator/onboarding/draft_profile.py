@@ -48,6 +48,20 @@ def write_draft(
         )
 
 
+def remove_draft_fields(tenant_id: UUID | str, fields: list[str]) -> None:
+    """VT-693 — DELETE the named fields (attributes + provenance) from the tenant's draft. Used
+    when the owner DECLINES the discovered GST identity (wrong company — nothing may survive,
+    even as a hint). Idempotent; a missing row/field is a no-op."""
+    if not fields:
+        return
+    with tenant_connection(tenant_id) as conn:
+        conn.execute(
+            "UPDATE business_profile_draft SET attributes = attributes - %s::text[], "
+            "provenance = provenance - %s::text[], updated_at = now() WHERE tenant_id = %s",
+            (list(fields), list(fields), str(tenant_id)),
+        )
+
+
 def get_draft(tenant_id: UUID | str) -> dict[str, Any]:
     """The tenant's draft as ``{attributes, provenance}`` for the onboarding confirm UI; ``{}`` if
     no draft exists yet (engine hasn't run / found nothing)."""
