@@ -170,6 +170,15 @@ def test_data_inputs_enable_handler_sets_owner_inputs_true(gate, monkeypatch):
         return "SMfake"
 
     monkeypatch.setattr(h, "send_freeform_message", _capture)
+    # VT-700: the confirm is interactive-first (the agent chooser buttons); capture that leg too.
+    import orchestrator.utils.twilio_send as _ts
+
+    def _capture_int(sid, phone, *, content_variables=None, tenant_id=None, surface=None, **k):
+        sent["body"], sent["phone"] = str((content_variables or {}).get("1") or ""), phone
+        sent["tenant_id"], sent["surface"] = tenant_id, surface
+        return "SMfake"
+
+    monkeypatch.setattr(_ts, "send_interactive_message", _capture_int)
     tenant_id = _new_tenant(gate.dsn)
     sub = _state(gate, tenant_id)
     outcome = h.data_inputs_enable_handler(_inbound(gate, "ACTIVATE TEAM"), sub)
@@ -199,6 +208,15 @@ def test_consent_required_handler_sends_prompt_no_transmit(gate, monkeypatch):
         return "SMfake"
 
     monkeypatch.setattr(h, "send_freeform_message", _capture)
+    # VT-700: the ask is interactive-first (ACTIVATE TEAM button); the prompt rides {{1}}.
+    import orchestrator.utils.twilio_send as _ts
+
+    def _capture_int(sid, phone, *, content_variables=None, tenant_id=None, surface=None, **k):
+        sent["body"], sent["phone"] = str((content_variables or {}).get("1") or ""), phone
+        sent["surface"] = str(surface)
+        return "SMfake"
+
+    monkeypatch.setattr(_ts, "send_interactive_message", _capture_int)
     sub = _state(gate, _new_tenant(gate.dsn))
     outcome = h.consent_required_handler(_inbound(gate, "plan a campaign"), sub)
     assert outcome["handler"] == "consent_required_handler"
@@ -222,6 +240,13 @@ def test_consent_required_handler_acknowledges_decline(gate, monkeypatch):
         return "SMfake"
 
     monkeypatch.setattr(h, "send_freeform_message", _capture)
+    import orchestrator.utils.twilio_send as _ts
+
+    monkeypatch.setattr(
+        _ts, "send_interactive_message",
+        lambda sid, phone, *, content_variables=None, **k:
+        sent.update({"body": str((content_variables or {}).get("1") or "")}) or "SMfake",
+    )
     sub = _state(gate, _new_tenant(gate.dsn))
     outcome = h.consent_required_handler(_inbound(gate, "no thanks, not right now"), sub)
     assert outcome["consent_prompt_sent"] is True

@@ -107,6 +107,7 @@ _FLOW_KEY = "__flow__"
 _FLOW_PREVIEWED = "profile_previewed"   # card shown; waiting for the owner to acknowledge
 _FLOW_INTRO_SENT = "team_intro"         # VT-698: how-your-team-works intro sent; waiting for ack
 _FLOW_TRIAL_SENT = "agent_trial"        # VT-698: agent + 1-month-trial terms sent; waiting for ack
+_FLOW_AGENT_CHOICE = "agent_choice"     # VT-700: post-activation agent chooser sent; waiting for a pick
 _FLOW_READY_ASKED = "ready_asked"       # readiness ask sent; waiting for yes / later
 _FLOW_DEFERRED = "deferred"             # owner declined; paused but resumable on a clear "connect"
 _FLOW_INTEGRATION_PREFIX = "integration:"  # an integration handoff is in flight (e.g. integration:shopify)
@@ -2260,6 +2261,28 @@ _AGENT_TRIAL = {
 }
 _AGENT_TRIAL_BUTTONS = {"en": ["Connect my data", "Later"], "hi": ["डेटा जोड़ें", "बाद में"]}
 
+# VT-700 — the specialist-agent catalog the post-activation chooser offers. Keys are the EXACT
+# lowercased button titles (the tap echo); values are the recorded agent slugs. Titles must stay
+# in sync with data_inputs_enable_handler._AGENT_BUTTONS. Finite exact-match enum — allowed
+# under the no-keyword-lists rule (defined outcomes, not open language).
+_AGENT_CATALOG = {
+    "sales recovery": "sales_recovery",
+    "customer win-back": "customer_winback",
+    "campaigns": "campaigns",
+}
+_AGENT_CHOSEN = {
+    "en": (
+        "{agent} is on your team — your FREE 1-month trial starts now (after the month it's "
+        "paid ONLY if you choose to continue; stop anytime). To put it to work, the next step "
+        "is connecting your business data. Ready?"
+    ),
+    "hi": (
+        "{agent} अब आपकी टीम में है — आपका FREE 1-महीने का trial शुरू (महीने के बाद paid, "
+        "सिर्फ़ तभी जब आप जारी रखें; कभी भी बंद कर सकते हैं)। इसे काम पर लगाने के लिए अगला "
+        "कदम है आपका business data जोड़ना। तैयार?"
+    ),
+}
+
 _READINESS_ASK = {
     "en": (
         "Want me to set up your data connections now so I can start finding sales to recover? "
@@ -2573,6 +2596,31 @@ def _maybe_handle_post_profile_flow(
         if _resolve_readiness_intent(body) == "decline":
             return _flow_defer(tenant_id, recipient, message_sid, lang)
         return _flow_offer_next_integration(tenant_id, recipient, message_sid, lang, body=body)
+
+    if flow == _FLOW_AGENT_CHOICE:
+        # VT-700 — the post-activation agent pick. An EXACT catalog tap records the choice
+        # (durable, draft substrate) and confirms the trial in ONE message, then hands to the
+        # existing readiness machinery ("Ready?" → yes = connection offer / later = defer).
+        # "Later" defers; anything else falls through to the brain (never hijack free text).
+        choice = _AGENT_CATALOG.get((body or "").strip().lower())
+        if choice:
+            try:
+                from orchestrator.onboarding.draft_profile import get_draft, write_draft
+
+                have = (get_draft(tenant_id) or {}).get("attributes") or {}
+                agents = list(dict.fromkeys([*(have.get("activated_agents") or []), choice]))
+                write_draft(tenant_id, {"activated_agents": agents}, source="owner")
+            except Exception:  # noqa: BLE001 — the confirm still goes; recording is best-effort
+                logger.warning("journey flow: agent-choice record failed tenant=%s", tenant_id)
+            key = "hi" if lang == "hi" else "en"
+            text = _AGENT_CHOSEN[key].format(agent=(body or "").strip())
+            _send_turn(recipient, text, ["Yes", "Later"], lang, tenant_id=tenant_id)
+            _set_flow(tenant_id, _FLOW_READY_ASKED, message_sid=message_sid)
+            return {"done": False, "routed": "flow_agent_chosen", "agent": choice,
+                    "flow": _FLOW_READY_ASKED}
+        if _resolve_readiness_intent(body) == "decline":
+            return _flow_defer(tenant_id, recipient, message_sid, lang)
+        return None
 
     if flow == _FLOW_READY_ASKED:
         # VT-583: floor-first, brain-mediated middle (see _resolve_readiness_intent). A decline defers;
