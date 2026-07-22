@@ -24,6 +24,50 @@ logger = logging.getLogger(__name__)
 
 _GAP_MODEL = "claude-haiku-4-5-20251001"
 _MAX_GAPS = 6  # minimal — never a 20-question dump
+# VT-693 (Fazal 2026-07-22, first-customer screenshots: "endless questions"): once ONLINE
+# discovery has produced a draft, the residual the owner is asked shrinks hard — the
+# intelligence exhausts sources first, asks only what genuinely remains.
+_MAX_GAPS_WITH_DRAFT = 3
+
+# VT-693 — canonical-field alias collapse (deterministic synonym belt). The gap LLM invents a
+# fresh snake_case name per turn ("products_services" one turn, "main_services" the next), so
+# name-keyed dedup let REPEATS reach the owner (the measured screenshot: products/services
+# asked twice in different words). Finite alias map onto the canonical question fields — an
+# enum collapse, not open-language matching (the no-keyword-lists rule allows exactly this).
+_FIELD_ALIASES: dict[str, str] = {
+    "products": "about", "services": "about", "products_services": "about",
+    "products_or_services": "about", "main_services": "about", "services_offered": "about",
+    "offerings": "about", "main_products": "about", "products_offered": "about",
+    "business_activities": "about", "main_activities": "about", "what_you_sell": "about",
+    "nature_of_business": "about",
+    "hours": "operating_hours", "timings": "operating_hours", "business_hours": "operating_hours",
+    "opening_hours": "operating_hours", "working_hours": "operating_hours",
+    "customers": "typical_customer", "typical_customers": "typical_customer",
+    "target_customers": "typical_customer", "customer_type": "typical_customer",
+    "target_audience": "typical_customer", "customer_segments": "typical_customer",
+    "pricing": "price_range", "pricing_model": "price_range",
+    "prices": "price_range", "typical_price_range": "price_range",
+    "location": "city", "area": "city", "locality": "city",
+}
+
+
+def _canonical_field(name: str) -> str:
+    n = (name or "").strip().lower()
+    return _FIELD_ALIASES.get(n, n)
+
+
+def covered_by_draft(draft_attrs: dict[str, Any]) -> set[str]:
+    """VT-693 — canonical question-fields the DISCOVERY payload already answers, so the gap
+    composer never re-asks them: a GST ``nature_of_business`` covers 'about'; a registered
+    ``principal_address`` covers 'city'; a legal/trade name covers 'business_name'."""
+    covered: set[str] = set()
+    if draft_attrs.get("nature_of_business"):
+        covered.add("about")
+    if draft_attrs.get("principal_address"):
+        covered.add("city")
+    if draft_attrs.get("legal_name") or draft_attrs.get("trade_name"):
+        covered.add("business_name")
+    return covered
 _COMPOSE_TIMEOUT_S = 20.0  # bound the gap-compose LLM call (runs on the owner-inbound hot path)
 
 # Draft fields worth an explicit owner confirm (the discovered identity). Bilingual templates below.
@@ -112,7 +156,16 @@ def compose_onboarding_questions(
 
     # 2. Gaps — the LLM reasons which required fields THIS business_type still needs, excluding what's
     #    already known (drafted or answered). It returns bilingual question objects.
-    known = set(draft_attrs) | answered_set
+    #    VT-693: 'known' is CANONICALIZED (alias collapse) and unioned with the fields the
+    #    discovery payload semantically covers — a synonym-renamed repeat can never survive the
+    #    dedup, and a fact discovery already fetched is never asked. With a non-empty draft the
+    #    residual budget also tightens (_MAX_GAPS_WITH_DRAFT).
+    known = (
+        {_canonical_field(f) for f in draft_attrs}
+        | {_canonical_field(f) for f in answered_set}
+        | covered_by_draft(draft_attrs)
+    )
+    max_gaps = _MAX_GAPS_WITH_DRAFT if draft_attrs else _MAX_GAPS
     try:
         raw = (llm_fn or _llm_compose_gaps)(business_type, draft_attrs, sorted(answered_set))
     except Exception:  # noqa: BLE001 — gap reasoning is best-effort; the confirm questions still stand
@@ -121,7 +174,7 @@ def compose_onboarding_questions(
     gaps: list[Question] = []
     seen: set[str] = set()
     for g in raw or []:
-        field = (g.get("field") or "").strip()
+        field = _canonical_field((g.get("field") or "").strip())
         if not field or field in known or field in seen:
             continue
         seen.add(field)
@@ -133,7 +186,7 @@ def compose_onboarding_questions(
                 prompt_hi=g.get("prompt_hi") or f"क्या आप अपना {field} बता सकते हैं?",
             )
         )
-        if len(gaps) >= _MAX_GAPS:
+        if len(gaps) >= max_gaps:
             break
 
     return confirms + gaps
@@ -147,17 +200,24 @@ def _llm_compose_gaps(
     questions still stand). CL-390: business context only — never ask for third-party PII."""
     from anthropic import Anthropic
 
-    known = sorted(set(draft_attrs) | set(answered))
+    # VT-693: give the model the VALUES, not just opaque field names — semantic coverage is
+    # what stops "what do you sell?" after a GST nature_of_business already answered it. Values
+    # are business-level context only (the draft never holds third-party PII) and truncated.
+    known_with_values = {
+        k: str(v)[:80] for k, v in sorted(draft_attrs.items()) if v not in (None, "", [])
+    }
     prompt = (
         f"A small Indian business is onboarding to an AI assistant. business_type: {business_type}. "
-        f"We ALREADY know these fields (do NOT ask about them again): {known or 'none'}. "
-        "List the MINIMAL set of additional business-context fields this specific business_type still "
-        "needs for the assistant to help it (e.g. products/services, operating_hours, typical_customer, "
-        "price_range, peak_days) — reason about what THIS type needs, not a fixed script. "
-        "Ask ONLY about the business itself; NEVER ask for any customer's or third party's personal "
-        "details (CL-390). Return at most 6, ordered most-important-first, as JSON: a list of objects "
-        '{"field": "<snake_case>", "prompt_en": "<short question>", "prompt_hi": "<Hindi question>"}. '
-        "JSON array only, no prose."
+        f"We ALREADY know (from online discovery + the owner's own answers) — do NOT ask about any "
+        f"of this again, INCLUDING rephrasings or synonyms of it: {known_with_values or 'none'}; "
+        f"owner already answered fields: {sorted(answered) or 'none'}. "
+        "List the MINIMAL set of genuinely-missing business-context fields this specific "
+        "business_type still needs (e.g. operating_hours, typical_customer, price_range, peak_days) "
+        "— reason about what THIS type needs, not a fixed script. If nothing meaningful is missing, "
+        "return []. Ask ONLY about the business itself; NEVER ask for any customer's or third "
+        "party's personal details (CL-390). Return at most 3, ordered most-important-first, as "
+        'JSON: a list of objects {"field": "<snake_case>", "prompt_en": "<short question>", '
+        '"prompt_hi": "<Hindi question>"}. JSON array only, no prose.'
     )
     try:
         resp = Anthropic().messages.create(

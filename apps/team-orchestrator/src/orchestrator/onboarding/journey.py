@@ -633,7 +633,11 @@ def _complete_or_hold(
         return _completion_message(answers)
     # Queue exhausted but profile NOT complete — the thin-draft case. Recompose from the current draft
     # and present the pending question; hold honestly if the draft still yields nothing (never a closer).
-    queue = _compose_queue(tenant_id, business_type)
+    # VT-693: a pending GST identity card always heads the recomposed queue (identity confirm
+    # before any residual question; no-op for web tenants / nothing pending).
+    from orchestrator.onboarding.whatsapp_journey import with_gst_card
+
+    queue = with_gst_card(tenant_id, _compose_queue(tenant_id, business_type), answers)
     if queue:
         _install_recomposed_queue(tenant_id, queue, message_sid)
         head = queue[0]
@@ -738,6 +742,29 @@ def handle_reply(
     if is_skip:
         if field and field not in skipped:
             skipped.append(field)
+    elif q.get("kind") == "confirm" and field == "gst_identity":
+        # VT-693 — the GST IDENTITY CARD is a special confirm: YES anchors the discovered
+        # identity (populate + covered-question suppression + the formal Sandbox verify via the
+        # candidate GSTIN); NO discards the discovered GST fields entirely (wrong company —
+        # nothing may survive as a hint). Either way the answer records ('yes'/'no', never a
+        # profile value) and the shared record-and-move-on advance below presents what's next —
+        # the generic confirm value/promote machinery never touches the card.
+        from orchestrator.onboarding.whatsapp_journey import (
+            accept_gst_identity,
+            decline_gst_identity,
+        )
+
+        _accepted = bool(toks & _YES)
+        try:
+            if _accepted:
+                accept_gst_identity(tenant_id)
+            else:
+                decline_gst_identity(tenant_id)
+        except Exception:  # noqa: BLE001 — the record/advance must never stall on the side effects
+            logger.exception("journey: gst_identity %s failed tenant=%s",
+                             "accept" if _accepted else "decline", tenant_id)
+        answers[field] = "yes" if _accepted else "no"
+        recorded_answer = True
     elif q.get("kind") == "confirm":
         # DF7(b) defense-in-depth (parity with the enforce gate's confirm-correction routing, for the
         # legacy/shadow walker paths): a NON-bare negation to a confirm ("nahi bhai, hum footwear nahi
