@@ -143,6 +143,25 @@ onboarding_confirm_yesno:
   languages:
     en: HX60ace8008b02439ca0db444dee6327d2
 
+journey_suggest_3:
+  # VT-694 (Fazal 2026-07-22: "each question we ask him must be accompanied with a list of
+  # suggestive answers as buttons"): ONE generic in-session quick-reply object whose BUTTON
+  # TITLES are variables — {{1}} = the question, {{2}}..{{4}} = up to three suggested answers
+  # (the MOST LIKELY answer first; pad with "Skip" when fewer). A tap echoes the suggestion
+  # text as the inbound Body = the recorded answer (no parse change); typing still works.
+  # NOT Meta-approved — in-session interactive registration only (canary
+  # canaries/vt694_suggest_buttons_create.py PROVED variable button titles are accepted).
+  # Button ids: suggest_1/2/3.
+  audience: owner
+  agent_selectable: false
+  variables:
+    - question_text
+    - suggestion_1
+    - suggestion_2
+    - suggestion_3
+  languages:
+    en: HX41f744c4e398e5d09fd69243a766871c
+
 team_signup_consent_buttons:
   # VT-691 (Fazal 2026-07-22): the WhatsApp-signup consent ask as an IN-SESSION interactive
   # quick-reply — the signup does NOT start unless the person explicitly presses "I agree";

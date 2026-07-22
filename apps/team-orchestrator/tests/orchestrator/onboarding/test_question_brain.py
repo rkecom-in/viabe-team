@@ -144,3 +144,18 @@ def test_all_discovered_field_confirms_are_grounded():
     ):
         q = _confirm_question(field, value)
         assert _cites_provenance(q.prompt_en), f"{field}: {q.prompt_en!r} must cite provenance"
+
+
+def test_gap_suggestions_pass_through_clamped():
+    """VT-694: suggestions ride the Question (most-likely first, ≤3, ≤20 chars each)."""
+    def _llm(bt, da, ans):
+        return [{"field": "operating_hours", "prompt_en": "Hours?", "prompt_hi": "?",
+                 "suggestions_en": ["24/7 online", "10am-9pm every day and more text", "Weekdays", "Extra4"],
+                 "suggestions_hi": ["२४/७"]}]
+
+    qs = compose_onboarding_questions("services", {"attributes": {}}, answered=[], llm_fn=_llm)
+    q = [x for x in qs if x.kind == "gap"][0]
+    assert q.suggestions_en[0] == "24/7 online"
+    assert len(q.suggestions_en) == 3, "clamped to 3"
+    assert all(len(s) <= 20 for s in q.suggestions_en), "20-char button-title clamp"
+    assert q.suggestions_hi == ("२४/७",)

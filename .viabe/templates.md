@@ -287,6 +287,20 @@ Namaste! This is Viabe Team — … consent text with viabe.ai/team/dpdp + /priv
 
 ---
 
+### `journey_suggest_3`  *(VT-694 — INTERACTIVE suggested-answer buttons on journey questions; NOT a Meta-approved template)*
+
+- **Twilio Content SID:** en `HX41f744c4e398e5d09fd69243a766871c`
+- **Content type:** `twilio/quick-reply` with **VARIABLE BUTTON TITLES** (canary-proved: Twilio accepts `{{n}}` in `actions[].title`) — `{{1}}` = the question, `{{2}}..{{4}}` = up to three suggested answers (most-likely first; padded with "Skip"). Canary `canaries/vt694_suggest_buttons_create.py`.
+- **Sent by:** `journey._send_suggestion_buttons` (deterministic walker gap questions with suggestions + turn-brain dynamic button sets). A tap echoes the suggestion text as the inbound Body = the recorded answer; typing still works. Freeform fallback on any failure.
+- **Button `id` payloads:** `suggest_1` / `suggest_2` / `suggest_3` (titles are the data; ids unused by parsing).
+
+```
+{{1}}
+[ {{2}} ]  [ {{3}} ]  [ {{4}} ]
+```
+
+---
+
 ### `team_approval_buttons`  *(VT-683 P2c — INTERACTIVE in-session approval ask; NOT a Meta-approved 24h-window template)*
 
 - **Twilio Content SIDs:** en `HX6b8aa56b3497301f86152983686064d7` · hi `HX3b0f0c7926f557e4de1d007682cdaabe`

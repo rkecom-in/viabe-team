@@ -85,6 +85,12 @@ class Question:
     prompt_en: str
     prompt_hi: str
     draft_value: Any = None
+    # VT-694 — up to 3 suggested answers (MOST LIKELY first, inferred from the business type +
+    # everything known; <=20 chars each — WhatsApp quick-reply title limit). Delivered as
+    # tappable buttons (journey_suggest_3); a tap echoes the text as the answer, typing still
+    # works. Empty for confirms (they have Yes/No/Skip) and open questions (a name).
+    suggestions_en: tuple[str, ...] = ()
+    suggestions_hi: tuple[str, ...] = ()
 
 
 def _business_type_label(key: Any) -> tuple[str, str]:
@@ -178,12 +184,20 @@ def compose_onboarding_questions(
         if not field or field in known or field in seen:
             continue
         seen.add(field)
+        def _sugg(key: str) -> tuple[str, ...]:
+            vals = g.get(key) or []
+            if not isinstance(vals, list):
+                return ()
+            return tuple(str(v).strip()[:20] for v in vals if str(v).strip())[:3]
+
         gaps.append(
             Question(
                 field=field,
                 kind="gap",
                 prompt_en=g.get("prompt_en") or f"Could you tell us your {field}?",
                 prompt_hi=g.get("prompt_hi") or f"क्या आप अपना {field} बता सकते हैं?",
+                suggestions_en=_sugg("suggestions_en"),
+                suggestions_hi=_sugg("suggestions_hi"),
             )
         )
         if len(gaps) >= max_gaps:
@@ -214,10 +228,15 @@ def _llm_compose_gaps(
         "List the MINIMAL set of genuinely-missing business-context fields this specific "
         "business_type still needs (e.g. operating_hours, typical_customer, price_range, peak_days) "
         "— reason about what THIS type needs, not a fixed script. If nothing meaningful is missing, "
-        "return []. Ask ONLY about the business itself; NEVER ask for any customer's or third "
+        "return []. This must NEVER feel like an interview: prefer to INFER from the business type "
+        "and everything known, and for EVERY question include 2-3 suggested answers with the MOST "
+        "LIKELY answer FIRST (your best inference — e.g. a BI-services firm: '24/7 online', 'No "
+        "fixed season'), each suggestion <= 20 characters, shown to the owner as tap buttons. "
+        "Ask ONLY about the business itself; NEVER ask for any customer's or third "
         "party's personal details (CL-390). Return at most 3, ordered most-important-first, as "
         'JSON: a list of objects {"field": "<snake_case>", "prompt_en": "<short question>", '
-        '"prompt_hi": "<Hindi question>"}. JSON array only, no prose.'
+        '"prompt_hi": "<Hindi question>", "suggestions_en": ["<=3 short suggestions"], '
+        '"suggestions_hi": ["same in Hindi"]}. JSON array only, no prose.'
     )
     try:
         resp = Anthropic().messages.create(
