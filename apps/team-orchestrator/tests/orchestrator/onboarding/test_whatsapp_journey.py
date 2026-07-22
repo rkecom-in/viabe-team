@@ -200,6 +200,18 @@ def test_push_enqueues_recomposed_head(monkeypatch) -> None:
     assert "GSTIN" in calls["enqueued"][0]["payload"]["text_en"]
 
 
+def test_push_gst_head_carries_formatted_card(monkeypatch) -> None:
+    """VT-695 — when the recomposed head is the GST identity card, the push payload requests
+    the FORMATTED card object with its per-field variables (not the blob confirm)."""
+    _patch_draft(monkeypatch, _GST_ATTRS)
+    calls = _wire_push(monkeypatch, journey=_ACTIVE, queue=[])
+    assert wj.push_next_question_after_discovery(_TID) is True
+    payload = calls["enqueued"][0]["payload"]
+    assert payload["interactive_template"] == "journey_gst_card"
+    assert payload["interactive_variables"]["5"] == "…F1Z5"
+    assert payload["text_en"], "blob text stays as the drainer's freeform fallback"
+
+
 def test_push_completes_and_enqueues_recap_when_done(monkeypatch) -> None:
     calls = _wire_push(monkeypatch, journey=_ACTIVE, queue=[], complete=True)
     assert wj.push_next_question_after_discovery(_TID) is True

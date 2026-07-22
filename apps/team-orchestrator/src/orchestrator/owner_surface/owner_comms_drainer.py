@@ -105,10 +105,13 @@ def drain_one(
 
                 content_sid = content_sid_for(interactive_name, "en")
                 if content_sid:
+                    # VT-695 — a multi-variable object (the formatted GST card) carries its own
+                    # per-field values; the default stays body-as-{{1}} (single-var objects).
+                    _vars = payload.get("interactive_variables") or {"1": body}
                     sid = send_interactive_message(
                         content_sid,
                         recipient_phone,
-                        content_variables={"1": body},
+                        content_variables={str(k): str(v) for k, v in _vars.items()},
                         tenant_id=tenant_id,
                         surface="manager",
                     )
