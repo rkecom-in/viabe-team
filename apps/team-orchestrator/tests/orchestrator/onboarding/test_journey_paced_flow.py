@@ -628,3 +628,52 @@ def test_recent_shop_domain_reads_current_body_first() -> None:
     assert _recent_shop_domain(tid, current_body="Yes lets connect. My store is Probe-Store-A.myshopify.com by the way") == "probe-store-a.myshopify.com"
     # No domain in the current body → falls through to the log lookback (None here, no seeded log).
     assert _recent_shop_domain(tid, current_body="what do you charge?") is None
+
+
+# --- VT-700: post-activation agent-choice beat --------------------------------------------------
+
+
+def test_agent_choice_tap_records_and_asks_readiness(substrate, _stub_sends, monkeypatch):
+    """An exact catalog tap records the agent durably, confirms the trial in ONE message, and
+    hands to the existing readiness machinery."""
+    from orchestrator.onboarding.journey import maybe_handle_journey_reply
+
+    recorded = {}
+    import orchestrator.onboarding.draft_profile as dp
+
+    monkeypatch.setattr(dp, "get_draft", lambda t: {"attributes": {}})
+    monkeypatch.setattr(
+        dp, "write_draft",
+        lambda t, fields, *, source, **k: recorded.update({"fields": dict(fields), "source": source}),
+    )
+    tenant = _new_tenant(substrate.dsn, name="flow agent pick")
+    _seed_completed_journey(substrate.dsn, tenant, "agent_choice")
+
+    r = maybe_handle_journey_reply(tenant, "Sales Recovery", "SID-agent-1", "+919999003021")
+    assert r is not None and r.get("routed") == "flow_agent_chosen"
+    assert r.get("agent") == "sales_recovery"
+    assert recorded["fields"] == {"activated_agents": ["sales_recovery"]}
+    assert recorded["source"] == "owner"
+    assert _flow(substrate.dsn, tenant) == "ready_asked"
+    assert len(_stub_sends) == 1, "one message per beat"
+
+
+def test_agent_choice_later_defers(substrate, _stub_sends):
+    from orchestrator.onboarding.journey import maybe_handle_journey_reply
+
+    tenant = _new_tenant(substrate.dsn, name="flow agent later")
+    _seed_completed_journey(substrate.dsn, tenant, "agent_choice")
+    r = maybe_handle_journey_reply(tenant, "later", "SID-agent-2", "+919999003022")
+    assert r is not None and _flow(substrate.dsn, tenant) == "deferred"
+
+
+def test_agent_choice_free_text_falls_through_to_brain(substrate, _stub_sends):
+    from orchestrator.onboarding.journey import maybe_handle_journey_reply
+
+    tenant = _new_tenant(substrate.dsn, name="flow agent freetext")
+    _seed_completed_journey(substrate.dsn, tenant, "agent_choice")
+    r = maybe_handle_journey_reply(
+        tenant, "what does the recovery agent actually do?", "SID-agent-3", "+919999003023"
+    )
+    assert r is None, "free text is the brain's — the chooser never hijacks it"
+    assert _flow(substrate.dsn, tenant) == "agent_choice", "the pick stays armed for a later tap"
