@@ -166,6 +166,16 @@ def auto_discovery_run(
     _record_cost(
         tenant_id, spent, statuses, aborted, paused_ms=paused_ms, override_id=override_id
     )
+    # VT-692 addendum — the WhatsApp-journey follow-through: discovery just changed what the
+    # journey can ask, so the system SPEAKS NEXT (the "will ask a couple of quick questions"
+    # promise) by queueing the next question / completion recap into the VT-683 owner-comms
+    # queue (idle-paced, session-gated delivery). No-op for web tenants; fail-soft always.
+    try:
+        from orchestrator.onboarding.whatsapp_journey import push_next_question_after_discovery
+
+        push_next_question_after_discovery(tenant_id)
+    except Exception:  # noqa: BLE001 — the discovery result must never be disturbed
+        logger.warning("auto_discovery: post-run journey push failed (fail-soft) tenant=%s", tenant_id)
     return {"tenant_id": str(tenant_id), "spent_usd": round(spent, 4), "aborted": aborted, "sources": statuses}
 
 
