@@ -48,7 +48,7 @@ CL-422: dev = synthetic data only until prod-Mumbai (VT-231).
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from typing import Any, Callable, Literal
 from uuid import UUID, uuid4
 
@@ -64,6 +64,13 @@ logger = logging.getLogger(__name__)
 # name+lang -> content_sid). Brief D4: team_weekly_approval (NOT the legacy
 # weekly_approval_request).
 APPROVAL_TEMPLATE_NAME = "team_weekly_approval"
+
+# VT-683 P2c — the IN-SESSION interactive approval ask (twilio/quick-reply decision buttons;
+# registry entry team_approval_buttons, en+hi). Sent INSTEAD of the Meta template when the owner's
+# 24h session is open; the template remains the out-of-window belt. The button TITLES are part of
+# the resolution contract (they echo back as the inbound Body and must classify deterministically) —
+# see the registry entry + canaries/vt683_approval_buttons_create.py before changing anything.
+INTERACTIVE_APPROVAL_TEMPLATE = "team_approval_buttons"
 
 _DEFAULT_TIMEOUT_HOURS = 48
 _MAX_TIMEOUT_HOURS = 168  # 7 days
@@ -258,14 +265,20 @@ def arm_pause_request(
           (one open row per tenant) is the structural backstop — its
           IntegrityError at step 2 is the race-loser path, same refusal.
       1.  INSERT pending_approvals (decision NULL, status='pending', timeout_at =
-          now + timeout_hours) — the DURABLE row FIRST (VT-615 arm-then-send). A
-          migration-128 one-open-per-tenant unique race is lost HERE
-          (UniqueViolation) BEFORE any send: status='refused', no template out, no
-          dropped campaign.
-      2.  Send the plan summary (best-effort) then the approval template to the
-          OWNER. On send error -> DELETE the row just armed (restores "error -> no
-          open row") and return the error envelope; the caller will NOT interrupt,
-          the run terminates as a normal error, not a stuck pause.
+          NULL — VT-683 POINT A: the decision clock starts at DELIVERY, step 2d) —
+          the DURABLE row FIRST (VT-615 arm-then-send). A migration-128
+          one-open-per-tenant unique race is lost HERE (UniqueViolation) BEFORE any
+          send: status='refused', no ask out, no dropped campaign.
+      2.  Write the owner_comms_queue delivery-ledger record (fail-soft), send the
+          plan summary (best-effort), then the LOAD-BEARING ask: the in-session
+          INTERACTIVE quick-reply when the 24h session is open (VT-683 P2c), else
+          the Meta approval template (the out-of-window belt). On total send error
+          -> DELETE the row just armed + drop the ledger record (restores "error ->
+          no open row") and return the error envelope; the caller will NOT
+          interrupt, the run terminates as a normal error, not a stuck pause.
+          On success -> start the decision clock (timeout_at = now + timeout_hours)
+          + mark the ledger record delivered (POINT A: the owner can't time out on
+          an ask he never saw).
 
     ``conn_factory`` defaults to orchestrator.db.tenant_connection.
     ``send_fn`` defaults to twilio_send.send_template_message.
@@ -333,10 +346,14 @@ def arm_pause_request(
         # no implicit rollback; the pending_approvals_delete RLS policy permits the tenant-scoped delete) so
         # no orphan blocks the tenant's one-open queue and the "error -> no open row" contract still holds.
         approval_id = uuid4()
-        timeout_at = datetime.now(UTC) + timedelta(hours=payload.timeout_hours)
         from psycopg.errors import UniqueViolation
         from psycopg.types.json import Jsonb
 
+        # VT-683 POINT A (Fazal 2026-07-21): the decision clock starts at DELIVERY, never at arm.
+        # timeout_at is inserted NULL (mig 179) and set by start_decision_clock the moment the ask
+        # is actually SENT to the owner (step 2d below). The timeout sweep skips NULL rows, so an
+        # undelivered ask can never be reaped as 'timed_out'; the sweep's NULL-clock belt (24h
+        # grace) reaps a crash-orphaned arm instead.
         row: dict[str, Any] = {
             "id": str(approval_id),
             "run_id": str(run_id),
@@ -346,8 +363,8 @@ def arm_pause_request(
             "details": Jsonb(dict(payload.details)),
             "status": "pending",
             "decision": None,
-            "owner_message_sid": None,  # set after the template send succeeds (step 2c)
-            "timeout_at": timeout_at,
+            "owner_message_sid": None,  # set after the send succeeds (step 2c)
+            "timeout_at": None,
         }
         if payload.draft_batch_id is not None:
             row["draft_batch_id"] = str(payload.draft_batch_id)
@@ -377,6 +394,29 @@ def arm_pause_request(
                 ),
             )
 
+        # VT-683 P2c — the delivery-ledger record (owner_comms_queue, mig 178), written on the SAME
+        # conn right after the arm. decision_ref links it to the money authority (pending_approvals);
+        # mark_delivered at step 2d starts the queue-side deadline mirror. FAIL-SOFT: the ledger is
+        # tracking, never authority — a failed enqueue must not block the arm (the timeout sweep's
+        # NULL-clock belt still covers a row whose delivery bookkeeping is missing).
+        template_name = payload.template_name or APPROVAL_TEMPLATE_NAME
+        from orchestrator.owner_surface import owner_comms_queue as _comms_q
+
+        queue_item_id: UUID | None = None
+        try:
+            queue_item_id = _comms_q.enqueue(
+                tenant_id,
+                kind="approval",
+                payload={"text": payload.summary, "fallback_template": template_name},
+                decision_ref={"kind": "pending_approval", "id": str(approval_id)},
+                conn=conn,
+            )
+        except Exception:  # noqa: BLE001 — ledger only; never block the arm
+            logger.warning(
+                "request_owner_approval: comms-ledger enqueue failed (fail-soft) tenant=%s run=%s",
+                tenant_id, run_id,
+            )
+
         # A send failure past this point must remove the row we just armed (autocommit already committed
         # it), else the orphan blocks the tenant's one-open queue until the timeout sweep reaps it.
         def _rollback_arm() -> None:
@@ -384,14 +424,25 @@ def arm_pause_request(
                 PendingApprovalsWrapper().delete_by_id(tenant_id, approval_id, conn=conn)
             except Exception:  # noqa: BLE001 — best-effort; the timeout sweep is the backstop
                 # ERROR (not warning): a swallowed rollback leaves a committed open row that blocks THIS
-                # tenant's one-open approval queue until the timeout sweep reaps it (up to timeout_hours,
-                # default 48h). Rare — needs an independent DB-conn death between INSERT and rollback (the
-                # template fails over HTTP, so the conn is normally healthy) — but must not be silent.
+                # tenant's one-open approval queue until the timeout sweep reaps it (the NULL-clock belt,
+                # 24h grace + sweep tick). Rare — needs an independent DB-conn death between INSERT and
+                # rollback (the send fails over HTTP, so the conn is normally healthy) — but must not be
+                # silent.
                 logger.error(
                     "request_owner_approval: arm rollback DELETE FAILED — tenant approval queue blocked "
-                    "until timeout sweep (up to %sh) tenant=%s run=%s approval=%s",
-                    payload.timeout_hours, tenant_id, run_id, approval_id,
+                    "until the timeout sweep's NULL-clock belt reaps it tenant=%s run=%s approval=%s",
+                    tenant_id, run_id, approval_id,
                 )
+            if queue_item_id is not None:
+                try:
+                    _comms_q.drop_item(
+                        tenant_id, queue_item_id, reason="send_failed", conn=conn
+                    )
+                except Exception:  # noqa: BLE001 — ledger hygiene only
+                    logger.warning(
+                        "request_owner_approval: comms-ledger drop failed (fail-soft) "
+                        "tenant=%s run=%s", tenant_id, run_id,
+                    )
 
         # 2a. Best-effort PII-safe plan-summary send BEFORE the approval template (VT-594), so the owner
         #     sees WHAT they're approving. A summary-send failure must NEVER block the arm.
@@ -427,47 +478,87 @@ def arm_pause_request(
                     "tenant=%s run=%s", tenant_id, run_id,
                 )
 
-        # 2b. Send the approval template (the load-bearing send). On failure, roll back the arm row so the
-        #     owner never holds a template with no resolvable row.
-        template_name = payload.template_name or APPROVAL_TEMPLATE_NAME
+        # 2b. THE LOAD-BEARING SEND (VT-683 P2c). In-window: the in-session INTERACTIVE ask
+        #     (team_approval_buttons quick-reply — decision buttons, no Meta template; the button
+        #     TITLE echoes back as the inbound Body and classify_approval_reply resolves it against
+        #     THIS row — the one-open-per-tenant serialization above is what guarantees "same row").
+        #     Out-of-window, interactive failure, or fail-closed session read: the Meta approval
+        #     template, byte-identical to the pre-P2c path (the belt until P3 wake-up + P4
+        #     whitelist retire it). On total failure, roll back the arm row so the owner never
+        #     holds an ask with no resolvable row.
+        owner_message_sid: str | None = None
+        delivered_channel: str | None = None
         if not dry_run:
+            interactive_sid: str | None = None
             try:
-                result = send_fn(
-                    tenant_id,
-                    template_name,
-                    dict(payload.template_params),
-                    recipient_phone=owner_phone,
-                )
-            except Exception as exc:  # noqa: BLE001 — never leak; honest envelope
+                from orchestrator.owner_surface.session_window import session_open
+
+                if owner_phone and session_open(tenant_id):
+                    from orchestrator.owner_surface.freeform_acks import resolve_owner_locale
+                    from orchestrator.templates_registry import content_sid_for
+                    from orchestrator.utils.twilio_send import send_interactive_message
+
+                    locale = resolve_owner_locale(tenant_id)
+                    content_sid = content_sid_for(
+                        INTERACTIVE_APPROVAL_TEMPLATE,
+                        locale if locale in ("en", "hi") else "en",
+                    )
+                    if content_sid:
+                        interactive_sid = send_interactive_message(
+                            content_sid,
+                            owner_phone,
+                            content_variables={"1": payload.summary},
+                            tenant_id=tenant_id,
+                            surface="manager",
+                        )
+            except Exception as exc:  # noqa: BLE001 — interactive is the preferred channel, never the only one
                 logger.warning(
-                    "request_owner_approval: template send raised "
-                    "tenant=%s run=%s type=%s err=%s",
+                    "request_owner_approval: in-session interactive send failed — falling back to "
+                    "template tenant=%s run=%s type=%s err=%s",
                     tenant_id, run_id, payload.approval_type, type(exc).__name__,
                 )
-                _rollback_arm()
-                return PauseRequestResult(
-                    status="error",
-                    error=RequestOwnerApprovalError(
-                        code="template_send_failed", message=type(exc).__name__
-                    ),
-                )
-            if not getattr(result, "success", False):
-                logger.warning(
-                    "request_owner_approval: template send unsuccessful "
-                    "tenant=%s run=%s type=%s code=%s",
-                    tenant_id, run_id, payload.approval_type,
-                    getattr(result, "error_code", None),
-                )
-                _rollback_arm()
-                return PauseRequestResult(
-                    status="error",
-                    error=RequestOwnerApprovalError(
-                        code=getattr(result, "error_code", None) or "template_send_failed",
-                        message=getattr(result, "error_message", None) or "send failed",
-                    ),
-                )
-            owner_message_sid = getattr(result, "message_sid", None)
-            # 2c. Record which owner message carried the template (metadata; resolve COALESCEs it).
+            if interactive_sid:
+                owner_message_sid = interactive_sid
+                delivered_channel = "interactive_session"
+            else:
+                try:
+                    result = send_fn(
+                        tenant_id,
+                        template_name,
+                        dict(payload.template_params),
+                        recipient_phone=owner_phone,
+                    )
+                except Exception as exc:  # noqa: BLE001 — never leak; honest envelope
+                    logger.warning(
+                        "request_owner_approval: template send raised "
+                        "tenant=%s run=%s type=%s err=%s",
+                        tenant_id, run_id, payload.approval_type, type(exc).__name__,
+                    )
+                    _rollback_arm()
+                    return PauseRequestResult(
+                        status="error",
+                        error=RequestOwnerApprovalError(
+                            code="template_send_failed", message=type(exc).__name__
+                        ),
+                    )
+                if not getattr(result, "success", False):
+                    logger.warning(
+                        "request_owner_approval: template send unsuccessful "
+                        "tenant=%s run=%s type=%s code=%s",
+                        tenant_id, run_id, payload.approval_type,
+                        getattr(result, "error_code", None),
+                    )
+                    _rollback_arm()
+                    return PauseRequestResult(
+                        status="error",
+                        error=RequestOwnerApprovalError(
+                            code=getattr(result, "error_code", None) or "template_send_failed",
+                            message=getattr(result, "error_message", None) or "send failed",
+                        ),
+                    )
+                owner_message_sid = getattr(result, "message_sid", None)
+                delivered_channel = "template"
+            # 2c. Record which owner message carried the ask (metadata; resolve COALESCEs it).
             if owner_message_sid:
                 try:
                     PendingApprovalsWrapper().set_owner_message_sid(
@@ -478,6 +569,37 @@ def arm_pause_request(
                         "request_owner_approval: owner_message_sid UPDATE failed (non-critical) "
                         "tenant=%s run=%s approval=%s", tenant_id, run_id, approval_id,
                     )
+
+        # 2d. POINT A — the ask is now DELIVERED (or dry_run pretends it is): start the decision
+        #     clock (timeout_at = now + ttl; the arm inserted NULL) and mark the ledger record
+        #     delivered (queue-side decision_deadline_at mirror). BOTH are fail-soft: the sweep's
+        #     NULL-clock belt covers a missed clock start; the ledger is never authority. dry_run
+        #     starts the clock at arm (the canary/CI contract expects an armed row with a running
+        #     clock, and nothing was actually queued for later delivery).
+        try:
+            PendingApprovalsWrapper().start_decision_clock(
+                tenant_id, approval_id, timeout_hours=payload.timeout_hours, conn=conn
+            )
+        except Exception:  # noqa: BLE001 — the NULL-clock belt reaps a row whose clock never started
+            logger.error(
+                "request_owner_approval: decision-clock start FAILED (belt will reap) "
+                "tenant=%s run=%s approval=%s", tenant_id, run_id, approval_id,
+            )
+        if queue_item_id is not None:
+            try:
+                _comms_q.mark_delivered(
+                    tenant_id,
+                    queue_item_id,
+                    kind="approval",
+                    message_sid=owner_message_sid,
+                    decision_ttl=timedelta(hours=payload.timeout_hours),
+                    conn=conn,
+                )
+            except Exception:  # noqa: BLE001 — ledger only
+                logger.warning(
+                    "request_owner_approval: comms-ledger mark_delivered failed (fail-soft) "
+                    "tenant=%s run=%s", tenant_id, run_id,
+                )
 
         emit_tm_audit(
             event_layer="does",
@@ -490,6 +612,9 @@ def arm_pause_request(
                 "approval_type": payload.approval_type,
                 "draft_batch_id": str(payload.draft_batch_id) if payload.draft_batch_id else None,
                 "dry_run": dry_run,
+                # VT-683 P2c: which channel carried the ask ('interactive_session' | 'template' |
+                # None on dry_run) — the in-window/out-of-window observability seam.
+                "channel": delivered_channel,
             },
             summary=f"approval armed: {payload.approval_type}",
             conn=conn,

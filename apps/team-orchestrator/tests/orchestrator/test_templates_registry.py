@@ -414,16 +414,30 @@ def test_canary_load_raises_on_malformed_sid(tmp_path):
         canary_load(bad)
 
 
-def test_canary_load_raises_on_empty_variables(tmp_path):
-    bad = tmp_path / "twilio_templates.yaml"
-    bad.write_text(yaml.dump({
-        "team_broken": {
-            "audience": "customer",
+def test_canary_load_accepts_explicit_empty_variables(tmp_path):
+    """VT-691: an EXPLICIT `variables: []` is valid — a static-body in-session interactive
+    Content object has no {{n}} slots (team_signup_consent_buttons)."""
+    ok = tmp_path / "twilio_templates.yaml"
+    ok.write_text(yaml.dump({
+        "team_static_buttons": {
+            "audience": "owner",
             "variables": [],
             "languages": {"en": "HX" + "a" * 32},
         }
     }))
-    with pytest.raises(TemplateRegistryError, match="variables is missing or empty"):
+    canary_load(ok)  # must not raise
+
+
+def test_canary_load_raises_on_missing_variables(tmp_path):
+    """A MISSING variables field is still an error (the entry forgot to declare)."""
+    bad = tmp_path / "twilio_templates.yaml"
+    bad.write_text(yaml.dump({
+        "team_broken": {
+            "audience": "customer",
+            "languages": {"en": "HX" + "a" * 32},
+        }
+    }))
+    with pytest.raises(TemplateRegistryError, match="variables is missing or not a list"):
         canary_load(bad)
 
 

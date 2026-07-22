@@ -68,9 +68,13 @@ def test_last_owner_inbound_at_reads_the_conversation_log(pool):
 
 
 def test_reengage_stale_task_sends_via_owner_template_seam(pool, monkeypatch: pytest.MonkeyPatch):
+    """VT-683 point B: the stale-resume caller now sends team_wakeup2 (team_reengage merged in) via
+    the SHARED wake-up helper → owner_send.send_owner_template. pending_count = the tenant's queued
+    owner-comms count, floored to 1 (this fresh tenant has none → '1')."""
     from datetime import datetime as _dt
 
     import orchestrator.manager.stale_resume as sr
+    import orchestrator.owner_surface.owner_send as owner_send_mod
     from orchestrator.utils.twilio_send import SendResult
 
     tid = _seed_tenant(pool)
@@ -87,14 +91,15 @@ def test_reengage_stale_task_sends_via_owner_template_seam(pool, monkeypatch: py
             template_name=template_name, recipient_phone_token="tok_xxx",
         )
 
-    monkeypatch.setattr(sr, "send_owner_template", _fake_send_owner_template)
+    # reengage → wakeup.send_wakeup → owner_send.send_owner_template (patch the real send seam).
+    monkeypatch.setattr(owner_send_mod, "send_owner_template", _fake_send_owner_template)
 
     result = sr.reengage_stale_task(tid, task_id, owner_phone="+919876543210", owner_name="Test Owner")
 
     assert result is not None
     assert result.success is True
-    assert sent["template_name"] == "team_reengage"
-    assert sent["params"] == {"owner_name": "Test Owner"}
+    assert sent["template_name"] == "team_wakeup2"
+    assert sent["params"] == {"owner_name": "Test Owner", "pending_count": "1"}
     assert sent["recipient_phone"] == "+919876543210"
 
 
@@ -102,6 +107,7 @@ def test_reengage_stale_task_send_failure_raises_incident(pool, monkeypatch: pyt
     from datetime import datetime as _dt
 
     import orchestrator.manager.stale_resume as sr
+    import orchestrator.owner_surface.owner_send as owner_send_mod
     from orchestrator.observability.incident_store import get_incident
     from orchestrator.utils.twilio_send import SendResult
 
@@ -115,7 +121,7 @@ def test_reengage_stale_task_send_failure_raises_incident(pool, monkeypatch: pyt
             recipient_phone_token="tok_xxx",
         )
 
-    monkeypatch.setattr(sr, "send_owner_template", _failing_send)
+    monkeypatch.setattr(owner_send_mod, "send_owner_template", _failing_send)
 
     result = sr.reengage_stale_task(tid, task_id, owner_phone="+919876543210")
     assert result is not None

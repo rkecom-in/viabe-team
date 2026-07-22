@@ -365,3 +365,41 @@ def is_send_push_cue(body: str) -> bool:
         return True
     # (b) weak-ack-only — a bare "theek hai" / "ok" with no explicit send verb and no strong yes.
     return is_weak_ack_only_approval(body)
+
+
+# ---------------------------------------------------------------------------
+# VT-683 P2c — interactive approval-button titles (team_approval_buttons)
+# ---------------------------------------------------------------------------
+# A quick-reply tap echoes the button TITLE verbatim as the inbound Body. An EXACT
+# (normalized) full-string match on one of the four registered titles is a BUTTON PRESS —
+# a finite exact-match outcome, so a deterministic map is allowed (the no-keyword-lists rule
+# bans lists for open-ended natural language, never enums). This map lets a button press
+# resolve DETERMINISTICALLY in EVERY send-intent mode, enforce included: a tap is not free
+# text, and the VT-83 principle ("a clear deterministic signal MUST win over the LLM")
+# applies at its strongest — without it, enforce mode routes the tap through the LLM gate,
+# where a consent-skip or transport error turns an explicit tap into a silent re-ask.
+# FULL-STRING match ONLY: a longer sentence merely containing a title is free text and takes
+# the normal classifier paths. Keep in exact lockstep with the registry entry
+# (config/twilio_templates.yaml team_approval_buttons) + canaries/vt683_approval_buttons_create.py.
+
+
+def _normalize_exact(body: str) -> str:
+    return (
+        unicodedata.normalize("NFC", (body or "").strip().casefold())
+        .replace("'", "")
+        .replace("’", "")
+    )
+
+
+_BUTTON_TITLE_DECISIONS: dict[str, ApprovalDecision] = {
+    _normalize_exact("Yes, approve"): "approved",
+    _normalize_exact("No, reject"): "rejected",
+    _normalize_exact("हाँ, मंज़ूर है"): "approved",
+    _normalize_exact("नहीं, रहने दो"): "rejected",
+}
+
+
+def classify_button_decision(body: str) -> ApprovalDecision | None:
+    """The interactive-button fast-path: the exact (normalized) title of a
+    team_approval_buttons tap, else None. Never matches free text (full-string only)."""
+    return _BUTTON_TITLE_DECISIONS.get(_normalize_exact(body))

@@ -36,11 +36,11 @@ the 24h conversation session (queued, idle-paced — VT-683). CC maintains this 
 | `team_status_ping` | reactive to owner ping | → freeform NOW (P1) |
 | `team_dsr_acknowledgment` | reactive to owner DSR keyword | → freeform NOW (P1) |
 | `team_error_handler` | async Twilio failure callback | keep as system fallback until P4 review |
-| `team_reengage` | manager stale-task nudge | → MERGE into `team_wakeup` (Fazal point B, pending) |
-| `team_monthly_report` | **ORPHANED — no code sends it** (report ships via email/PDF) | mark deprecated at P4 |
+| `team_reengage` | ~~manager stale-task nudge~~ | **DONE — MERGED into `team_wakeup2`** (VT-683 point B, Fazal 2026-07-22): `stale_resume.reengage_stale_task` now sends `team_wakeup2`. Deprecated; retained for back-compat. |
+| `team_monthly_report` | **ORPHANED — no code sends it** (report ships via email/PDF) | **DONE — deprecated (VT-683 P4)**; retained for back-compat |
 
 ### DEPRECATED (never send)
-`team_welcome` · `team_welcome2` · `team_welcome3` · **`team_wakeup` v1** (en `HXd6c8cb13…` hi `HX26d778c5…` hing `HX08b86198…` — Meta force-converted UTILITY→MARKETING 2026-07-18, the welcome2/3 class; superseded by `team_wakeup2`).
+`team_welcome` · `team_welcome2` · `team_welcome3` · **`team_wakeup` v1** (en `HXd6c8cb13…` hi `HX26d778c5…` hing `HX08b86198…` — Meta force-converted UTILITY→MARKETING 2026-07-18, the welcome2/3 class; superseded by `team_wakeup2`) · **`team_reengage`** (VT-683 point B — merged into `team_wakeup2`) · **`team_monthly_report`** (VT-683 P4 — orphaned; report ships via email/PDF).
 
 ---
 
@@ -50,12 +50,13 @@ The number the runtime sends FROM (`TEAM_TWILIO_FROM_NUMBER`) — a Twilio Whats
 
 | Env | Display name | Number | Twilio sender SID | Meta phone_number_id | Status |
 |---|---|---|---|---|---|
-| **dev** | **Viabe** | `+918108084223` | `XE5dca19b08f04ba5e11d69735c6969a9d` | `1166430683220266` | ONLINE — wired 2026-06-16 |
+| **prod** | **Viabe** | `+918108084223` | `XE5dca19b08f04ba5e11d69735c6969a9d` | `1166430683220266` | PROMOTED to prod 2026-07-20 (Fazal) — was the dev sender; templates already approved under this WABA |
+| **dev** | **Viabe** | `+18704122234` | `XE47d50f0ba019ad3ad3cc252e511a2e9f` | _(verify WABA in Twilio console)_ | RE-ENABLED for dev 2026-07-20 (Fazal) — dev/prod now split senders |
 
 Notes (dev wiring, 2026-06-16, CL-431-autonomous; **prefix question RESOLVED VT-488 2026-06-29**):
 - Dev `TEAM_TWILIO_FROM_NUMBER` = `+918108084223` — stored as **plain E.164, NO `whatsapp:` prefix in env**. The `whatsapp:` channel scheme IS REQUIRED on the wire and the send path (`utils/twilio_send._wa()`) applies it **idempotently to BOTH `from_` AND `to=` at the call site** (never double-prefixed). **The Twilio log proved the prefix is mandatory:** the one send that went out with a RAW E.164 `from_=+918108084223` (no `whatsapp:`) hit Twilio error **21659**; the 21 sends that carried `whatsapp:` on both ends delivered. This supersedes the earlier "NO prefix in code / flip only if the canary proves it" framing — the prefix is ON, on both ends, decided. (VT-399 first added `_wa`; VT-488 confirms + makes it the standing contract.)
 - VT-487 backstop: `_wa()` now also FAIL-CLOSES on a non-E.164 target (`^\+[1-9]\d{7,14}$`) — a malformed/corrupted number (e.g. a scientific-notation float artifact like `+91998886e+11`, the six 21211 "invalid To" failures) raises `BlockedRecipientError` and is never dispatched.
-- The superseded prev dev sender `+18704122234` (Twilio sender SID `XE47d50f0ba019ad3ad3cc252e511a2e9f`) was DROPPED from the registry (VT-488). It is no longer a FROM; current dev FROM = `+918108084223` only. It carried no code/config reference (grep-clean).
+- **2026-07-20 (Fazal) — dev/prod senders SPLIT.** Previously ONE number (`+918108084223`) served both envs (`TEAM_TWILIO_FROM_NUMBER` matched dev↔prod). Now: **prod keeps `+918108084223`** (India — real customers; its WABA `1166430683220266` already carries the approved template set, so prod template sends work day-one), **dev returns to `+18704122234`** (US — the VT-488-dropped number, re-enabled; SID `XE47d50f0ba019ad3ad3cc252e511a2e9f`). ONLY env change made: Railway **dev** `TEAM_TWILIO_FROM_NUMBER` → `+18704122234` (CL-431-autonomous, `--skip-deploys`; effective on next dev restart). Prod was ALREADY `+918108084223` = correct, no prod change. Both numbers share the SAME `TEAM_TWILIO_ACCOUNT_SID` (verified) → one Twilio account, shared auth token, no new credential. Split senders RESOLVE the earlier "can't test dev inbound on the same number" problem — each env now has its own inbound webhook. **Fazal-console TODO:** (1) verify the US dev number's WABA has the templates approved (else dev template sends fail — tolerable, dev is mostly free-form session sends per the whitelist ruling); (2) point the dev number's Twilio inbound webhook → `viabe-team-web-dev` `/api/team/twilio/webhook`, prod number's → prod team-web webhook.
 - Dev **inbound** callback (Twilio sender webhook) → team-web `…/api/team/twilio/webhook` on `viabe-team-web-dev`, behind a Vercel **Protection-Bypass-for-Automation** token. The bypass secret is kept OUT of the repo — it lives only in the Twilio sender callback URL and in `TEAM_TWILIO_WEBHOOK_URL` (Vercel `viabe-team-web-dev`, Production). Twilio signs the full callback URL incl. the bypass query param, so those two must stay byte-identical.
 
 ## Why this file exists in this place
@@ -224,6 +225,8 @@ Hi {{1}}, things are running. Last activity on your account: {{2}}. {{3}} is up 
 
 ### `team_reengage`  *(VT-486 — owner-facing OUT-OF-WINDOW (>24h) re-engagement; system-invoked, NOT agent-selectable)*
 
+> **DEPRECATED (VT-683 point B, Fazal 2026-07-22):** merged into the daily wake-up — `manager/stale_resume.reengage_stale_task` now sends **`team_wakeup2`** (one re-engage surface). Retained for history/back-compat resolution only; no live path sends this.
+
 - **Twilio Content SID (en):** `HXbdb250089fafc02a0d75ce6817e9ce11`
 - **Twilio Content SID (hi):** `HX27a50d65fedbb7b6a3c2fb6a6a24f13c`
 - **Category:** Utility · **Audience:** owner · **NO STOP line** (STOP is a customer-marketing opt-out, not an owner utility)
@@ -269,6 +272,36 @@ Hi {{1}}, I couldn't send this week's campaign: {{2}} of the targeted customers 
 
 ---
 
+### `team_signup_consent_buttons`  *(VT-691 — INTERACTIVE in-session signup CONSENT ask; NOT a Meta-approved 24h-window template)*
+
+- **Twilio Content SID:** en `HXa81bc34018ba6e4349622962b6235f06`
+- **Content type:** `twilio/quick-reply` (static bilingual body, no variables; two buttons) · **Approval:** NONE NEEDED — in-session interactive (created by CC 2026-07-22, canary `canaries/vt691_consent_buttons_create.py`).
+- **Sent by:** `onboarding/whatsapp_signup._send_consent_prompt` to an UN-onboarded number whose own inbound just opened the 24h window (freeform text with a typed-exact instruction is the fallback).
+- **Fazal ruling (2026-07-22):** the signup does NOT start unless the person explicitly presses **"I agree"**; **"I do not agree"** is the explicit refusal path (DPDP/EU). The button TITLE echoes back as the inbound Body; the consent GRANT set is the exact-normalized title — **fully deterministic, no LLM in the grant path**. Free-text "yes" re-prompts with the buttons (bounded, 3 prompts max → expired+silent).
+- **Button `id` payloads:** `consent_agree` / `consent_disagree`. NEVER change a title without updating `_AGREE_TITLE`/`_DISAGREE_TITLE` in `whatsapp_signup.py` in the same commit.
+
+```
+Namaste! This is Viabe Team — … consent text with viabe.ai/team/dpdp + /privacy links …
+[ I agree ]  [ I do not agree ]
+```
+
+---
+
+### `team_approval_buttons`  *(VT-683 P2c — INTERACTIVE in-session approval ask; NOT a Meta-approved 24h-window template)*
+
+- **Twilio Content SIDs:** en `HX6b8aa56b3497301f86152983686064d7` · hi `HX3b0f0c7926f557e4de1d007682cdaabe`
+- **Content type:** `twilio/quick-reply` (two decision buttons) · **Approval:** NONE NEEDED — in-session interactive content (≤3 buttons) needs no Meta template approval; the HX pair is a Twilio Content-API registration only (created by CC 2026-07-22, canary `canaries/vt683_approval_buttons_create.py`).
+- **Sent by:** `agent/tools/request_owner_approval.arm_pause_request` when the owner's 24h session is OPEN, via `twilio_send.send_interactive_message` — replacing the load-bearing approval TEMPLATE send in-window. The Meta template (`team_weekly_approval` / `team_agent_draft_approval`) stays as the OUT-of-window belt until P3 wake-up + P4 whitelist retire it.
+- **Variables:** `{{1}}` = the PII-safe approval ask text (`payload.summary`, composed by the arming caller).
+- **Button `id` payloads:** `approval_yes` / `approval_no` (same both langs). **LOAD-BEARING:** the button TITLE flows back as the inbound `Body`, which `try_resume_pending_approval` → `classify_approval_reply` resolves deterministically against the SAME open `pending_approvals` row: en "Yes, approve"→approved / "No, reject"→rejected · hi "हाँ, मंज़ूर है"→approved / "नहीं, रहने दो"→rejected. No title collides with the opt-out/DSR guard; none is weak-ack-only. Never change a title without re-verifying both classifiers.
+
+```
+{{1}}
+[ Yes, approve ]  [ No, reject ]
+```
+
+---
+
 ## Implications for code
 
 When code in `apps/team-orchestrator/` starts sending WhatsApp messages (currently only the orchestrator + supervisor + SR-Agent skeleton exist; output composer VT-30 is Backlog), it needs:
@@ -294,6 +327,8 @@ Per CL-5: target counts are 5 Tier-A launch-blocking + 17 Tier-B concierge-until
 Twilio issues a SEPARATE SID per language; the registry key is `(template_name, language) -> content_sid` (config/twilio_templates.yaml). Keywords (YES/NO/EDIT/START/CANCEL/ESCALATE) stay English (literal handler triggers).
 
 ### `team_monthly_report`  *(VT-163-fix-2 — system-invoked by VT-86, not agent-selectable)*
+
+> **DEPRECATED (VT-683 P4, 2026-07-22):** ORPHANED — zero call sites in `src/`; the monthly report ships via email/PDF, never a WhatsApp template. Retained for history/back-compat resolution only.
 
 - **Twilio Content SID:** `HX7a247e236782425866a8e20fd78df275` (en) / `HX252be212f9372e187caa03df117adc02` (hi)
 - **Type:** Media (document/PDF header) + body. Category: Utility.

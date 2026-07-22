@@ -405,3 +405,62 @@ def test_missing_template_var_omits_that_position(send_ctx, twilio_create):
     sent = json.loads(twilio_create.call_args.kwargs["content_variables"])
     assert sent == {"1": "Sundaram"}  # position 2 omitted, not a sample/placeholder
     twilio_create.assert_called_once()
+
+
+# --------------------------------------------------------------------------- #
+# VT-683 P4: OWNER-template whitelist (SHADOW-first). Only owner-audience non-whitelisted sends are
+# gated; SHADOW (default) is byte-identical, ENFORCE returns a failed SendResult (no Twilio call).
+# --------------------------------------------------------------------------- #
+
+
+def test_whitelist_shadow_sends_nonwhitelisted_owner_template(send_ctx, twilio_create, monkeypatch):
+    """SHADOW (flag off): a non-whitelisted OWNER template (team_reengage) still sends — byte-
+    identical to today, plus a warning log."""
+    monkeypatch.delenv("TEAM_TEMPLATE_WHITELIST_ENFORCE", raising=False)
+    from orchestrator.utils.twilio_send import send_template_message
+
+    result = send_template_message(
+        uuid4(), "team_reengage", {"owner_name": "Sundaram"}, recipient_phone="+919812300021"
+    )
+    assert result.success is True
+    twilio_create.assert_called_once()
+
+
+def test_whitelist_enforce_blocks_nonwhitelisted_owner_template(send_ctx, twilio_create, monkeypatch):
+    """ENFORCE (flag on): a non-whitelisted OWNER template is refused — failed SendResult, no Twilio
+    call, never raises."""
+    monkeypatch.setenv("TEAM_TEMPLATE_WHITELIST_ENFORCE", "1")
+    from orchestrator.utils.twilio_send import send_template_message
+
+    result = send_template_message(
+        uuid4(), "team_reengage", {"owner_name": "Sundaram"}, recipient_phone="+919812300022"
+    )
+    assert result.success is False
+    assert result.error_code == "template_not_whitelisted"
+    twilio_create.assert_not_called()
+
+
+def test_whitelist_enforce_allows_whitelisted_owner_template(send_ctx, twilio_create, monkeypatch):
+    """ENFORCE: a whitelisted OWNER template (team_wakeup2) sends byte-identically."""
+    monkeypatch.setenv("TEAM_TEMPLATE_WHITELIST_ENFORCE", "1")
+    from orchestrator.utils.twilio_send import send_template_message
+
+    result = send_template_message(
+        uuid4(), "team_wakeup2", {"owner_name": "Asha", "pending_count": "3"},
+        recipient_phone="+919812300023",
+    )
+    assert result.success is True
+    twilio_create.assert_called_once()
+
+
+def test_whitelist_enforce_ignores_customer_audience(send_ctx, twilio_create, monkeypatch):
+    """ENFORCE: a customer-audience template (team_status_ping) is never gated by the OWNER
+    whitelist — it sends normally (it has its own customer_send_context choke)."""
+    monkeypatch.setenv("TEAM_TEMPLATE_WHITELIST_ENFORCE", "1")
+    from orchestrator.utils.twilio_send import send_template_message
+
+    result = send_template_message(
+        uuid4(), "team_status_ping", _PING_PARAMS, recipient_phone="+919812300024"
+    )
+    assert result.success is True
+    twilio_create.assert_called_once()

@@ -1110,11 +1110,13 @@ class PendingApprovalsWrapper(TenantScopedTable):
         self, tenant_id: UUID | str, approval_id: UUID | str, *, conn: Any = None
     ) -> dict[str, Any] | None:
         """The unresolved approval by id (type + details) — the VT-384 ENABLE-grant
-        resolution lookup."""
+        resolution lookup. VT-683 P2c adds ``timeout_at`` (POINT A: non-NULL == the ask was
+        DELIVERED — the drainer's duplicate-delivery guard reads it)."""
         tid = self._uuid(tenant_id)
         with self._conn(tid, conn) as c:
             row = c.execute(
-                "SELECT id::text AS id, approval_type, details FROM pending_approvals "
+                "SELECT id::text AS id, approval_type, details, timeout_at "
+                "FROM pending_approvals "
                 "WHERE tenant_id = %s AND id = %s AND resolved_at IS NULL",
                 (str(tid), str(approval_id)),
             ).fetchone()
@@ -1233,6 +1235,30 @@ class PendingApprovalsWrapper(TenantScopedTable):
                 "UPDATE pending_approvals SET owner_message_sid = %s "
                 "WHERE tenant_id = %s AND id = %s",
                 (owner_message_sid, str(tid), str(approval_id)),
+            )
+            return cur.rowcount if cur.rowcount is not None else 0
+
+    def start_decision_clock(
+        self,
+        tenant_id: UUID | str,
+        approval_id: UUID | str,
+        *,
+        timeout_hours: int,
+        conn: Any = None,
+    ) -> int:
+        """VT-683 POINT A: start the owner-decision clock at DELIVERY. Sets
+        ``timeout_at = now() + timeout_hours`` on a still-open row whose clock has not started
+        (``timeout_at IS NULL`` — mig 179; the arm inserts NULL). Idempotent: a redelivery can
+        never reset an already-running clock, and a resolved row is never touched. Tenant-
+        predicated by-PK. Returns rows updated (0 = clock already running / row gone)."""
+        tid = self._uuid(tenant_id)
+        with self._conn(tid, conn) as c:
+            cur = c.execute(
+                "UPDATE pending_approvals "
+                "SET timeout_at = now() + make_interval(hours => %s) "
+                "WHERE tenant_id = %s AND id = %s "
+                "  AND resolved_at IS NULL AND timeout_at IS NULL",
+                (int(timeout_hours), str(tid), str(approval_id)),
             )
             return cur.rowcount if cur.rowcount is not None else 0
 

@@ -580,11 +580,30 @@ def maybe_notify_owner_of_task_outcome(
         code = getattr(exc, "code", None)
         if code == _WINDOW_CLOSED_CODE:
             # Outside the 24h window: no fitting template exists for an outcome-bearing message
-            # (team_reengage is content-free — see module docstring). Defer, don't fabricate.
-            logger.info(
-                "VT-611 task-outcome: 24h window closed tenant=%s task=%s — deferred (left pending)",
-                tenant_id, task_id,
-            )
+            # (team_reengage is content-free — see module docstring). VT-683 P2c closes the old
+            # "left pending forever" gap: QUEUE the composed body (owner_comms_queue) so the
+            # drainer delivers it inside the next open session; the drainer then flips the task
+            # via mark_deferred_outcome_delivered. Status stays 'pending' until that delivery.
+            # Dedup-guarded (a settle replay must not enqueue twice); enqueue failure degrades to
+            # the pre-P2c behavior (left pending, logged).
+            try:
+                from orchestrator.owner_surface import owner_comms_queue as _comms_q
+
+                if not _comms_q.has_queued_task_ref(tenant_id, str(task_id)):
+                    _comms_q.enqueue(
+                        tenant_id,
+                        kind="report",
+                        payload={"text": body, "manager_task_id": str(task_id)},
+                    )
+                    logger.info(
+                        "VT-683 task-outcome: 24h window closed tenant=%s task=%s — QUEUED for "
+                        "in-session delivery", tenant_id, task_id,
+                    )
+            except Exception:  # noqa: BLE001 — degrade to the pre-P2c deferred (left pending)
+                logger.warning(
+                    "VT-683 task-outcome: deferred enqueue failed (left pending) tenant=%s task=%s",
+                    tenant_id, task_id,
+                )
             return False
         logger.exception(
             "VT-611 task-outcome: send failed tenant=%s task=%s code=%s", tenant_id, task_id, code,
@@ -662,7 +681,39 @@ def _alert_notify_send_failure(tenant_id: UUID | str, task_id: UUID | str) -> No
         logger.warning("VT-611 task-outcome failure-alert dispatch failed (fail-soft): %s", exc)
 
 
+def mark_deferred_outcome_delivered(
+    tenant_id: UUID | str, task_id: UUID | str, message_sid: str | None
+) -> None:
+    """VT-683 P2c — the drainer just delivered a QUEUED deferred outcome (the 63016 path enqueued
+    it): flip the manager_task's own "owner told" status 'pending' -> 'delivered' and record the
+    notification in the VT-524 ledger, mirroring the direct-send success path. The
+    ``expected_from=('pending',)`` guard makes a double-delivery a no-op flip (the first delivery
+    already told the owner). Fail-soft throughout: the owner-facing delivery already happened —
+    a bookkeeping error must never unwind or retry it."""
+    from orchestrator.manager import task_store
+
+    try:
+        task_store.set_owner_notification_status(
+            tenant_id, task_id, "delivered", expected_from=("pending",)
+        )
+    except Exception:  # noqa: BLE001 — fail-soft: never unwind the delivery over a flip error
+        logger.exception(
+            "VT-683 deferred-outcome: delivered-flip failed (fail-soft) tenant=%s task=%s",
+            tenant_id, task_id,
+        )
+    try:
+        from orchestrator.owner_surface.owner_notification import record_owner_notification
+
+        record_owner_notification(tenant_id, _LEDGER_LABEL, message_sid, run_id=task_id)
+    except Exception:  # noqa: BLE001 — ledger only
+        logger.warning(
+            "VT-683 deferred-outcome: ledger record failed (fail-soft) tenant=%s task=%s",
+            tenant_id, task_id,
+        )
+
+
 __all__ = [
     "compose_task_outcome_message",
+    "mark_deferred_outcome_delivered",
     "maybe_notify_owner_of_task_outcome",
 ]

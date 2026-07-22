@@ -818,3 +818,83 @@ def test_notify_completed_not_suppressed_even_if_spawning_turn_answered(monkeypa
     assert sent is True
     assert "Done" in seen["body"]
     assert seen["flips"] == [("delivered", ("pending",))]
+
+
+# ---------------------------------------------------------------------------
+# VT-683 P2c — window-closed path now QUEUES the composed outcome for in-session delivery
+# ---------------------------------------------------------------------------
+
+
+def test_notify_window_closed_enqueues_for_session_delivery(monkeypatch) -> None:
+    """63016 no longer strands the outcome forever: the composed body is queued
+    (kind='report', payload carries text + manager_task_id) and the status stays
+    'pending' until the drainer delivers it. Dedup-guarded."""
+    exc = RuntimeError("window closed")
+    exc.code = 63016  # type: ignore[attr-defined]
+    task = _pending_task("completed_with_effect")
+    _patch(monkeypatch, task=task, send_raises=exc)
+
+    from orchestrator.owner_surface import owner_comms_queue as cq
+
+    queued: list[dict] = []
+    monkeypatch.setattr(cq, "has_queued_task_ref", lambda t, ref, **k: False)
+    monkeypatch.setattr(
+        cq, "enqueue",
+        lambda t, *, kind, payload, **k: queued.append({"kind": kind, "payload": payload}) or uuid4(),
+    )
+
+    tenant_id, task_id = uuid4(), uuid4()
+    sent = to.maybe_notify_owner_of_task_outcome(tenant_id, task_id, recipient_phone="+919811111111")
+
+    assert sent is False
+    assert task["owner_notification_status"] == "pending"  # flip happens at DELIVERY, not enqueue
+    assert len(queued) == 1
+    assert queued[0]["kind"] == "report"
+    assert queued[0]["payload"]["manager_task_id"] == str(task_id)
+    assert queued[0]["payload"]["text"], "the composed body must ride the queue"
+
+
+def test_notify_window_closed_dedup_skips_second_enqueue(monkeypatch) -> None:
+    """A settle replay with an item already queued must NOT enqueue twice."""
+    exc = RuntimeError("window closed")
+    exc.code = 63016  # type: ignore[attr-defined]
+    task = _pending_task("completed_with_effect")
+    _patch(monkeypatch, task=task, send_raises=exc)
+
+    from orchestrator.owner_surface import owner_comms_queue as cq
+
+    monkeypatch.setattr(cq, "has_queued_task_ref", lambda t, ref, **k: True)
+    monkeypatch.setattr(
+        cq, "enqueue",
+        lambda *a, **k: pytest.fail("dedup guard must prevent a second enqueue"),
+    )
+
+    assert to.maybe_notify_owner_of_task_outcome(uuid4(), uuid4(), recipient_phone="+919811111111") is False
+
+
+def test_mark_deferred_outcome_delivered_flips_and_records(monkeypatch) -> None:
+    """The drainer's delivery consequence: 'pending' -> 'delivered' + a VT-524 ledger row.
+    Both fail-soft (a bookkeeping error never unwinds the already-happened delivery)."""
+    flips: list[tuple] = []
+    ledger: list[tuple] = []
+    monkeypatch.setattr(
+        "orchestrator.manager.task_store.set_owner_notification_status",
+        lambda t, taskid, status, expected_from: flips.append((status, expected_from)),
+    )
+    monkeypatch.setattr(
+        "orchestrator.owner_surface.owner_notification.record_owner_notification",
+        lambda t, label, sid, run_id=None: ledger.append((label, sid)),
+    )
+    task_id = uuid4()
+    to.mark_deferred_outcome_delivered(uuid4(), task_id, "SM_DRAIN")
+    assert flips == [("delivered", ("pending",))]
+    assert ledger == [("task_outcome_report", "SM_DRAIN")]
+
+
+def test_mark_deferred_outcome_delivered_fail_soft(monkeypatch) -> None:
+    def _boom(*a, **k):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr("orchestrator.manager.task_store.set_owner_notification_status", _boom)
+    monkeypatch.setattr("orchestrator.owner_surface.owner_notification.record_owner_notification", _boom)
+    to.mark_deferred_outcome_delivered(uuid4(), uuid4(), None)  # must not raise

@@ -1041,6 +1041,214 @@ def run_approval_timeout_sweep_body(now: datetime | None = None) -> list[UUID]:
 
 
 # ---------------------------------------------------------------------------
+# VT-683 P2b — owner-comms queue sweep (the drainer's scheduled leg + hygiene)
+# ---------------------------------------------------------------------------
+# EXTENDS the scheduled-trigger surface (CL-240 — never a parallel poller). Three legs, every
+# 10 minutes:
+#   1. DELIVER: for each tenant holding queued owner-comms, when the 24h session is OPEN and the
+#      owner has been idle >= SWEEP_IDLE_MINUTES (never mid-exchange), deliver ONE item
+#      (owner_comms_drainer.drain_one — approval > report > notice). The post-turn hook
+#      (runner._post_turn_drain_step) is the low-latency leg; this sweep is the systematic one.
+#   2. DROP-STALE: queued items never delivered within MAX_QUEUE_AGE drop honestly
+#      (status='dropped', never a silent vanish — owner_comms_queue.drop_stale).
+#   3. NULL-CLOCK BELT (POINT A safety): an OPEN pending_approvals row whose decision clock never
+#      started (timeout_at IS NULL, mig 179) and whose arm is older than the grace bound is a
+#      crash-orphaned arm (in P2c every live path starts the clock at delivery, seconds after the
+#      arm). Start its clock AT now() so the existing */30 approval-timeout sweep resolves it
+#      through the ONE resolution choke point (mark_approval_resolved + resume semantics) — this
+#      sweep never resolves approvals itself, the money authority stays where it was.
+#      P3 NOTE: when the wake-up loop makes long-queued undelivered approvals legitimate, this
+#      grace bound must be revisited alongside it.
+
+OWNER_COMMS_SWEEP_CRON = "*/10 * * * *"  # every 10 minutes
+
+# Crash-orphan grace for the NULL-clock belt: every live P2c arm starts the clock at delivery
+# (same call stack, seconds later), so a NULL clock older than this is a crashed arm, not a
+# queued ask.
+_NULL_CLOCK_GRACE_HOURS = 24
+
+
+def owner_comms_sweep_scheduled(
+    scheduled_time: datetime,
+    actual_time: datetime,
+) -> None:
+    """DBOS scheduled handler — fires every 10 min. NO LLM CALL (pure deterministic drain)."""
+    run_owner_comms_sweep_body(now=actual_time)
+
+
+def _tenants_with_queued_comms() -> list[str]:
+    """Service-role scan: every tenant currently holding a queued owner-comms item (the partial
+    drain index covers this). The per-tenant delivery below runs tenant-scoped (RLS)."""
+    from orchestrator.graph import get_pool
+    from psycopg.rows import dict_row
+
+    with get_pool().connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "SELECT DISTINCT tenant_id::text AS tenant_id FROM owner_comms_queue "
+            "WHERE status = 'queued'"
+        )
+        return [row["tenant_id"] for row in cur.fetchall()]
+
+
+def _owner_recipient_phone(tenant_id: str) -> str | None:
+    """The owner delivery phone (owner_phone, falling back to whatsapp_number) — tenant-scoped
+    read, mirroring task_outcome's resolution."""
+    from orchestrator.db import tenant_connection
+
+    with tenant_connection(tenant_id) as conn:
+        row = conn.execute(
+            "SELECT owner_phone, whatsapp_number FROM tenants WHERE id = %s", (tenant_id,)
+        ).fetchone()
+    if row is None:
+        return None
+    phone = (
+        (row.get("owner_phone") or row.get("whatsapp_number"))
+        if isinstance(row, dict)
+        else (row[0] or row[1])
+    )
+    return str(phone) if phone else None
+
+
+def run_owner_comms_sweep_body(now: datetime | None = None) -> dict[str, int]:
+    """Owner-comms sweep body — REAL (VT-683 P2b). Returns counts for canary inspection.
+
+    Per-tenant try/except: one broken tenant must not halt the sweep (matches the
+    approval-timeout body's posture). ``now`` is injectable for the canary; the idle gate reads
+    live DB time regardless (session_window derives from conversation_log).
+    """
+    from orchestrator.owner_surface import owner_comms_queue as comms_q
+    from orchestrator.owner_surface.freeform_acks import resolve_owner_locale
+    from orchestrator.owner_surface.owner_comms_drainer import (
+        SWEEP_IDLE_MINUTES,
+        drain_one,
+    )
+    from orchestrator.owner_surface.session_window import idle_minutes, session_open
+
+    delivered = 0
+    scanned = 0
+    for tenant_id in _tenants_with_queued_comms():
+        scanned += 1
+        try:
+            if not session_open(tenant_id):
+                continue
+            idle = idle_minutes(tenant_id)
+            if idle is None or idle < SWEEP_IDLE_MINUTES:
+                # Mid-exchange (or unreadable — treat as busy): never interleave into an active
+                # back-and-forth; the post-turn hook / next tick covers it.
+                continue
+            recipient = _owner_recipient_phone(tenant_id)
+            result = drain_one(tenant_id, recipient, lang=resolve_owner_locale(tenant_id))
+            if result is not None:
+                delivered += 1
+        except Exception:  # noqa: BLE001 — one tenant must not halt the sweep
+            logger.exception("owner_comms_sweep: tenant %s failed; sweep continues", tenant_id)
+
+    # Hygiene leg 2 — honest-expiry drop of never-delivered items.
+    dropped = 0
+    try:
+        dropped = comms_q.drop_stale()
+    except Exception:  # noqa: BLE001 — hygiene must not halt the sweep
+        logger.exception("owner_comms_sweep: drop_stale failed; sweep continues")
+
+    # Hygiene leg 3 — the POINT A NULL-clock belt (service-role, cross-tenant): start the clock
+    # NOW on crash-orphaned arms so the existing approval-timeout sweep resolves them through the
+    # single resolution choke point. Never resolves anything here.
+    belted = 0
+    try:
+        from orchestrator.graph import get_pool
+
+        with get_pool().connection() as conn:
+            cur = conn.execute(
+                "UPDATE pending_approvals SET timeout_at = now() "
+                "WHERE resolved_at IS NULL AND timeout_at IS NULL "
+                "  AND requested_at < now() - make_interval(hours => %s)",
+                (_NULL_CLOCK_GRACE_HOURS,),
+            )
+            belted = cur.rowcount if cur.rowcount is not None else 0
+        if belted:
+            logger.warning(
+                "owner_comms_sweep: NULL-clock belt started the clock on %d crash-orphaned "
+                "arm(s) — the approval-timeout sweep will resolve them", belted,
+            )
+    except Exception:  # noqa: BLE001 — belt must not halt the sweep
+        logger.exception("owner_comms_sweep: NULL-clock belt failed; sweep continues")
+
+    return {"scanned": scanned, "delivered": delivered, "dropped": dropped, "belted": belted}
+
+
+# ---------------------------------------------------------------------------
+# VT-683 P3 — the daily wake-up loop (team_wakeup2)
+# ---------------------------------------------------------------------------
+# EXTENDS the scheduled-trigger surface (CL-240 — never a parallel poller). Fires ONCE daily at
+# 05:00 UTC = 10:30 IST — owner waking hours BY CRON PLACEMENT (the same shape DAILY_INITIATIVE_CRON
+# uses; _assert_ist_daytime is the belt-and-suspenders runtime guard). It wakes a tenant with the
+# whitelisted team_wakeup2 template iff ALL of:
+#   (a) the 24h owner session is CLOSED — an OPEN session drains via owner_comms_sweep, not a wake-up;
+#   (b) the tenant has >= 1 queued owner-comms item — the scan is queued-only, so this is honest by
+#       construction, and the count becomes the pending_count var ("{{2}} item(s) waiting");
+#   (c) <= 1 wake-up per day — durable via tenants.last_wakeup_at (mig 181), WAKEUP_MIN_INTERVAL;
+#   (d) owner hours IST — cron placement + the _assert_ist_daytime belt.
+# Any reply (or the Review button) opens the session -> owner_comms_sweep drains the queue (P2b).
+# NO LLM (the wake-up selection is fully deterministic — Pillar 1).
+
+WAKEUP_SWEEP_CRON = "0 5 * * *"  # 05:00 UTC = 10:30 IST — owner-hours daily slot (VT-683 P3)
+
+
+def wakeup_sweep_scheduled(scheduled_time: datetime, actual_time: datetime) -> None:
+    """DBOS scheduled handler — fires daily 10:30 IST / 05:00 UTC (VT-683 P3). The IST belt mirrors
+    daily_initiative's guard: a mis-set cron must never wake owners outside daytime hours. NO LLM."""
+    _assert_ist_daytime(actual_time)
+    run_wakeup_sweep_body(now=actual_time)
+
+
+def run_wakeup_sweep_body(now: datetime | None = None) -> dict[str, int]:
+    """Daily wake-up sweep body — REAL (VT-683 P3). Returns counts for canary inspection.
+
+    Scans tenants holding queued owner-comms (condition (b) by construction) and, for each whose 24h
+    session is CLOSED (a) and that has not been woken within WAKEUP_MIN_INTERVAL (c), sends
+    team_wakeup2 then records the send (the ≤1/day durable mark). Per-tenant try/except: one broken
+    tenant must not halt the sweep (matches the owner_comms + approval-timeout bodies). ``now`` is
+    injectable for the canary; the session/idle gates read live DB state regardless."""
+    from orchestrator.owner_surface import wakeup
+    from orchestrator.owner_surface.session_window import session_open
+
+    now = now or datetime.now(timezone.utc)
+    scanned = 0
+    sent = 0
+    for tenant_id in _tenants_with_queued_comms():
+        scanned += 1
+        try:
+            # (a) only wake a CLOSED session (an open session drains via owner_comms_sweep).
+            if session_open(tenant_id):
+                continue
+            # (c) ≤1/day durable gate.
+            if not wakeup.wakeup_due(tenant_id, now=now):
+                continue
+            # (b) honest pending count (>= 1 since the scan is queued-only; fail-soft 0 → skip).
+            pending_count = wakeup.queued_comms_count(tenant_id)
+            if pending_count < 1:
+                continue
+            owner_phone, owner_name = wakeup.owner_contact(tenant_id)
+            if not owner_phone:
+                logger.warning("wakeup_sweep: no owner phone for tenant=%s; skipping", tenant_id)
+                continue
+            result = wakeup.send_wakeup(
+                tenant_id,
+                owner_phone=owner_phone,
+                owner_name=owner_name,
+                pending_count=pending_count,
+            )
+            # Only record on a CONFIRMED send — a reported failure (unapproved SID, transport 4xx)
+            # leaves last_wakeup_at untouched so the next slot retries (still ≤1/day).
+            if result is not None and result.success:
+                wakeup.mark_wakeup_sent(tenant_id, now=now)
+                sent += 1
+        except Exception:  # noqa: BLE001 — one tenant must not halt the sweep
+            logger.exception("wakeup_sweep: tenant %s failed; sweep continues", tenant_id)
+    return {"scanned": scanned, "sent": sent}
+
+
+# ---------------------------------------------------------------------------
 # VT-679 (§7A) — proactive planning: monthly plan-refresh + daily initiative
 # ---------------------------------------------------------------------------
 # Two triggers, both gated behind TEAM_PROACTIVE_PLANNING (default OFF — the handlers below no-op
@@ -1217,6 +1425,9 @@ def register_scheduled_triggers() -> None:
     _register_scheduled(TRIAL_EVALUATION_CRON, trial_evaluation_scheduled)
     _register_scheduled(MONTHLY_IMPACT_CRON, monthly_impact_scheduled)
     _register_scheduled(APPROVAL_TIMEOUT_SWEEP_CRON, approval_timeout_sweep_scheduled)
+    # VT-683 P2b: owner-comms queue sweep (deliver + drop-stale + NULL-clock belt). EXTENDS
+    # this surface (CL-240), never a parallel poller.
+    _register_scheduled(OWNER_COMMS_SWEEP_CRON, owner_comms_sweep_scheduled)
     _register_scheduled(L3_CONSTRUCTION_CRON, l3_construction_scheduled)
     # VT-76 (CL-240): 7th handler — opt-out reconstitution sweep. EXTENDS this
     # surface, NOT a parallel poller. The cron + body live in privacy/reconstitution.
@@ -1286,6 +1497,9 @@ def register_scheduled_triggers() -> None:
     # gates the HANDLER BODY (no-op fast when unset) — EXTENDS this surface, NOT parallel pollers.
     _register_scheduled(PLAN_REFRESH_CRON, plan_refresh_scheduled)
     _register_scheduled(DAILY_INITIATIVE_CRON, daily_initiative_scheduled)
+    # VT-683 P3: the daily wake-up loop (team_wakeup2) — fires 10:30 IST; wakes a CLOSED-session
+    # tenant with queued owner-comms, ≤1/day. EXTENDS this surface (CL-240), NOT a parallel poller.
+    _register_scheduled(WAKEUP_SWEEP_CRON, wakeup_sweep_scheduled)
     _registered = True
 
 
@@ -1344,6 +1558,9 @@ __all__ = [
     "run_plan_refresh_body",
     "daily_initiative_scheduled",
     "run_daily_initiative_body",
+    "WAKEUP_SWEEP_CRON",
+    "wakeup_sweep_scheduled",
+    "run_wakeup_sweep_body",
     "weekly_cadence_scheduled",
     "weekly_workflow_id",
 ]
