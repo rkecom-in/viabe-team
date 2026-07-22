@@ -363,6 +363,54 @@ def _record_owner_conversation_turn(
         logger.warning("twilio-send: conversation-log record failed (fail-soft)", exc_info=True)
 
 
+# --- VT-683 P4: OWNER-audience template whitelist (SHADOW-first) --------------------------------
+#
+# The Fazal ruling (2026-07-18): the owner-facing TEMPLATE surface is MINIMAL — everything not
+# whitelisted rides the 24h session (queued, idle-paced — VT-683 P2/P3). This is the transport-level
+# enforcement of that whitelist, applied ONLY to OWNER-audience sends. A customer-audience template
+# has its OWN structural choke (customer_send_context, VT-460 gap c) and is out of scope here — so
+# applicability keys on the resolved registry ``audience`` field, NOT on ``is_customer_send``.
+#
+# MODE (TEAM_TEMPLATE_WHITELIST_ENFORCE, feature_flags — the house _on pattern):
+#   unset/off = SHADOW — log a WARNING "template-whitelist SHADOW: <name> would be blocked" and send
+#               normally (byte-identical to today). Shadow-first: surface what enforce would block.
+#   on        = ENFORCE — refuse the send (a failed SendResult, error_code 'template_not_whitelisted';
+#               never raises). Byte-identical behaviour when the template IS whitelisted.
+
+OWNER_TEMPLATE_WHITELIST: frozenset[str] = frozenset(
+    {
+        # The three canonical whitelisted owner templates (welcome / wake-up / system callback).
+        "team_welcome4",
+        "team_wakeup2",
+        "team_error_handler",
+        # The approval templates that remain the OUT-OF-WINDOW belt until P2c's in-session interactive
+        # ask + the P3 wake-up retire them. team_weekly_approval is audience:customer, so it is never
+        # gated here anyway; listed for whitelist-intent completeness. team_agent_draft_approval is
+        # audience:owner and IS gated — the whitelist keeps it sendable as the belt.
+        "team_weekly_approval",
+        "team_agent_draft_approval",
+    }
+)
+
+#: SendResult.error_code returned when ENFORCE refuses a non-whitelisted owner template.
+TEMPLATE_NOT_WHITELISTED = "template_not_whitelisted"
+
+
+def _owner_template_whitelist_action(template_name: str, audience: str) -> str:
+    """VT-683 P4 whitelist decision → ``'allow'`` | ``'shadow'`` | ``'block'``.
+
+    Only an OWNER-audience template NOT in ``OWNER_TEMPLATE_WHITELIST`` is gated; a whitelisted owner
+    template, OR any non-owner-audience (customer / blank) template, is ``'allow'``. For a gated
+    template the ``TEAM_TEMPLATE_WHITELIST_ENFORCE`` flag decides: ``'block'`` when enforce is on,
+    else ``'shadow'`` (log-only; send normally). Pure except for the single flag read — unit-tested
+    directly (dep-less), which is why the whole decision lives in this small function."""
+    if audience != "owner" or template_name in OWNER_TEMPLATE_WHITELIST:
+        return "allow"
+    from orchestrator.feature_flags import template_whitelist_enforce_enabled
+
+    return "block" if template_whitelist_enforce_enabled() else "shadow"
+
+
 @DBOS.step()
 def send_template_message(
     tenant_id: UUID,
@@ -420,6 +468,31 @@ def send_template_message(
         template_name=template_name,
         recipient_token=recipient_token,
     )
+
+    # VT-683 P4: OWNER-template whitelist (SHADOW-first). Only owner-audience non-whitelisted sends
+    # are gated; customer-audience templates route through their own choke above. Placed BEFORE the
+    # no-SID early-out so ENFORCE refuses even a stub owner template that is off-whitelist. SHADOW
+    # (default) is byte-identical — a WARNING then the normal send.
+    _wl_action = _owner_template_whitelist_action(template_name, entry.audience)
+    if _wl_action == "shadow":
+        logger.warning("template-whitelist SHADOW: %s would be blocked", template_name)
+    elif _wl_action == "block":
+        logger.warning(
+            "template-whitelist ENFORCE: refusing non-whitelisted owner template %s -> %s",
+            template_name,
+            recipient_token,
+        )
+        return SendResult(
+            success=False,
+            error_code=TEMPLATE_NOT_WHITELISTED,
+            error_message=(
+                f"owner template '{template_name}' is not in the VT-683 owner-template whitelist "
+                "(everything else rides the 24h session)"
+            ),
+            attempted_at=attempted_at,
+            template_name=template_name,
+            recipient_phone_token=recipient_token,
+        )
 
     content_sid = entry.content_sid
     if content_sid is None:
