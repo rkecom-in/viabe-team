@@ -40,3 +40,13 @@ def whatsapp_signup_enabled() -> bool:
     until this is dev-proven; distinct from team-web's ENABLE_PUBLIC_SIGNUP (the page front door).
     Prod enablement is a Fazal call (consent/legal-adjacent)."""
     return _on("ENABLE_WHATSAPP_SIGNUP")
+
+
+def template_whitelist_enforce_enabled() -> bool:
+    """VT-683 P4 — the owner-template whitelist ENFORCE switch. Default OFF = SHADOW: a
+    non-whitelisted OWNER-audience template send logs a WARNING and sends normally (byte-identical
+    to today). ON = ENFORCE: that send is refused with a failed SendResult (error_code
+    'template_not_whitelisted'), never sent. Shadow-first — flip ON only after a clean shadow week
+    (Fazal graduation). Customer-audience templates are never subject to this gate (they have their
+    own customer_send_context choke)."""
+    return _on("TEAM_TEMPLATE_WHITELIST_ENFORCE")

@@ -220,6 +220,11 @@ team_status_ping:
     hi: HXa386953554630e233f5875299f2d2c94
 
 team_reengage:
+  # DEPRECATED (VT-683 point B, Fazal 2026-07-22): MERGED INTO the daily wake-up. The manager
+  # stale-resume caller (manager/stale_resume.reengage_stale_task) now sends team_wakeup2 — one
+  # re-engage surface. RETAINED for history/back-compat resolution only (the template_routing.yaml
+  # `reengage: any -> team_reengage` entry is now dead but harmless) — NOT sent by any live path.
+  # ---
   # VT-486: owner-facing OUT-OF-WINDOW (>24h) re-engagement. When >24h have passed since the
   # tenant's last inbound, the owner-care window is CLOSED → a free-form send fails (Twilio 63016),
   # so we send THIS Meta-approved template instead. The owner's reply re-opens the 24h window and
@@ -256,6 +261,11 @@ team_error_handler:
     hi: HXe02bb244729c5e829fcad2453e0262ec
 
 team_monthly_report:
+  # DEPRECATED (VT-683 P4, 2026-07-22): ORPHANED — no code path sends this template (verified: zero
+  # call sites in src/). The monthly report ships via EMAIL/PDF (owner_surface/monthly_report_*),
+  # not a WhatsApp template. RETAINED for history/back-compat resolution only — NOT sent by any live
+  # path. (owner-audience, so it would be SHADOW-logged by the VT-683 P4 whitelist if a caller ever
+  # reappeared — it is not on the owner-template whitelist.)
   audience: owner
   agent_selectable: false  # system-invoked by the monthly-impact trigger (VT-86), not agent-chosen
   variables:
