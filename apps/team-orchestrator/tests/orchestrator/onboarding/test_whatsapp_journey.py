@@ -294,3 +294,29 @@ def test_decline_gst_identity_removes_everything(monkeypatch) -> None:
     for f in ("legal_name", "principal_address", "nature_of_business", "gstin_candidate",
               "entity_resolution"):
         assert f in removed, f"decline must remove {f} — nothing survives, even as a hint"
+
+
+def test_accept_self_heals_missing_gstin_hint(monkeypatch) -> None:
+    """Live gap: a draft without gstin_candidate (pre-hint-persist discovery) re-runs the
+    candidates leg at ACCEPT time, anchored on the owner-confirmed name — then verifies."""
+    attrs = {"legal_name": "RKECOM SERVICES (OPC) PRIVATE LIMITED",
+             "principal_address": "A/403, SANTACRUZ WEST, MUMBAI, Mumbai, Maharashtra, 400054"}
+    import orchestrator.onboarding.draft_profile as dp
+
+    monkeypatch.setattr(dp, "get_draft", lambda t: {"attributes": dict(attrs)})
+    written: list = []
+    monkeypatch.setattr(dp, "write_draft",
+                        lambda t, fields, *, source, **k: written.append((source, dict(fields))))
+    import orchestrator.onboarding.journey as j
+
+    monkeypatch.setattr(j, "populate_profile_from_draft", lambda t: {})
+    monkeypatch.setattr(wj, "_gstin_candidate", lambda name, city: "27ABCDE1234F1Z5")
+    verified: dict = {}
+    import orchestrator.onboarding.entity_match as em
+
+    monkeypatch.setattr(em, "confirm_and_verify",
+                        lambda t, g, *, name_anchor=None, **k:
+                        verified.update(gstin=g, anchor=name_anchor) or {})
+    wj.accept_gst_identity(_TID)
+    assert verified.get("gstin") == "27ABCDE1234F1Z5"
+    assert any(f.get("gstin_candidate") for _, f in written), "healed hint persists to the draft"
