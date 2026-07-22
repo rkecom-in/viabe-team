@@ -20,8 +20,9 @@ pytest.importorskip("psycopg")
 
 from orchestrator.onboarding import journey as j  # noqa: E402
 
-# The pre-R9 completion copy — the recap fallback must reproduce it BYTE-for-BYTE on empty answers.
-_LEGACY_EN = "Thanks — that's everything we need to get started. We're setting up your assistant now."
+# The canonical completion copy (VT-698: closer hands into the intro arc, never a cold end) —
+# the recap fallback must reproduce it BYTE-for-BYTE on empty answers.
+_LEGACY_EN = "Thanks — that's everything we need to get started. We're setting up your assistant now. Next, let me show you how your Viabe Team will work for you — just reply OK."
 
 
 # --- item 5: completion recap ---------------------------------------------------------------------
@@ -50,7 +51,7 @@ def test_completion_message_carries_recap_and_keeps_closer():
     msg = j._completion_message({"business_type": "leather bags", "city": "Pune"})
     assert "leather bags" in msg["reply_en"] and "Pune" in msg["reply_en"]
     assert msg["reply_en"].startswith("Thanks — that's everything we need to get started.")
-    assert msg["reply_en"].endswith("We're setting up your assistant now.")
+    assert msg["reply_en"].endswith("just reply OK.")
     assert msg["done"] is True
 
 
