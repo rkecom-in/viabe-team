@@ -358,10 +358,12 @@ def canary_load(path: Path | None = None) -> None:
             errors.append(f"  [{name}] entry is not a mapping")
             continue
 
-        # variables check
+        # variables check. An EXPLICIT empty list is valid — a static-body in-session
+        # interactive Content object has no {{n}} slots (VT-691 team_signup_consent_buttons);
+        # a MISSING/None/non-list variables field stays an error (the entry forgot to declare).
         variables = raw.get("variables")
-        if not variables or not isinstance(variables, list) or len(variables) == 0:
-            errors.append(f"  [{name}] variables is missing or empty")
+        if not isinstance(variables, list):
+            errors.append(f"  [{name}] variables is missing or not a list")
         else:
             unique = set(variables)
             if len(unique) != len(variables):

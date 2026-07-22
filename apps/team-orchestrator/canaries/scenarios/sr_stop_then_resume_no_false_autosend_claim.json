@@ -32,9 +32,9 @@
       "message": "nahi ruk jao, sab kuch band karo abhi",
       "assert_no_silent": true,
       "assert_contains": [
-        "opt_out_confirmation"
+        "stopped"
       ],
-      "note": "The literal opt-out keyword freezes every owning agent and cancels the open batch from step 1, atomically, in the same transaction as the opt-out write."
+      "note": "The literal opt-out keyword freezes every owning agent and cancels the open batch from step 1, atomically, in the same transaction as the opt-out write. VT-683 P1 (freeform-first, Fazal-ruled) sends the REAL stop-confirm text in-session ('Got it — I've stopped all messaging…'), so the old '[template: team_opt_out_confirmation]' marker no longer appears in-window; 'stopped' asserts the confirmation class on the live copy (the template remains the out-of-window belt)."
     },
     {
       "message": "haan chalo bhej do unhe",

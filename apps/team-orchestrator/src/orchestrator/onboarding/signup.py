@@ -230,6 +230,94 @@ def create_signup_tenant(
     )
 
 
+def create_whatsapp_signup_tenant(
+    phone_e164: str,
+    *,
+    now_fn: Callable[[], datetime] | None = None,
+) -> SignupResult:
+    """VT-691 — the WhatsApp-initiated variant of :func:`create_signup_tenant`.
+
+    Called ONLY after an explicit consent reply (the whatsapp_signup module's DPDP gate — the
+    reply IS the capture the public page's two checkboxes are). Differences from the web path,
+    each deliberate:
+
+    - NO OTP / no Twilio-Verify proof: the WhatsApp inbound is already Meta-phone-verified;
+      ``created_via='whatsapp'`` records the basis.
+    - NO business details yet (name/type/city all come from the owner over WhatsApp via the
+      onboarding journey — the no-fabricated-data rule): ``business_name=''`` (empty, honest
+      placeholder the journey fills), ``business_type``/``city_tier`` NULL. The VT-408 GSTIN
+      gate is NOT bent — nothing has been collected to verify yet; verification_status stays
+      'unverified' and the existing verify machinery runs when the journey collects it.
+    - Consent proof (consent_records, both booleans True + current disclosure versions) and
+      the trial start are IDENTICAL to the web path — the gates that matter don't move.
+
+    Same everything-or-nothing txn + ON CONFLICT dedup (a repeated consent reply returns the
+    existing tenant, created=False) + late founding-slot claim as the web path.
+    """
+    if not phone_e164:
+        raise ValueError("whatsapp_number is the mandatory tenant identity")
+
+    from orchestrator.billing.founding_counter import try_claim_founding_slot
+    from orchestrator.graph import get_pool
+    from orchestrator.knowledge.kg_emit import drain_kg_events, emit_kg_event
+    from orchestrator.knowledge.kg_vocab import KgEventType
+
+    now = (now_fn or _utcnow)()
+    plan_tier = "standard"
+    dpdpa_version, residency_version = _disclosure_versions()
+
+    pool = get_pool()
+    with pool.connection() as conn, conn.transaction():
+        row = conn.execute(
+            """
+            INSERT INTO tenants
+                (business_name, plan_tier, phase, whatsapp_number, language_preference,
+                 business_type, city_tier, signed_up_at, trial_started_at,
+                 phase_entered_at, created_via, verification_status)
+            VALUES (%s, %s, 'onboarding', %s, 'en', NULL, NULL, %s, %s, %s, 'whatsapp',
+                    'unverified')
+            ON CONFLICT (whatsapp_number) WHERE whatsapp_number IS NOT NULL
+            DO NOTHING
+            RETURNING id
+            """,
+            ("", plan_tier, phone_e164, now, now, now),
+        ).fetchone()
+
+        if row is None:
+            existing = conn.execute(
+                "SELECT id FROM tenants WHERE whatsapp_number = %s", (phone_e164,)
+            ).fetchone()
+            if existing is None:
+                raise RuntimeError(
+                    "whatsapp signup conflict but the conflicting tenant vanished "
+                    "(concurrent delete)"
+                )
+            tid = UUID(str(cast("dict[str, Any]", existing)["id"]))
+            return SignupResult(tenant_id=tid, created=False, plan_tier=None, city_tier=None)
+
+        tid = UUID(str(cast("dict[str, Any]", row)["id"]))
+        conn.execute(
+            """
+            INSERT INTO consent_records
+                (tenant_id, consent_dpdpa, consent_residency,
+                 dpdpa_version, residency_version, signed_up_at)
+            VALUES (%s, TRUE, TRUE, %s, %s, %s)
+            """,
+            (str(tid), dpdpa_version, residency_version, now),
+        )
+        # _h_tenant_created guards every optional field — a business_type-less emit just
+        # creates the tenant node; CLASSIFIED_AS lands when the journey classifies.
+        emit_kg_event(conn, KgEventType.TENANT_CREATED, tid, {"business_type": None})
+        if try_claim_founding_slot(conn, tid).claimed:
+            conn.execute(
+                "UPDATE tenants SET plan_tier = 'founding' WHERE id = %s", (str(tid),)
+            )
+            plan_tier = "founding"
+
+    drain_kg_events(tid)
+    return SignupResult(tenant_id=tid, created=True, plan_tier=plan_tier, city_tier=None)
+
+
 # --------------------------------------------------------------------------- #
 # Endpoint orchestration: validate → create → city_tier → owner_name → welcome
 # --------------------------------------------------------------------------- #

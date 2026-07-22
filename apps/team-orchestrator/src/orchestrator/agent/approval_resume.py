@@ -137,6 +137,20 @@ def resolve_decision_from_reply(
         shadow_log_send_intent,
     )
 
+    # VT-683 P2c — the interactive-button fast-path, BEFORE any mode routing. An exact
+    # (normalized, full-string) team_approval_buttons title is a BUTTON PRESS, not free text:
+    # it resolves deterministically in EVERY mode, enforce included (VT-83: a clear
+    # deterministic signal wins over the LLM — without this, enforce routed a tap through the
+    # LLM gate, where a consent-skip/LLM error silently un-resolved an explicit tap). The
+    # opt-out/DSR guard already ran upstream (try_resume_pending_approval), and no title
+    # collides with it. Free text — including sentences that merely CONTAIN a title — falls
+    # through to the unchanged paths below.
+    from orchestrator.owner_inputs.approval_reply import classify_button_decision
+
+    button = classify_button_decision(text)
+    if button is not None:
+        return button
+
     is_customer_send = approval_type in _CUSTOMER_SEND_APPROVAL_TYPES
     mode = get_send_intent_mode()
 

@@ -166,6 +166,11 @@ class StepResult:
     # tenant lifetime (avoids a later step's assert being confused by an earlier step's side effect
     # in a multi-step scenario). None only for callers that never drove a real turn (unit fakes).
     run_id: str | None = None
+    # VT-683 P2d keying fix — THIS turn's injected MessageSid. The enforce loop drafts campaigns
+    # on its OWN manager_dispatch run (never the webhook turn's run), so a run-scoped campaigns
+    # lookup needs the sid to follow manager_tasks.source_message_ref (the plan_store spawn stamp)
+    # from the turn to its async dispatch run. None for unit fakes (falls back to run_id-only).
+    message_sid: str | None = None
 
 
 def assistant_turns(turns: list[Turn]) -> list[Turn]:
@@ -446,7 +451,9 @@ def _set_operator_claim(conn: Any) -> None:
 # here (fixing it touches the send path, a risk row).
 
 
-def _campaign_id_for_run(conn: Any, tenant_id: str, run_id: str | None) -> str | None:
+def _campaign_id_for_run(
+    conn: Any, tenant_id: str, run_id: str | None, turn_sid: str | None = None
+) -> str | None:
     """The ``campaigns.id`` this turn's run_id produced, or None.
 
     ``run_id=None`` means TENANT-WIDE — the tenant's MOST RECENT campaign, any run. This is for a
@@ -474,6 +481,26 @@ def _campaign_id_for_run(conn: Any, tenant_id: str, run_id: str | None) -> str |
             "ORDER BY created_at DESC LIMIT 1",
             (tenant_id, tenant_id),
         ).fetchone()
+    elif turn_sid is not None:
+        # VT-683 P2d keying fix: the enforce loop drafts campaigns on its OWN manager_dispatch
+        # run, never the webhook turn's run (kept-tenant proof 2026-07-22: campaigns.run_id =
+        # the dispatch run, 'paused' on the armed approval, while the product behaved
+        # correctly). Follow the turn to its async draft via the plan_store spawn stamp
+        # (manager_tasks.source_message_ref = THIS turn's sid) → the task's awaiting-approval
+        # run. A turn that spawned no task/campaign still reads 'none' — step-scoped proofs of
+        # NON-delegation are unchanged.
+        row = conn.execute(
+            "SELECT c.id FROM campaigns c "
+            "WHERE c.tenant_id = %s AND ("
+            "  c.run_id = %s"
+            "  OR c.run_id::text IN ("
+            "       SELECT mt.stall_metadata->>'awaiting_approval_run_id' "
+            "       FROM manager_tasks mt "
+            "       WHERE mt.tenant_id = %s AND mt.source_message_ref = %s "
+            "         AND mt.stall_metadata->>'awaiting_approval_run_id' IS NOT NULL)"
+            ") ORDER BY c.created_at DESC LIMIT 1",
+            (tenant_id, run_id, tenant_id, turn_sid),
+        ).fetchone()
     else:
         row = conn.execute(
             "SELECT id FROM campaigns WHERE tenant_id = %s AND run_id = %s "
@@ -485,21 +512,28 @@ def _campaign_id_for_run(conn: Any, tenant_id: str, run_id: str | None) -> str |
     return str(row[0] if not isinstance(row, dict) else row["id"])
 
 
-def _observed_route(conn: Any, tenant_id: str, run_id: str | None) -> str:
+def _observed_route(
+    conn: Any, tenant_id: str, run_id: str | None, turn_sid: str | None = None
+) -> str:
     """The DB-observed ROUTE for one turn: ``"sales_recovery"`` if a ``campaigns`` row was created
     for this SPECIFIC run_id (or tenant-wide when ``run_id=None`` — see ``_campaign_id_for_run``),
     else ``"none"``. See the module-level Package H1 note above for why campaigns-row existence is
     (today) a clean proxy for "delegated to Sales-Recovery"."""
-    return "sales_recovery" if _campaign_id_for_run(conn, tenant_id, run_id) is not None else "none"
+    return (
+        "sales_recovery"
+        if _campaign_id_for_run(conn, tenant_id, run_id, turn_sid) is not None
+        else "none"
+    )
 
 
 def assert_route(
-    conn: Any, tenant_id: str, run_id: str | None, *, expect_sr_delegation: bool
+    conn: Any, tenant_id: str, run_id: str | None, *, expect_sr_delegation: bool,
+    turn_sid: str | None = None,
 ) -> list[str]:
     """DB-state proof of ROUTING (Package H1, facet d) — did THIS turn delegate to Sales-Recovery?
     ``run_id=None`` checks tenant-wide instead (see ``_campaign_id_for_run``). See the module-level
     Package H1 note for the campaigns-row-existence proxy + its fragility."""
-    route = _observed_route(conn, tenant_id, run_id)
+    route = _observed_route(conn, tenant_id, run_id, turn_sid)
     delegated = route == "sales_recovery"
     if delegated != expect_sr_delegation:
         want = "delegation to Sales-Recovery" if expect_sr_delegation else "NO delegation"
@@ -515,6 +549,7 @@ def assert_side_effects(
     tenant_id: str,
     run_id: str | None,
     *,
+    turn_sid: str | None = None,
     expect_campaign: bool | None = None,
     expect_approval_decision: str | None = None,
     expect_sent_count: int | None = None,
@@ -540,7 +575,7 @@ def assert_side_effects(
         actually sent" is the honest, robust claim, not a brittle exact count.
     """
     failures: list[str] = []
-    campaign_id = _campaign_id_for_run(conn, tenant_id, run_id)
+    campaign_id = _campaign_id_for_run(conn, tenant_id, run_id, turn_sid)
 
     if expect_campaign is not None:
         found = campaign_id is not None
@@ -598,7 +633,8 @@ def assert_side_effects(
 
 
 def assert_grounded_count(
-    conn: Any, tenant_id: str, run_id: str | None, *, expected_count: int
+    conn: Any, tenant_id: str, run_id: str | None, *, expected_count: int,
+    turn_sid: str | None = None,
 ) -> list[str]:
     """DB-state proof of a GROUNDED count (Package H1, facet b/honesty) — reads the cohort_size the
     manager's OWN campaign plan actually persisted (``campaigns.plan_json -> target_cohort ->
@@ -607,7 +643,7 @@ def assert_grounded_count(
     ``--seed-lapsed-customers`` value here; never trust the reply text for the expectation).
     Catches a manager that FABRICATES a different cohort count than what was actually planned. No
     matching campaigns row -> its own failure (nothing to check)."""
-    campaign_id = _campaign_id_for_run(conn, tenant_id, run_id)
+    campaign_id = _campaign_id_for_run(conn, tenant_id, run_id, turn_sid)
     if campaign_id is None:
         return [
             f"assert_grounded_count: no campaigns row found — nothing to check against "
@@ -750,15 +786,51 @@ def _poll_run_status(dsn: str, run_id: str, timeout: float) -> str | None:
 # --- ingress POST ------------------------------------------------------------------------------
 
 
+# VT-683 P2d hardening — transport patience. Under measurement load the dev service can take
+# >30s to answer an ingress POST (observed: repeated ReadTimeout shard-deaths during the ×3
+# gate, with the service healthy before/after — slow-turn spikes, not a wedge). A read timeout
+# is a TRANSPORT hiccup, not a scenario outcome: real Twilio retries the SAME MessageSid and
+# the ingress dedupes (reason='dupe'), so retrying here mirrors production semantics exactly
+# and never double-drives a turn. Assertions are untouched — this only stops one slow response
+# from killing an entire multi-hour shard.
+_TRANSPORT_TIMEOUT_S = 90.0
+_TRANSPORT_RETRIES = 2  # total attempts = 1 + retries
+_TRANSPORT_BACKOFF_S = 10.0
+
+
+def _post_with_transport_retry(post_fn):  # noqa: ANN001, ANN201 — tiny local helper
+    import requests
+
+    last_exc: Exception | None = None
+    for attempt in range(1 + _TRANSPORT_RETRIES):
+        try:
+            return post_fn()
+        except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as exc:
+            last_exc = exc
+            if attempt < _TRANSPORT_RETRIES:
+                print(
+                    f"[transport] {type(exc).__name__} (attempt {attempt + 1}) — "
+                    f"retrying in {_TRANSPORT_BACKOFF_S:.0f}s",
+                    flush=True,
+                )
+                time.sleep(_TRANSPORT_BACKOFF_S)
+    raise last_exc  # type: ignore[misc]
+
+
 def _post_inbound(base: str, secret: str, fields: dict[str, str]) -> dict[str, Any]:
     import requests
 
-    resp = requests.post(
-        f"{base}{_INGRESS_PATH}",
-        json={"twilio_fields": fields},
-        headers={"X-Internal-Secret": secret, "content-type": "application/json"},
-        timeout=30,
-    )
+    def _once():  # noqa: ANN202
+        return requests.post(
+            f"{base}{_INGRESS_PATH}",
+            json={"twilio_fields": fields},
+            headers={"X-Internal-Secret": secret, "content-type": "application/json"},
+            timeout=_TRANSPORT_TIMEOUT_S,
+        )
+
+    # Same MessageSid on every attempt — the ingress dedupe (reason='dupe') makes a retry after
+    # a server-side-completed POST a harmless no-op, exactly like a real Twilio redelivery.
+    resp = _post_with_transport_retry(_once)
     if resp.status_code != 200:
         return {"workflow_id": None, "reason": f"http_{resp.status_code}"}
     return resp.json()
@@ -779,14 +851,20 @@ def _post_consent_seed(
     ``_die``) on a non-200 rather than silently proceeding with a half-seeded cohort."""
     import requests
 
-    resp = requests.post(
-        f"{base}{_CONSENT_SEED_PATH}",
-        json={
-            "tenant_id": tenant_id, "phone_e164": phone_e164, "consent_text_version": consent_version,
-        },
-        headers={"X-Internal-Secret": secret, "content-type": "application/json"},
-        timeout=30,
-    )
+    def _once():  # noqa: ANN202
+        return requests.post(
+            f"{base}{_CONSENT_SEED_PATH}",
+            json={
+                "tenant_id": tenant_id, "phone_e164": phone_e164,
+                "consent_text_version": consent_version,
+            },
+            headers={"X-Internal-Secret": secret, "content-type": "application/json"},
+            timeout=_TRANSPORT_TIMEOUT_S,
+        )
+
+    # Transport retry (VT-683 P2d hardening): re-seeding the same (tenant, phone, version) is
+    # server-side record_consent again — consent simply exists either way; never a false cohort.
+    resp = _post_with_transport_retry(_once)
     if resp.status_code != 200:
         _die(
             f"consent-seed endpoint returned {resp.status_code} for tenant={tenant_id}: "
@@ -830,7 +908,7 @@ def _drive_turn(
 
     with _connect(dsn) as conn:
         new_turns = _new_conversation_turns(conn, tenant_id, before_ids)
-        route = _observed_route(conn, tenant_id, run_id)
+        route = _observed_route(conn, tenant_id, run_id, sid)
 
     # Build the transcript: the operator's own inbound (echo-deduped against a brain-recorded owner
     # row for the same sid), then every new conversation_log row, then the observed-route marker.
@@ -862,6 +940,7 @@ def _drive_turn(
     return StepResult(
         ok=ok, xfail=False, label=("PASS" if ok else "FAIL"), reasons=reasons,
         transcript=transcript, run_status=run_status, ingress_reason=reason, run_id=run_id,
+        message_sid=sid,
     )
 
 
@@ -1561,7 +1640,10 @@ def _resolve_assert_scope(turn_run_id: str, kwargs: dict[str, Any]) -> str | Non
     return turn_run_id
 
 
-def _evaluate_db_asserts(dsn: str, tenant_id: str, run_id: str | None, step: dict[str, Any]) -> list[str]:
+def _evaluate_db_asserts(
+    dsn: str, tenant_id: str, run_id: str | None, step: dict[str, Any],
+    turn_sid: str | None = None,
+) -> list[str]:
     """VT-611 Package H1 — run the step's DB-state asserts (as opposed to ``evaluate_assertions``'s
     reply-text-only checks). A step opts in per-key: ``assert_route`` / ``assert_side_effects`` /
     ``assert_grounded_count``, each a dict of kwargs for the matching function above (plus the
@@ -1582,13 +1664,19 @@ def _evaluate_db_asserts(dsn: str, tenant_id: str, run_id: str | None, step: dic
     with _connect(dsn) as conn:
         if route_kwargs is not None:
             kw = dict(route_kwargs)
-            failures += assert_route(conn, tenant_id, _resolve_assert_scope(run_id, kw), **kw)
+            failures += assert_route(
+                conn, tenant_id, _resolve_assert_scope(run_id, kw), turn_sid=turn_sid, **kw
+            )
         if effects_kwargs is not None:
             kw = dict(effects_kwargs)
-            failures += assert_side_effects(conn, tenant_id, _resolve_assert_scope(run_id, kw), **kw)
+            failures += assert_side_effects(
+                conn, tenant_id, _resolve_assert_scope(run_id, kw), turn_sid=turn_sid, **kw
+            )
         if grounded_kwargs is not None:
             kw = dict(grounded_kwargs)
-            failures += assert_grounded_count(conn, tenant_id, _resolve_assert_scope(run_id, kw), **kw)
+            failures += assert_grounded_count(
+                conn, tenant_id, _resolve_assert_scope(run_id, kw), turn_sid=turn_sid, **kw
+            )
     return failures
 
 
@@ -1728,7 +1816,9 @@ def run_scenario_steps(
             # VT-611 Package H1 — DB-state proof (route/side-effects/grounded-count), never just the
             # reply text. Merged into the SAME failure list before classify_step so an expected_fail
             # step's DB-state gap XFAILs identically to a text-assertion gap.
-            db_failures = _evaluate_db_asserts(dsn, tenant_id, turn.run_id, step)
+            db_failures = _evaluate_db_asserts(
+                dsn, tenant_id, turn.run_id, step, turn_sid=turn.message_sid
+            )
             # VT-633 — ASYNC SETTLE: the enforce loop resolves approvals, executes sends, and
             # notifies OUT-OF-BAND (arm-wait ≤96s + a ≤15s reaction poll + the fan-out), so a
             # truthful side effect can land well after the triggering turn's run completes. A
@@ -1739,7 +1829,9 @@ def run_scenario_steps(
                 _settle_deadline = time.time() + _DB_ASSERT_SETTLE_S
                 while db_failures and time.time() < _settle_deadline:
                     time.sleep(_DB_ASSERT_SETTLE_POLL_S)
-                    db_failures = _evaluate_db_asserts(dsn, tenant_id, turn.run_id, step)
+                    db_failures = _evaluate_db_asserts(
+                        dsn, tenant_id, turn.run_id, step, turn_sid=turn.message_sid
+                    )
             failures = failures + db_failures
             ok, xfail, label = classify_step(failures, expected_fail=step_xfail)
 

@@ -183,6 +183,78 @@ def test_unknown_sender_does_not_start_workflow(ingress):
     assert resp.json() == {"workflow_id": None, "reason": "unknown_sender"}
 
 
+# --- VT-691: WhatsApp-initiated signup (flag-gated) --------------------------
+
+
+def test_whatsapp_signup_flag_off_is_byte_identical(ingress, monkeypatch):
+    """ENABLE_WHATSAPP_SIGNUP unset/off → the unknown_sender drop is unchanged (the flag is
+    the ONLY gate between today's behavior and the signup flow)."""
+    monkeypatch.delenv("ENABLE_WHATSAPP_SIGNUP", raising=False)
+    resp = _post(ingress, _fields(_phone()))
+    assert resp.status_code == 200
+    assert resp.json() == {"workflow_id": None, "reason": "unknown_sender"}
+
+
+def test_whatsapp_signup_flag_on_starts_workflow_and_prompts_consent(ingress, monkeypatch):
+    """Flag ON → an unknown inbound starts wa_signup_{sid}, the session row lands
+    'consent_pending', the consent prompt goes out (send patched), and NO tenant is created
+    (DPDP: tenant only after an explicit consent reply). A Twilio redelivery of the same sid
+    reports dupe/recovering — never a second flow."""
+    import orchestrator.onboarding.whatsapp_signup as ws
+
+    monkeypatch.setenv("ENABLE_WHATSAPP_SIGNUP", "true")
+    # Fazal 2026-07-22: the consent ask is the interactive I-agree/I-do-not-agree quick-reply.
+    # Capture the interactive send (registry-resolved HX) and keep the freeform fallback
+    # captured too — exactly one of the two must fire.
+    import orchestrator.utils.twilio_send as ts
+
+    sent: list[str] = []
+    monkeypatch.setattr(
+        ts, "send_interactive_message",
+        lambda content_sid, phone, **k: (sent.append(f"interactive:{content_sid}"), "MKDEVtest")[1],
+    )
+    monkeypatch.setattr(ws, "_send", lambda p, text: sent.append(text))
+
+    phone = _phone()
+    fields = _fields(phone)
+    resp = _post(ingress, fields)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["reason"] == "started"
+    assert str(body["workflow_id"]).startswith("wa_signup_")
+
+    # The workflow runs async — poll for the durable session row.
+    deadline = time.time() + 20
+    row = None
+    while time.time() < deadline:
+        with psycopg.connect(ingress.dsn, autocommit=True) as conn:
+            row = conn.execute(
+                "SELECT status, consent_prompt_count FROM whatsapp_signup_sessions "
+                "WHERE phone_e164 = %s",
+                (phone,),
+            ).fetchone()
+        if row is not None:
+            break
+        time.sleep(0.5)
+    assert row is not None, "the signup session row must be durably created"
+    assert row[0] == "consent_pending"
+    from orchestrator.templates_registry import content_sid_for
+
+    expected_sid = content_sid_for(ws.INTERACTIVE_CONSENT_TEMPLATE, "en")
+    assert sent == [f"interactive:{expected_sid}"], sent
+
+    # DPDP: no tenant yet.
+    with psycopg.connect(ingress.dsn, autocommit=True) as conn:
+        t = conn.execute(
+            "SELECT 1 FROM tenants WHERE whatsapp_number = %s", (phone,)
+        ).fetchone()
+    assert t is None, "a cold inbound must NEVER create a tenant"
+
+    # Same-sid redelivery: idempotent (no second workflow, no second prompt).
+    resp2 = _post(ingress, fields)
+    assert resp2.json()["reason"] in ("dupe", "recovering")
+
+
 # --- VT-416 PR-3: whatsapp_number ambiguity guard (fail-closed) --------------
 #
 # The canonical guarantee is the DB constraint: migration 066's
@@ -1032,3 +1104,44 @@ def test_prod_secret_still_accepted_when_dev_ingress_enabled(ingress, monkeypatc
     assert resp.status_code == 200
     assert resp.json()["reason"] == "started"
     _await_workflow(resp.json()["workflow_id"])
+
+
+def test_whatsapp_signup_never_solicits_a_rate_limited_tenants_customer(ingress, monkeypatch):
+    """Adversarial-verify finding B: a message TO a live business WABA whose tenant is
+    rate-limited must fall through to the silent drop — NEVER into a Viabe signup
+    solicitation of that business's customer (flag ON)."""
+    import orchestrator.onboarding.whatsapp_signup as ws
+
+    monkeypatch.setenv("ENABLE_WHATSAPP_SIGNUP", "true")
+    monkeypatch.setattr(
+        ws, "_send", lambda p, text: pytest.fail("a third party's customer must never be solicited")
+    )
+
+    waba_number = _phone()
+    tenant_id = _new_tenant(ingress.dsn, _phone())
+    with psycopg.connect(ingress.dsn, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO tenant_whatsapp_accounts (tenant_id, phone_number, status) "
+            "VALUES (%s, %s, 'live')",
+            (tenant_id, waba_number),
+        )
+        # Saturate this tenant's per-minute bucket so the customer-inbound branch declines.
+        conn.execute(
+            "INSERT INTO rate_limit_buckets (tenant_id, window_start, count) "
+            "VALUES (%s, date_trunc('minute', now()), 30) "
+            "ON CONFLICT (tenant_id, window_start) DO UPDATE SET count = 30",
+            (tenant_id,),
+        )
+
+    customer = _phone()  # unknown number, messaging the BUSINESS's WABA
+    resp = _post(ingress, _fields(customer, To=waba_number))
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["reason"] == "unknown_sender", body
+    assert body["workflow_id"] is None
+
+    with psycopg.connect(ingress.dsn, autocommit=True) as conn:
+        s = conn.execute(
+            "SELECT 1 FROM whatsapp_signup_sessions WHERE phone_e164 = %s", (customer,)
+        ).fetchone()
+    assert s is None, "no signup session may be opened for a business's customer"

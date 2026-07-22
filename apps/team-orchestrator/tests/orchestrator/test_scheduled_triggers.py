@@ -952,12 +952,15 @@ def test_register_scheduled_triggers_idempotent(monkeypatch) -> None:
     # test tenants so they stop paging ops as noise): 22 → 23.
     # VT-679 added two (plan_refresh + daily_initiative — §7A proactive planning, both behind
     # TEAM_PROACTIVE_PLANNING; the cron registration itself is unconditional): 23 → 25.
-    assert first == 25, "expected 25 triggers registered on first call"
-    assert second == 25, "second call must short-circuit (idempotent)"
+    # VT-683 P2b added one (owner_comms_sweep — the */10 owner-comms queue drain +
+    # drop-stale + POINT A NULL-clock belt): 25 → 26.
+    # VT-683 P3 added one (wakeup_sweep — the daily 10:30 IST wake-up loop, team_wakeup2): 26 → 27.
+    assert first == 27, "expected 27 triggers registered on first call"
+    assert second == 27, "second call must short-circuit (idempotent)"
     # VT-464 D3: every scheduled handler MUST also be registered as a workflow
     # (one DBOS.workflow() wrap per DBOS.scheduled() call) — otherwise the cron
     # fire raises DBOSWorkflowFunctionNotFoundError.
-    assert first_wf == 25, "expected 25 handlers wrapped as @DBOS.workflow"
+    assert first_wf == 27, "expected 27 handlers wrapped as @DBOS.workflow"
     st._registered = False
 
 
@@ -1006,6 +1009,11 @@ def test_scheduled_sweeps_are_registered_workflows() -> None:
             assert name in reg.workflow_info_map, (
                 f"{name} must be a registered workflow (VT-679 proactive planning)"
             )
+        # VT-683 P3 — same class of bug: the daily wake-up handler must be a registered workflow or
+        # its cron fire would raise DBOSWorkflowFunctionNotFoundError.
+        assert "wakeup_sweep_scheduled" in reg.workflow_info_map, (
+            "wakeup_sweep_scheduled must be a registered workflow (VT-683 P3 daily wake-up)"
+        )
     finally:
         st._registered = False
 
@@ -1154,3 +1162,260 @@ def test_run_daily_initiative_body_delegates_per_tenant(monkeypatch) -> None:
     assert out == [{"task_id": "abc", "item_id": "item-1", "owning_agent": "reputation"}], (
         "t1's failure must not halt the sweep; only t2's result recorded"
     )
+
+
+# ---------------------------------------------------------------------------
+# 8. VT-683 P2b — owner-comms sweep (deliver + drop-stale + NULL-clock belt)
+# ---------------------------------------------------------------------------
+
+
+def _wire_comms_sweep(monkeypatch, *, tenants, open_session, idle, drain_result):
+    """Patch every seam of run_owner_comms_sweep_body; returns the capture dict."""
+    seen = {"drained": [], "dropped": 0, "belt_sql": []}
+    monkeypatch.setattr(st, "_tenants_with_queued_comms", lambda: tenants)
+    monkeypatch.setattr(st, "_owner_recipient_phone", lambda t: "+919811112222")
+
+    import orchestrator.owner_surface.session_window as sw
+    import orchestrator.owner_surface.owner_comms_drainer as dr
+    import orchestrator.owner_surface.owner_comms_queue as cq
+    import orchestrator.owner_surface.freeform_acks as fa
+
+    monkeypatch.setattr(sw, "session_open", lambda _t: open_session)
+    monkeypatch.setattr(sw, "idle_minutes", lambda _t: idle)
+    monkeypatch.setattr(fa, "resolve_owner_locale", lambda _t: "en")
+
+    def _drain(tenant_id, recipient, *, lang="en"):
+        seen["drained"].append((tenant_id, recipient, lang))
+        return drain_result
+
+    monkeypatch.setattr(dr, "drain_one", _drain)
+    monkeypatch.setattr(cq, "drop_stale", lambda **k: 3)
+
+    class _BeltCur:
+        rowcount = 2
+
+    class _BeltConn:
+        def execute(self, sql, params=None):
+            seen["belt_sql"].append(" ".join(sql.split()))
+            return _BeltCur()
+
+    class _BeltPool:
+        def connection(self):
+            conn = _BeltConn()
+
+            class _CM:
+                def __enter__(self_inner):
+                    return conn
+
+                def __exit__(self_inner, *exc):
+                    return False
+
+            return _CM()
+
+    import orchestrator.graph as graph_mod
+
+    monkeypatch.setattr(graph_mod, "get_pool", lambda: _BeltPool())
+    return seen
+
+
+def test_owner_comms_sweep_delivers_when_open_and_idle(monkeypatch) -> None:
+    seen = _wire_comms_sweep(
+        monkeypatch, tenants=["t1", "t2"], open_session=True, idle=9.0,
+        drain_result={"delivered": True},
+    )
+    out = st.run_owner_comms_sweep_body()
+    assert out["scanned"] == 2 and out["delivered"] == 2
+    assert len(seen["drained"]) == 2
+    assert out["dropped"] == 3
+    # POINT A NULL-clock belt ran, scoped to open NULL-clock rows past the grace bound.
+    assert out["belted"] == 2
+    belt = "\n".join(seen["belt_sql"])
+    assert "timeout_at IS NULL" in belt and "resolved_at IS NULL" in belt
+
+
+def test_owner_comms_sweep_skips_mid_exchange_tenants(monkeypatch) -> None:
+    """Idle below the gate (or unreadable) → never interleave into an active exchange."""
+    seen = _wire_comms_sweep(
+        monkeypatch, tenants=["t1"], open_session=True, idle=1.0,
+        drain_result={"delivered": True},
+    )
+    out = st.run_owner_comms_sweep_body()
+    assert out["delivered"] == 0 and seen["drained"] == []
+
+    seen2 = _wire_comms_sweep(
+        monkeypatch, tenants=["t1"], open_session=True, idle=None,
+        drain_result={"delivered": True},
+    )
+    assert st.run_owner_comms_sweep_body()["delivered"] == 0 and seen2["drained"] == []
+
+
+def test_owner_comms_sweep_skips_closed_sessions(monkeypatch) -> None:
+    seen = _wire_comms_sweep(
+        monkeypatch, tenants=["t1"], open_session=False, idle=60.0,
+        drain_result={"delivered": True},
+    )
+    out = st.run_owner_comms_sweep_body()
+    assert out["delivered"] == 0 and seen["drained"] == []
+
+
+def test_owner_comms_sweep_one_tenant_failure_does_not_halt(monkeypatch) -> None:
+    _wire_comms_sweep(
+        monkeypatch, tenants=["bad", "good"], open_session=True, idle=9.0,
+        drain_result={"delivered": True},
+    )
+    import orchestrator.owner_surface.session_window as sw
+
+    def _open(t):
+        if t == "bad":
+            raise RuntimeError("tenant read down")
+        return True
+
+    monkeypatch.setattr(sw, "session_open", _open)
+    out = st.run_owner_comms_sweep_body()
+    assert out["scanned"] == 2 and out["delivered"] == 1  # 'good' still served
+
+
+def test_owner_comms_sweep_handler_signature_smoke(monkeypatch) -> None:
+    """The @DBOS.scheduled handler shape (scheduled_time, actual_time) -> None; never raises."""
+    monkeypatch.setattr(st, "run_owner_comms_sweep_body", lambda now=None: {"scanned": 0})
+    st.owner_comms_sweep_scheduled(
+        datetime(2026, 7, 22, 0, 0, tzinfo=timezone.utc),
+        datetime(2026, 7, 22, 0, 0, 5, tzinfo=timezone.utc),
+    )
+
+
+# ---------------------------------------------------------------------------
+# 9. VT-683 P3 — daily wake-up sweep (team_wakeup2)
+# ---------------------------------------------------------------------------
+
+
+def _wire_wakeup_sweep(monkeypatch, *, tenants, open_session, due, pending, phone, send_success):
+    """Patch every seam of run_wakeup_sweep_body; returns the capture dict. ``send_success`` None →
+    send_wakeup returns None (template unconfigured); else a result with that ``.success``."""
+    from types import SimpleNamespace
+
+    seen: dict[str, list[Any]] = {"sent": [], "marked": []}
+    monkeypatch.setattr(st, "_tenants_with_queued_comms", lambda: list(tenants))
+
+    import orchestrator.owner_surface.session_window as sw
+    import orchestrator.owner_surface.wakeup as wk
+
+    monkeypatch.setattr(sw, "session_open", lambda _t: open_session)
+    monkeypatch.setattr(wk, "wakeup_due", lambda _t, *, now=None: due)
+    monkeypatch.setattr(wk, "queued_comms_count", lambda _t: pending)
+    monkeypatch.setattr(wk, "owner_contact", lambda _t: (phone, "Asha"))
+
+    def _send(tenant_id, *, owner_phone, owner_name, pending_count):
+        seen["sent"].append((tenant_id, owner_phone, owner_name, pending_count))
+        return SimpleNamespace(success=send_success) if send_success is not None else None
+
+    monkeypatch.setattr(wk, "send_wakeup", _send)
+    monkeypatch.setattr(wk, "mark_wakeup_sent", lambda _t, *, now=None: seen["marked"].append(_t))
+    return seen
+
+
+def test_wakeup_sweep_sends_when_closed_due_and_queued(monkeypatch) -> None:
+    seen = _wire_wakeup_sweep(
+        monkeypatch, tenants=["t1", "t2"], open_session=False, due=True,
+        pending=3, phone="+919811112222", send_success=True,
+    )
+    out = st.run_wakeup_sweep_body()
+    assert out == {"scanned": 2, "sent": 2}
+    assert [s[3] for s in seen["sent"]] == [3, 3]  # pending_count threaded through
+    assert seen["marked"] == ["t1", "t2"]  # the ≤1/day durable mark records only on a real send
+
+
+def test_wakeup_sweep_skips_open_session(monkeypatch) -> None:
+    seen = _wire_wakeup_sweep(
+        monkeypatch, tenants=["t1"], open_session=True, due=True,
+        pending=2, phone="+919811112222", send_success=True,
+    )
+    assert st.run_wakeup_sweep_body() == {"scanned": 1, "sent": 0}
+    # An OPEN session drains via owner_comms_sweep (P2b) — never a wake-up template.
+    assert seen["sent"] == [] and seen["marked"] == []
+
+
+def test_wakeup_sweep_skips_not_due(monkeypatch) -> None:
+    seen = _wire_wakeup_sweep(
+        monkeypatch, tenants=["t1"], open_session=False, due=False,
+        pending=2, phone="+919811112222", send_success=True,
+    )
+    assert st.run_wakeup_sweep_body() == {"scanned": 1, "sent": 0}
+    assert seen["sent"] == []  # ≤1/day guard already woke this tenant today
+
+
+def test_wakeup_sweep_skips_empty_queue(monkeypatch) -> None:
+    seen = _wire_wakeup_sweep(
+        monkeypatch, tenants=["t1"], open_session=False, due=True,
+        pending=0, phone="+919811112222", send_success=True,
+    )
+    assert st.run_wakeup_sweep_body() == {"scanned": 1, "sent": 0}
+    assert seen["sent"] == []  # a fail-soft 0 count → nothing to wake about
+
+
+def test_wakeup_sweep_skips_no_phone(monkeypatch) -> None:
+    seen = _wire_wakeup_sweep(
+        monkeypatch, tenants=["t1"], open_session=False, due=True,
+        pending=2, phone=None, send_success=True,
+    )
+    assert st.run_wakeup_sweep_body() == {"scanned": 1, "sent": 0}
+    assert seen["sent"] == []
+
+
+def test_wakeup_sweep_does_not_mark_on_send_failure(monkeypatch) -> None:
+    """A reported send failure leaves last_wakeup_at untouched so the next slot retries (still ≤1/day)."""
+    seen = _wire_wakeup_sweep(
+        monkeypatch, tenants=["t1"], open_session=False, due=True,
+        pending=1, phone="+919811112222", send_success=False,
+    )
+    assert st.run_wakeup_sweep_body() == {"scanned": 1, "sent": 0}
+    assert seen["sent"] and seen["marked"] == []  # attempted, but never marked
+
+
+def test_wakeup_sweep_none_result_not_marked(monkeypatch) -> None:
+    """send_wakeup returns None (template unconfigured) → no mark, no crash."""
+    seen = _wire_wakeup_sweep(
+        monkeypatch, tenants=["t1"], open_session=False, due=True,
+        pending=1, phone="+919811112222", send_success=None,
+    )
+    assert st.run_wakeup_sweep_body() == {"scanned": 1, "sent": 0}
+    assert seen["marked"] == []
+
+
+def test_wakeup_sweep_one_tenant_failure_does_not_halt(monkeypatch) -> None:
+    _wire_wakeup_sweep(
+        monkeypatch, tenants=["bad", "good"], open_session=False, due=True,
+        pending=2, phone="+919811112222", send_success=True,
+    )
+    import orchestrator.owner_surface.wakeup as wk
+
+    def _due(t, *, now=None):
+        if t == "bad":
+            raise RuntimeError("due read down")
+        return True
+
+    monkeypatch.setattr(wk, "wakeup_due", _due)
+    out = st.run_wakeup_sweep_body()
+    assert out == {"scanned": 2, "sent": 1}  # 'good' still woken
+
+
+def test_wakeup_sweep_handler_delegates_within_belt(monkeypatch) -> None:
+    """The @DBOS.scheduled handler asserts the IST belt then delegates with now=actual_time."""
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(st, "run_wakeup_sweep_body", lambda now=None: captured.update({"now": now}))
+    actual = datetime(2026, 7, 22, 5, 0, 5, tzinfo=timezone.utc)  # 10:30 IST — inside the belt
+    st.wakeup_sweep_scheduled(datetime(2026, 7, 22, 5, 0, tzinfo=timezone.utc), actual)
+    assert captured.get("now") == actual
+
+
+def test_wakeup_sweep_handler_raises_outside_ist_belt(monkeypatch) -> None:
+    monkeypatch.setattr(
+        st, "run_wakeup_sweep_body",
+        lambda now=None: pytest.fail("must not reach the body — the IST belt should have raised"),
+    )
+    # 20:00 UTC = 01:30 IST — outside the 10:00-19:00 belt.
+    with pytest.raises(RuntimeError, match="outside the 10:00-19:00 IST belt"):
+        st.wakeup_sweep_scheduled(
+            datetime(2026, 7, 22, 20, 0, tzinfo=timezone.utc),
+            datetime(2026, 7, 22, 20, 0, 5, tzinfo=timezone.utc),
+        )

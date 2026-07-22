@@ -36,17 +36,16 @@ def _reset(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_configure_logfire_no_token_returns_false_and_warns(monkeypatch, capsys) -> None:
-    monkeypatch.delenv("LOGFIRE_TOKEN", raising=False)
+    monkeypatch.delenv("HONEYCOMB_API_KEY", raising=False)
     out = logfire_mod.configure_logfire()
     assert out is False
     err = capsys.readouterr().err
-    assert "Logfire disabled" in err
+    assert "tracing disabled" in err
 
 
 def test_configure_logfire_idempotent_with_token(monkeypatch) -> None:
     """First call configures; second is a no-op short-circuit."""
-    monkeypatch.setenv("LOGFIRE_TOKEN", "pylf_test_token_DUMMY")
-    monkeypatch.setenv("LOGFIRE_BASE_URL", "https://example.invalid")
+    monkeypatch.setenv("HONEYCOMB_API_KEY", "hcxik_dummyid_dummysecret")
     call_count = {"n": 0}
 
     import logfire as _lf
@@ -65,14 +64,11 @@ def test_configure_logfire_idempotent_with_token(monkeypatch) -> None:
     assert call_count["n"] == 1, "second configure should short-circuit"
 
 
-def test_configure_logfire_passes_advanced_base_url(monkeypatch) -> None:
-    """Q3 contract: AdvancedOptions(base_url=...) reaches logfire.configure
-    so the SDK routes spans through the EU region. Env-var-driven OTLP
-    setup was the original Q3 plan but caused exporter conflicts; the
-    SDK's internal exporter via AdvancedOptions is the load-bearing path.
-    DBOS picks up the global TracerProvider that configure() registers."""
-    monkeypatch.setenv("LOGFIRE_TOKEN", "pylf_test_token_DUMMY")
-    monkeypatch.setenv("LOGFIRE_BASE_URL", "https://logfire-eu.pydantic.dev")
+def test_configure_exports_to_honeycomb_not_logfire_saas(monkeypatch) -> None:
+    """VT-690: configure runs with send_to_logfire=False (paid SaaS OFF) + a Honeycomb OTLP
+    span processor, and never passes a Logfire token. The logfire LIBRARY registers the global
+    TracerProvider that DBOS picks up; spans route to Honeycomb via the additional processor."""
+    monkeypatch.setenv("HONEYCOMB_API_KEY", "hcxik_dummyid_dummysecret")
     captured: dict[str, Any] = {}
 
     import logfire as _lf
@@ -84,11 +80,12 @@ def test_configure_logfire_passes_advanced_base_url(monkeypatch) -> None:
     monkeypatch.setattr(_lf, "instrument_anthropic", lambda *a, **k: None)
     monkeypatch.setattr(_lf, "instrument_pydantic", lambda *a, **k: None)
 
-    logfire_mod.configure_logfire()
-    assert captured.get("token") == "pylf_test_token_DUMMY"
-    advanced = captured.get("advanced")
-    assert advanced is not None
-    assert getattr(advanced, "base_url", None) == "https://logfire-eu.pydantic.dev"
+    assert logfire_mod.configure_logfire() is True
+    assert captured.get("send_to_logfire") is False, "paid Logfire SaaS must be OFF"
+    assert captured.get("token") is None, "no Logfire token — Honeycomb is the backend"
+    procs = captured.get("additional_span_processors")
+    assert procs and len(procs) == 1, "exactly one Honeycomb span processor attached"
+    assert captured.get("service_name")  # dataset derives from service.name
 
 
 # ---------------------------------------------------------------------------
@@ -96,7 +93,7 @@ def test_configure_logfire_passes_advanced_base_url(monkeypatch) -> None:
 # ---------------------------------------------------------------------------
 
 def test_traced_node_disabled_no_token_is_passthrough(monkeypatch) -> None:
-    monkeypatch.delenv("LOGFIRE_TOKEN", raising=False)
+    monkeypatch.delenv("HONEYCOMB_API_KEY", raising=False)
     called = {"n": 0}
 
     @logfire_mod.traced_node("test_span")
@@ -110,7 +107,7 @@ def test_traced_node_disabled_no_token_is_passthrough(monkeypatch) -> None:
 
 def test_traced_node_captures_redacted_input(monkeypatch) -> None:
     """Inputs flow through redact_for_otel_span BEFORE the Logfire span captures them."""
-    monkeypatch.setenv("LOGFIRE_TOKEN", "pylf_test_token_DUMMY")
+    monkeypatch.setenv("HONEYCOMB_API_KEY", "hcxik_dummyid_dummysecret")
     captured_attrs: dict[str, Any] = {}
 
     class _FakeSpan:
@@ -193,13 +190,13 @@ def test_otel_span_matches_langsmith_alias_byte_identical() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 5. is_enabled tracks LOGFIRE_TOKEN
+# 5. is_enabled tracks HONEYCOMB_API_KEY
 # ---------------------------------------------------------------------------
 
 def test_is_enabled_tracks_token(monkeypatch) -> None:
-    monkeypatch.delenv("LOGFIRE_TOKEN", raising=False)
+    monkeypatch.delenv("HONEYCOMB_API_KEY", raising=False)
     assert logfire_mod.is_enabled() is False
-    monkeypatch.setenv("LOGFIRE_TOKEN", "x")
+    monkeypatch.setenv("HONEYCOMB_API_KEY", "x")
     assert logfire_mod.is_enabled() is True
 
 

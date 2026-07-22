@@ -658,3 +658,49 @@ def test_welcome_trial_end_derives_from_trial_yaml(pool):
         f"welcome trial_end must be trial_started_at + trial.yaml trial_days ({yaml_days})"
     )
     assert not hasattr(signup_mod, "_TRIAL_DAYS"), "the stale constant must be gone (grep-zero)"
+
+
+# --- VT-691: create_whatsapp_signup_tenant ------------------------------------------------------
+
+
+def test_create_whatsapp_signup_tenant_atomic(pool):
+    """The WhatsApp-initiated variant: tenant + consent proof + trial in one txn, NO OTP,
+    created_via='whatsapp', NO fabricated business details (empty name, NULL type/city)."""
+    from orchestrator.onboarding.signup import create_whatsapp_signup_tenant
+
+    phone = _wa()
+    res = create_whatsapp_signup_tenant(phone)
+    assert res.created is True
+
+    with pool.connection() as conn:
+        t = conn.execute(
+            "SELECT business_name, business_type, city_tier, phase, created_via, "
+            "       verification_status, whatsapp_number, language_preference, "
+            "       trial_started_at, signed_up_at "
+            "FROM tenants WHERE id = %s", (str(res.tenant_id),),
+        ).fetchone()
+        c = conn.execute(
+            "SELECT consent_dpdpa, consent_residency, dpdpa_version, residency_version "
+            "FROM consent_records WHERE tenant_id = %s", (str(res.tenant_id),),
+        ).fetchone()
+
+    assert t["business_name"] == "" and t["business_type"] is None and t["city_tier"] is None
+    assert t["phase"] == "onboarding"
+    assert t["created_via"] == "whatsapp"
+    assert t["verification_status"] == "unverified"
+    assert t["whatsapp_number"] == phone
+    assert t["trial_started_at"] is not None and t["signed_up_at"] is not None
+    assert c is not None and c["consent_dpdpa"] is True and c["consent_residency"] is True
+    assert c["dpdpa_version"] and c["residency_version"], "consent proof must pin versions"
+
+
+def test_create_whatsapp_signup_tenant_duplicate_returns_existing(pool):
+    """A repeated consent reply (or redelivery) returns the SAME tenant, created=False —
+    never a second tenant on one number."""
+    from orchestrator.onboarding.signup import create_whatsapp_signup_tenant
+
+    phone = _wa()
+    first = create_whatsapp_signup_tenant(phone)
+    second = create_whatsapp_signup_tenant(phone)
+    assert first.created is True and second.created is False
+    assert first.tenant_id == second.tenant_id

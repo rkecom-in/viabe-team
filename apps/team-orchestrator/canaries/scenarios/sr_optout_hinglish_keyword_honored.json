@@ -9,8 +9,8 @@
     {
       "message": "bas ab customers ko koi bhi message mat bhejna, sab kuch band karo",
       "assert_no_silent": true,
-      "assert_contains": ["opt_out_confirmation"],
-      "note": "The literal Hinglish opt-out keyword 'band karo' hits the deterministic gate. The confirmation is a TEMPLATE send (body renders Twilio-side, not composed in-process) so conversation_log records the compact marker '[template: team_opt_out_confirmation]' -- asserting on that marker is the honest, robust proxy for the confirmation actually firing."
+      "assert_contains": ["stopped"],
+      "note": "The literal Hinglish opt-out keyword 'band karo' hits the deterministic gate. VT-683 P1 (freeform-first, Fazal-ruled): the in-window confirmation is now the REAL stop-confirm text ('Got it — I've stopped all messaging…'), not the '[template: team_opt_out_confirmation]' marker (the template stays the out-of-window belt) -- 'stopped' asserts the confirmation class on the live copy."
     }
   ]
 }

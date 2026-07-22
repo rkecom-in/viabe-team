@@ -50,14 +50,16 @@ def _supabase_storage(bucket: str) -> Any:
     """Build a Supabase Storage bucket client from env. Lazy — only the real
     upload path imports/needs it, so dev without creds still loads the module.
 
-    Requires SUPABASE_URL + SUPABASE_SERVICE_KEY (service role — server-side
-    only; never the anon key)."""
+    Requires SUPABASE_URL + SUPABASE_SECRET_KEY (Supabase's secret / service-role
+    key — server-side only; never the publishable/anon key). The env var was
+    renamed SUPABASE_SERVICE_KEY -> SUPABASE_SECRET_KEY (one canonical name across
+    orchestrator + team-web; matches Supabase's new key terminology)."""
     url = os.environ.get("SUPABASE_URL", "")
-    key = os.environ.get("SUPABASE_SERVICE_KEY", "")
+    key = os.environ.get("SUPABASE_SECRET_KEY", "")
     if not url or not key:
         raise RuntimeError(
-            "store_report_pdf: SUPABASE_URL / SUPABASE_SERVICE_KEY not set "
-            "(service-role key required for server-side report storage)"
+            "store_report_pdf: SUPABASE_URL / SUPABASE_SECRET_KEY not set "
+            "(the Supabase secret / service-role key is required for server-side storage)"
         )
     from supabase import create_client  # lazy
 

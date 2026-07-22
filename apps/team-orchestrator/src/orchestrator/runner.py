@@ -283,6 +283,28 @@ def _should_wait_for_approval_arm(tenant_id: str, body: str) -> bool:
 
 
 @DBOS.step()
+def _post_turn_drain_step(tenant_id: str, recipient: str | None) -> bool:
+    """VT-683 P2b — the post-turn owner-comms drain: after a COMPLETED owner turn (an idle
+    moment by construction — the exchange just finished), deliver at most ONE queued
+    owner-comms item (approval > report > notice) inside the still-open 24h session. A
+    ``@DBOS.step`` for the same replay-safety reason as ``_send_owner_reply_step``: the
+    underlying freeform send must fire AT MOST ONCE across a mid-turn worker restart.
+    Deliberately NOT called on the approval-resume branch — that turn wakes the manager
+    loop (campaign execution + its own follow-ups), not an idle moment; the */10 scheduled
+    sweep's idle gate covers those tenants instead. Never raises (drain_one is best-effort;
+    belt-wrapped anyway because this sits on the live inbound path)."""
+    try:
+        from orchestrator.owner_surface.freeform_acks import resolve_owner_locale
+        from orchestrator.owner_surface.owner_comms_drainer import drain_one
+
+        delivered = drain_one(tenant_id, recipient, lang=resolve_owner_locale(tenant_id))
+        return delivered is not None
+    except Exception:  # noqa: BLE001 — a drain failure must never break the turn
+        logger.warning("VT-683 post-turn drain failed (fail-soft) tenant=%s", tenant_id)
+        return False
+
+
+@DBOS.step()
 def _send_owner_reply_step(tenant_id: str, recipient: str | None, text: str | None) -> bool:
     """Shared canonical REPLAY-SAFE in-turn owner send for the deterministic seam nets (D2/D3).
 
@@ -1750,6 +1772,12 @@ def webhook_pipeline_run(tenant_id: str, run_id: str, twilio_fields: dict) -> di
         logger.exception(
             "VT-88 support escalation hook failed (tenant=%s run=%s)", tenant_id, run_id
         )
+
+    # VT-683 P2b — post-turn owner-comms drain: the owner's turn is fully settled (status
+    # persisted, support hook done); deliver at most ONE queued comms item into the open
+    # session. AFTER close_webhook_run like the VT-88 hook (never blocks the durable run) and
+    # checkpointed inside the step (at-most-once across replay).
+    _post_turn_drain_step(tenant_id, event.sender_phone or None)
 
     return {
         "run_id": run_id,
