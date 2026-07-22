@@ -122,9 +122,20 @@ def maybe_kick_discovery(tenant_id: UUID | str, answers: dict[str, Any]) -> bool
             return False  # already kicked (any state) — never double-start
 
         city = str(answers.get("city") or "").strip() or None
+        gstin_hint = _gstin_candidate(name, city)
+        if gstin_hint:
+            # VT-693 — persist the HINT into the draft (provenance llm_hint, never asserted):
+            # the identity CARD shows its tail and the owner's YES routes it into the formal
+            # Sandbox verify (entity_match.confirm_and_verify).
+            try:
+                from orchestrator.onboarding.draft_profile import write_draft
+
+                write_draft(tenant_id, {"gstin_candidate": gstin_hint}, source="llm_hint")
+            except Exception:  # noqa: BLE001 — hint bookkeeping never blocks the kick
+                logger.warning("whatsapp_journey: gstin-hint draft write failed tenant=%s", tenant_id)
         seed: dict[str, Any] = {
             "business_name": name,
-            "gstin": _gstin_candidate(name, city),
+            "gstin": gstin_hint,
             "business_type": None,  # free text is NOT taxonomy — reconcile owns the mapping
             "city": city,
             "whatsapp_number": (row or {}).get("whatsapp_number"),
@@ -259,6 +270,130 @@ def should_force_complete(tenant_id: UUID | str, answers: dict[str, Any] | None)
         return False
 
 
+# VT-693 — the GST identity card. The discovered registration payload is SHOWN and confirmed,
+# never silently used and never auto-asserted (the GSTIN came from a web hint — could be the
+# wrong company; the owner's explicit YES is what anchors it and routes the GSTIN into the
+# formal Sandbox verify).
+_GST_PAYLOAD_FIELDS = (
+    "legal_name", "trade_name", "constitution", "principal_address",
+    "registration_date", "nature_of_business", "additional_addresses",
+)
+
+
+def _gst_display(draft_attrs: dict[str, Any]) -> dict[str, str]:
+    name = str(draft_attrs.get("trade_name") or draft_attrs.get("legal_name") or "").strip()
+    addr = str(draft_attrs.get("principal_address") or "").strip()
+    nature = draft_attrs.get("nature_of_business")
+    if isinstance(nature, list):
+        nature = ", ".join(str(x) for x in nature[:3])
+    nature = str(nature or "").strip()
+    gstin = str(draft_attrs.get("gstin_candidate") or "").strip()
+    return {"name": name, "addr": addr[:120], "nature": nature[:120],
+            "gstin_tail": gstin[-4:] if gstin else ""}
+
+
+def gst_identity_pending(tenant_id: UUID | str, answers: dict[str, Any] | None) -> bool:
+    """True iff the draft carries a discovered GST identity the owner has not yet
+    confirmed/declined ('gst_identity' absent from answers)."""
+    try:
+        if "gst_identity" in (answers or {}):
+            return False
+        from orchestrator.onboarding.draft_profile import get_draft
+
+        attrs = (get_draft(tenant_id) or {}).get("attributes") or {}
+        d = _gst_display(attrs)
+        return bool(d["name"] and (d["addr"] or d["nature"]))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def gst_identity_card_question(tenant_id: UUID | str) -> dict[str, Any] | None:
+    """The card as a journey CONFIRM question (field 'gst_identity') — the VT-479 machinery
+    presents confirms as Yes/No/Skip buttons natively. None when nothing to show."""
+    try:
+        from orchestrator.onboarding.draft_profile import get_draft
+
+        attrs = (get_draft(tenant_id) or {}).get("attributes") or {}
+        d = _gst_display(attrs)
+        if not d["name"]:
+            return None
+        bits_en = [f"Here's what I found online: {d['name']}"]
+        bits_hi = [f"ऑनलाइन यह मिला: {d['name']}"]
+        if d["addr"]:
+            bits_en.append(f"registered at {d['addr']}")
+            bits_hi.append(f"पता: {d['addr']}")
+        if d["nature"]:
+            bits_en.append(f"nature of business: {d['nature']}")
+            bits_hi.append(f"कारोबार: {d['nature']}")
+        if d["gstin_tail"]:
+            bits_en.append(f"GSTIN ending …{d['gstin_tail']}")
+            bits_hi.append(f"GSTIN अंत …{d['gstin_tail']}")
+        return {
+            "field": "gst_identity",
+            "kind": "confirm",
+            "draft_value": "yes",
+            "prompt_en": "; ".join(bits_en) + ". Is this your business?",
+            "prompt_hi": "; ".join(bits_hi) + "। क्या यही आपका बिज़नेस है?",
+        }
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def with_gst_card(
+    tenant_id: UUID | str, queue: list[dict[str, Any]], answers: dict[str, Any] | None
+) -> list[dict[str, Any]]:
+    """Prepend the pending GST identity card to a (re)composed queue — identity confirm comes
+    BEFORE any residual question. No-op when nothing pending or the card is already queued."""
+    try:
+        if not gst_identity_pending(tenant_id, answers):
+            return queue
+        if any(q.get("field") == "gst_identity" for q in queue):
+            return queue
+        card = gst_identity_card_question(tenant_id)
+        return ([card] + list(queue)) if card else queue
+    except Exception:  # noqa: BLE001
+        return queue
+
+
+def accept_gst_identity(tenant_id: UUID | str) -> None:
+    """Owner said YES to the card: anchor the draft (entity_resolution accept → the populate
+    bar), promote derivable facts, and route the candidate GSTIN into the FORMAL Sandbox verify
+    (entity_match.confirm_and_verify — the sole authority for verification stamps)."""
+    from orchestrator.onboarding.draft_profile import get_draft, write_draft
+
+    attrs = (get_draft(tenant_id) or {}).get("attributes") or {}
+    write_draft(
+        tenant_id,
+        {"entity_resolution": {"decision": "accept", "source": "owner_gst_confirm"}},
+        source="owner_confirm",
+    )
+    try:
+        from orchestrator.onboarding.journey import populate_profile_from_draft
+
+        populate_profile_from_draft(tenant_id)
+    except Exception:  # noqa: BLE001
+        logger.warning("whatsapp_journey: post-accept populate failed tenant=%s", tenant_id)
+    gstin = str(attrs.get("gstin_candidate") or "").strip()
+    if gstin:
+        try:
+            from orchestrator.onboarding.entity_match import confirm_and_verify
+
+            name_anchor = str(attrs.get("legal_name") or attrs.get("trade_name") or "") or None
+            confirm_and_verify(tenant_id, gstin, name_anchor=name_anchor)
+        except Exception:  # noqa: BLE001 — verification is best-effort here; VT-408 owns the hard gate
+            logger.warning("whatsapp_journey: confirm_and_verify failed tenant=%s", tenant_id)
+
+
+def decline_gst_identity(tenant_id: UUID | str) -> None:
+    """Owner said NO: wrong company — every discovered GST field AND the candidate GSTIN are
+    removed from the draft (nothing survives, even as a hint)."""
+    from orchestrator.onboarding.draft_profile import remove_draft_fields
+
+    remove_draft_fields(
+        tenant_id, [*(_GST_PAYLOAD_FIELDS), "gstin_candidate", "entity_resolution"]
+    )
+
+
 def push_next_question_after_discovery(tenant_id: UUID | str) -> bool:
     """VT-692 addendum (the Fazal 'nothing came after the hold message' flag) — close the
     copy-promise: when discovery COMPLETES for a WhatsApp tenant with an active journey, the
@@ -301,7 +436,7 @@ def push_next_question_after_discovery(tenant_id: UUID | str) -> bool:
         skipped = list(g.get("skipped") or [])
         _, business_type = j._tenant_phase_and_type(tenant_id)
         j.populate_profile_from_draft(tenant_id)
-        queue = j._compose_queue(tenant_id, business_type)
+        queue = with_gst_card(tenant_id, j._compose_queue(tenant_id, business_type), answers)
 
         from orchestrator.owner_surface import owner_comms_queue as comms_q
 
@@ -313,6 +448,10 @@ def push_next_question_after_discovery(tenant_id: UUID | str) -> bool:
                 "text_en": head.get("prompt_en", ""),
                 "text_hi": head.get("prompt_hi", ""),
             }
+            if head.get("field") == "gst_identity":
+                # VT-693 — the identity card delivers as tappable Yes/No buttons (the VT-479
+                # in-session object; the drainer falls back to freeform on any failure).
+                payload["interactive_template"] = "onboarding_confirm_yesno"
         elif j._journey_profile_complete(tenant_id, business_type, answers, skipped):
             j._complete(tenant_id)
             done = j._completion_message(answers)

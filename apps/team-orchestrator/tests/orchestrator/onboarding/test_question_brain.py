@@ -47,9 +47,27 @@ def test_all_questions_bilingual():
 
 
 def test_gap_dedup():
+    # VT-693: LLM-invented field names collapse onto canonical keys ('hours' →
+    # 'operating_hours') BEFORE dedup, so synonym-renamed repeats can never reach the owner.
     qs = compose_onboarding_questions("apparel", {"attributes": {}}, answered=[], llm_fn=_gaps("hours", "hours", "size_range"))
     gap_fields = [q.field for q in qs if q.kind == "gap"]
-    assert gap_fields == ["hours", "size_range"]
+    assert gap_fields == ["operating_hours", "size_range"]
+
+
+def test_gap_synonym_repeat_and_draft_coverage_suppressed():
+    """VT-693 pins: (a) a synonym of an ANSWERED field never re-asks ('products_services' after
+    'about'); (b) a field the discovery payload covers never asks ('about' with a GST
+    nature_of_business in the draft); (c) with a draft the residual caps at 3."""
+    draft = {"attributes": {"nature_of_business": "Business Intelligence", "legal_name": "X Pvt Ltd"}}
+    qs = compose_onboarding_questions(
+        "services", draft, answered=["operating_hours"],
+        llm_fn=_gaps("products_services", "main_services", "hours", "typical_customer",
+                     "price_range", "peak_days", "team_size"),
+    )
+    gap_fields = [q.field for q in qs if q.kind == "gap"]
+    assert "about" not in gap_fields, "draft nature_of_business covers products/services"
+    assert "operating_hours" not in gap_fields, "answered field's synonym must not re-ask"
+    assert len(gap_fields) <= 3, "draft present → residual budget is 3"
 
 
 def test_llm_failure_falls_back_to_confirms_only():
@@ -126,3 +144,18 @@ def test_all_discovered_field_confirms_are_grounded():
     ):
         q = _confirm_question(field, value)
         assert _cites_provenance(q.prompt_en), f"{field}: {q.prompt_en!r} must cite provenance"
+
+
+def test_gap_suggestions_pass_through_clamped():
+    """VT-694: suggestions ride the Question (most-likely first, ≤3, ≤20 chars each)."""
+    def _llm(bt, da, ans):
+        return [{"field": "operating_hours", "prompt_en": "Hours?", "prompt_hi": "?",
+                 "suggestions_en": ["24/7 online", "10am-9pm every day and more text", "Weekdays", "Extra4"],
+                 "suggestions_hi": ["२४/७"]}]
+
+    qs = compose_onboarding_questions("services", {"attributes": {}}, answered=[], llm_fn=_llm)
+    q = [x for x in qs if x.kind == "gap"][0]
+    assert q.suggestions_en[0] == "24/7 online"
+    assert len(q.suggestions_en) == 3, "clamped to 3"
+    assert all(len(s) <= 20 for s in q.suggestions_en), "20-char button-title clamp"
+    assert q.suggestions_hi == ("२४/७",)

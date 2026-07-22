@@ -633,7 +633,11 @@ def _complete_or_hold(
         return _completion_message(answers)
     # Queue exhausted but profile NOT complete — the thin-draft case. Recompose from the current draft
     # and present the pending question; hold honestly if the draft still yields nothing (never a closer).
-    queue = _compose_queue(tenant_id, business_type)
+    # VT-693: a pending GST identity card always heads the recomposed queue (identity confirm
+    # before any residual question; no-op for web tenants / nothing pending).
+    from orchestrator.onboarding.whatsapp_journey import with_gst_card
+
+    queue = with_gst_card(tenant_id, _compose_queue(tenant_id, business_type), answers)
     if queue:
         _install_recomposed_queue(tenant_id, queue, message_sid)
         head = queue[0]
@@ -738,6 +742,29 @@ def handle_reply(
     if is_skip:
         if field and field not in skipped:
             skipped.append(field)
+    elif q.get("kind") == "confirm" and field == "gst_identity":
+        # VT-693 — the GST IDENTITY CARD is a special confirm: YES anchors the discovered
+        # identity (populate + covered-question suppression + the formal Sandbox verify via the
+        # candidate GSTIN); NO discards the discovered GST fields entirely (wrong company —
+        # nothing may survive as a hint). Either way the answer records ('yes'/'no', never a
+        # profile value) and the shared record-and-move-on advance below presents what's next —
+        # the generic confirm value/promote machinery never touches the card.
+        from orchestrator.onboarding.whatsapp_journey import (
+            accept_gst_identity,
+            decline_gst_identity,
+        )
+
+        _accepted = bool(toks & _YES)
+        try:
+            if _accepted:
+                accept_gst_identity(tenant_id)
+            else:
+                decline_gst_identity(tenant_id)
+        except Exception:  # noqa: BLE001 — the record/advance must never stall on the side effects
+            logger.exception("journey: gst_identity %s failed tenant=%s",
+                             "accept" if _accepted else "decline", tenant_id)
+        answers[field] = "yes" if _accepted else "no"
+        recorded_answer = True
     elif q.get("kind") == "confirm":
         # DF7(b) defense-in-depth (parity with the enforce gate's confirm-correction routing, for the
         # legacy/shadow walker paths): a NON-bare negation to a confirm ("nahi bhai, hum footwear nahi
@@ -1206,7 +1233,9 @@ def _compose_queue(tenant_id: UUID | str, business_type: str | None) -> list[dic
     )
     return [
         {"field": q.field, "kind": q.kind, "prompt_en": q.prompt_en, "prompt_hi": q.prompt_hi,
-         "draft_value": q.draft_value}
+         "draft_value": q.draft_value,
+         "suggestions_en": list(getattr(q, "suggestions_en", ()) or ()),
+         "suggestions_hi": list(getattr(q, "suggestions_hi", ()) or ())}
         for q in decision.remaining
     ]
 
@@ -1275,7 +1304,9 @@ def _live_confirm_questions(tenant_id: UUID | str, business_type: str | None) ->
         )
         return [
             {"field": q.field, "kind": "confirm", "prompt_en": q.prompt_en,
-             "prompt_hi": q.prompt_hi, "draft_value": q.draft_value}
+             "prompt_hi": q.prompt_hi, "draft_value": q.draft_value,
+             "suggestions_en": list(getattr(q, "suggestions_en", ()) or ()),
+             "suggestions_hi": list(getattr(q, "suggestions_hi", ()) or ())}
             for q in questions
             if q.kind == "confirm"
         ]
@@ -1542,6 +1573,13 @@ def _send(
             logger.warning(
                 "journey: interactive confirm-button send failed — falling back to freeform text"
             )
+    # VT-694 — a gap question carrying suggested answers goes out as tappable buttons
+    # (most-likely first); any failure falls through to the plain freeform text below.
+    _sugg = q.get("suggestions_hi") if lang == "hi" else q.get("suggestions_en")
+    if q.get("kind") != "confirm" and _sugg and _send_suggestion_buttons(
+        recipient, text, list(_sugg), tenant_id=tenant_id
+    ):
+        return
     try:
         from orchestrator.utils.twilio_send import send_freeform_message
 
@@ -1554,16 +1592,55 @@ def _send(
 
 
 def _is_confirm_button_set(buttons: list[str]) -> bool:
-    """True iff EVERY requested button is a Yes/No/Skip token — the ONLY interactive button set with a
-    registered Twilio Content object (``onboarding_confirm_yesno``). WhatsApp quick-reply buttons are
-    deliverable ONLY via a pre-registered Content object, so dynamically-titled buttons (discovered
-    alternatives) cannot be sent as tappable buttons with today's infra — they degrade to inline text
-    in ``_send_turn``. Reuses the existing token sets so the button titles round-trip through
-    ``handle_reply``'s _YES/_NO/_SKIP matching unchanged."""
+    """True iff EVERY requested button is a Yes/No/Skip token — the confirm set with its own
+    registered Content object (``onboarding_confirm_yesno``). VT-694: dynamically-titled button
+    sets are ALSO deliverable now via the variable-titled ``journey_suggest_3`` object
+    (``_send_suggestion_buttons``); this predicate only decides WHICH object carries the send.
+    Reuses the existing token sets so confirm titles round-trip through ``handle_reply``'s
+    _YES/_NO/_SKIP matching unchanged."""
     if not buttons:
         return False
     allowed = _YES | _NO | _SKIP
     return all(bool(_tokens(b)) and _tokens(b) <= allowed for b in buttons)
+
+
+_SUGGEST_TEMPLATE = "journey_suggest_3"
+
+
+def _send_suggestion_buttons(
+    recipient: str | None,
+    text: str,
+    suggestions: list[str] | None,
+    *,
+    tenant_id: UUID | str | None = None,
+) -> bool:
+    """VT-694 (Fazal: every question ships with suggested answers as buttons) — send ``text``
+    with up to 3 suggestions as tappable quick-reply buttons via the generic variable-titled
+    Content object (``journey_suggest_3``; canary-proved). The MOST LIKELY answer comes first;
+    fewer than 3 pads with "Skip" (a native journey token). A tap echoes the suggestion text
+    as the inbound Body = the recorded answer; typing still works. Returns True on a delivered
+    interactive send; False (any failure / no suggestions) → the caller's freeform fallback."""
+    try:
+        sugg = [str(b).strip()[:20] for b in (suggestions or []) if str(b).strip()][:3]
+        if not sugg or not recipient or not text:
+            return False
+        while len(sugg) < 3:
+            sugg.append("Skip")
+        from orchestrator.templates_registry import content_sid_for
+        from orchestrator.utils.twilio_send import send_interactive_message
+
+        content_sid = content_sid_for(_SUGGEST_TEMPLATE, "en")
+        if not content_sid:
+            return False
+        send_interactive_message(
+            content_sid, recipient,
+            content_variables={"1": text, "2": sugg[0], "3": sugg[1], "4": sugg[2]},
+            tenant_id=tenant_id, surface="journey",
+        )
+        return True
+    except Exception:  # noqa: BLE001 — buttons are an enhancement; the caller falls back
+        logger.warning("journey: suggestion-button send failed — freeform fallback")
+        return False
 
 
 def _send_turn(
@@ -1601,6 +1678,11 @@ def _send_turn(
         except Exception:  # noqa: BLE001 — buttons are an enhancement; fall through to plain text
             logger.warning("journey: turn-brain interactive confirm send failed — freeform fallback")
     if buttons and not _is_confirm_button_set(buttons):
+        # VT-694 — dynamically-titled buttons ARE deliverable now (the variable-titled
+        # journey_suggest_3 object); inline "(A / B / C)" text is only the fallback.
+        if _send_suggestion_buttons(recipient, text, buttons, tenant_id=tenant_id):
+            _record_flow_turn(tenant_id, text)
+            return
         body = f"{text}\n\n({' / '.join(buttons[:3])})"
     try:
         from orchestrator.utils.twilio_send import send_freeform_message

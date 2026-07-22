@@ -283,6 +283,40 @@ def _should_wait_for_approval_arm(tenant_id: str, body: str) -> bool:
 
 
 @DBOS.step()
+def _journey_represent_instead_of_consent_ask(tenant_id: str, event: Any) -> bool:
+    """VT-693 — while an onboarding journey is ACTIVE, a message the journey gate did not
+    consume must NOT fall into the ACTIVATE consent pitch (the measured mid-questions
+    non-sequitur). Re-present the journey's current question instead and consume the turn.
+    A ``@DBOS.step`` (it sends — at-most-once across replay). Returns True iff it handled the
+    turn; False (incl. any error, fail-open) → the normal consent_required flow runs."""
+    try:
+        from orchestrator.onboarding.journey import _current, get_journey
+
+        g = get_journey(tenant_id)
+        if g is None or g.get("status") != "active":
+            return False
+        q = _current(g)
+        if not q:
+            return False
+        prompt = q.get("prompt_en") or ""
+        if not prompt:
+            return False
+        recipient = getattr(event, "sender_phone", None)
+        if not recipient:
+            return False
+        from orchestrator.owner_surface.freeform_acks import send_freeform_ack
+
+        send_freeform_ack(
+            tenant_id, recipient,
+            f"Let's finish setting up first — {prompt}",
+        )
+        return True
+    except Exception:  # noqa: BLE001 — fail-open to the normal consent flow
+        logger.warning("VT-693 journey-represent guard failed (fail-open) tenant=%s", tenant_id)
+        return False
+
+
+@DBOS.step()
 def _post_turn_drain_step(tenant_id: str, recipient: str | None) -> bool:
     """VT-683 P2b — the post-turn owner-comms drain: after a COMPLETED owner turn (an idle
     moment by construction — the exchange just finished), deliver at most ONE queued
@@ -1566,6 +1600,14 @@ def webhook_pipeline_run(tenant_id: str, run_id: str, twilio_fields: dict) -> di
                 handler_name = "data_inputs_enable_handler"
                 routed = "consent_granted_by_intent"
                 HANDLERS[handler_name](event, state)
+            elif _journey_represent_instead_of_consent_ask(tenant_id, event):
+                # VT-693 — during an ACTIVE onboarding journey, a non-answer owner message must
+                # stay in the journey's conversation: the measured non-sequitur was the ACTIVATE
+                # consent pitch interjecting between profile questions ("Can you fetch my details
+                # from online sources?" → a consent pitch). The journey's current beat re-presents
+                # instead; the data-inputs ask returns AFTER the journey settles.
+                handler_name = None
+                routed = "journey_represent_over_consent_ask"
             else:
                 handler_name = "consent_required_handler"
                 routed = "consent_required"

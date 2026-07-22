@@ -91,15 +91,43 @@ def drain_one(
             logger.warning("owner_comms drain: item %s had no body — marked delivered empty", item["id"])
             return None
 
-        from orchestrator.direct_handlers._freeform_first import send_freeform_first
+        # VT-693 — an item may request INTERACTIVE delivery (payload.interactive_template = a
+        # registry name for an in-session quick-reply Content object; the body rides {{1}}).
+        # Falls back to the plain freeform body on ANY interactive failure — delivery is never
+        # lost to presentation. (The GST identity card uses onboarding_confirm_yesno.)
+        sid = None
+        delivered_interactive = False
+        interactive_name = str(payload.get("interactive_template") or "")
+        if interactive_name and recipient_phone:
+            try:
+                from orchestrator.templates_registry import content_sid_for
+                from orchestrator.utils.twilio_send import send_interactive_message
 
-        res = send_freeform_first(
-            tenant_id,
-            body,
-            recipient_phone,
-            fallback_template=str(payload.get("fallback_template") or "team_error_handler"),
-        )
-        sid = res.get("message_sid") if isinstance(res, dict) else None
+                content_sid = content_sid_for(interactive_name, "en")
+                if content_sid:
+                    sid = send_interactive_message(
+                        content_sid,
+                        recipient_phone,
+                        content_variables={"1": body},
+                        tenant_id=tenant_id,
+                        surface="manager",
+                    )
+                    delivered_interactive = True
+            except Exception:  # noqa: BLE001 — presentation fallback, never a lost delivery
+                logger.warning(
+                    "owner_comms drain: interactive send failed — freeform fallback item=%s",
+                    item["id"],
+                )
+        if not delivered_interactive:
+            from orchestrator.direct_handlers._freeform_first import send_freeform_first
+
+            res = send_freeform_first(
+                tenant_id,
+                body,
+                recipient_phone,
+                fallback_template=str(payload.get("fallback_template") or "team_error_handler"),
+            )
+            sid = res.get("message_sid") if isinstance(res, dict) else None
         # POINT A: mark_delivered starts an approval's decision clock (delivered_at + TTL).
         q.mark_delivered(tenant_id, item["id"], kind=item["kind"], message_sid=sid)
         # VT-683 P2c — a deferred task-outcome item (task_outcome's 63016 window-closed path
@@ -117,12 +145,16 @@ def drain_one(
                 logger.warning(
                     "owner_comms drain: deferred-outcome flip failed (fail-soft) task=%s", task_ref
                 )
+        if delivered_interactive:
+            channel = "interactive_session"
+        else:
+            channel = res.get("channel") if isinstance(res, dict) else None
         return {
             "delivered": True,
             "item_id": item["id"],
             "kind": item["kind"],
             "message_sid": sid,
-            "channel": res.get("channel") if isinstance(res, dict) else None,
+            "channel": channel,
         }
     except Exception:  # noqa: BLE001 — best-effort; a drain must never break the caller
         logger.warning("owner_comms drain_one failed (best-effort)", exc_info=True)
