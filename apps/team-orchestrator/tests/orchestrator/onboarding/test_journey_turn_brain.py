@@ -196,7 +196,11 @@ def test_multi_field_extraction_records_and_promotes_valid_confirm(substrate, mo
     assert row["answers"].get("business_type") == "services"
     assert row["answers"].get("operating_hours") == "9-9"
     assert row["answers"].get("city") == "Pune"
-    assert row["cursor"] == 3, "the cursor jumps past all three resolved queue fields"
+    # VT-696: queue exhaustion now recomposes to the web-presence capture (draft present,
+    # budget not yet spent by it) instead of completing — cursor resets onto that fresh queue.
+    assert row["cursor"] == 0 and [q["field"] for q in row["question_queue"]] == ["web_presence"], (
+        "exhaustion recomposes to the web-presence ask; every original field is resolved"
+    )
     promoted = _canonical_profile(substrate.dsn, tenant)
     assert promoted is not None and promoted.get("business_type") == "services", (
         "a confirmed valid taxonomy business_type must be promoted to canonical fact"
@@ -278,7 +282,11 @@ def test_gate_off_is_deterministic_walker(substrate, monkeypatch, _stub_sends):
 
     row = _journey_row(substrate.dsn, tenant)
     assert row is not None
-    assert row["cursor"] == 1, "the walker confirm-yes advances 0→1"
+    # VT-696: the confirm-yes resolves the whole seeded queue, so exhaustion recomposes to the
+    # web-presence capture (draft present) — cursor lands on that fresh single-question queue.
+    assert row["cursor"] == 0 and [q["field"] for q in row["question_queue"]] == ["web_presence"], (
+        "confirm-yes resolved; the walker then presents the web-presence ask"
+    )
     assert row["answers"].get("business_type") == "services", "draft_value recorded (not 'yes')"
     promoted = _canonical_profile(substrate.dsn, tenant)
     assert promoted is not None and promoted.get("business_type") == "services"
