@@ -124,11 +124,16 @@ def mark_delivered(
     row (a redelivery can't reset an already-started decision clock).
     """
     ttl_seconds = int(decision_ttl.total_seconds()) if kind == "approval" else None
+    # LIVE BUG (2026-07-22, 10× re-delivered push): with ttl_seconds None psycopg sends an
+    # UNTYPED NULL and Postgres type-rejects ``make_interval(secs => text)`` at plan time even
+    # though the CASE branch is unreachable — every non-approval mark_delivered raised, the
+    # drain fail-softed, and the */10 sweep re-sent the same item forever. The explicit
+    # ``::integer`` casts make the NULL typed; behavior for approvals is unchanged.
     sql = (
         "UPDATE owner_comms_queue "
         "SET status = 'delivered', delivered_at = now(), message_sid = %s, "
-        "    decision_deadline_at = CASE WHEN %s IS NULL THEN NULL "
-        "                                ELSE now() + make_interval(secs => %s) END "
+        "    decision_deadline_at = CASE WHEN %s::integer IS NULL THEN NULL "
+        "                                ELSE now() + make_interval(secs => %s::integer) END "
         "WHERE tenant_id = %s AND id = %s AND status = 'queued'"
     )
     params = (message_sid, ttl_seconds, ttl_seconds, str(tenant_id), str(item_id))
