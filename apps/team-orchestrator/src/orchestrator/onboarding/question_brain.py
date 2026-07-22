@@ -196,9 +196,12 @@ def compose_onboarding_questions(
 
     # VT-696 — the ONE highest-value capture asks FIRST (Fazal: a website / FB / LinkedIn /
     # IndiaMART link yields products, offering, type and nature in one shot): deterministic,
-    # never LLM-chosen, budget-consuming like any other residual.
+    # never LLM-chosen, budget-consuming like any other residual. DRAFT-GATED: with no draft,
+    # ``_compose_queue`` early-returns [] (the question could never present), so counting it
+    # in ``profile_collection_complete`` would zombie pre-draft journeys — never complete,
+    # never asked. The web ask therefore exists only where the discovery arc runs.
     web_q: Question | None = None
-    if "web_presence" not in known and max_gaps > 0:
+    if draft_attrs and "web_presence" not in known and max_gaps > 0:
         web_q = Question(
             field="web_presence",
             kind="gap",

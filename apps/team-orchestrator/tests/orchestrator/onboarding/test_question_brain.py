@@ -51,8 +51,8 @@ def test_gap_dedup():
     # 'operating_hours') BEFORE dedup, so synonym-renamed repeats can never reach the owner.
     qs = compose_onboarding_questions("apparel", {"attributes": {}}, answered=[], llm_fn=_gaps("hours", "hours", "size_range"))
     gap_fields = [q.field for q in qs if q.kind == "gap"]
-    # VT-696: the deterministic web-presence capture leads every fresh gap set.
-    assert gap_fields == ["web_presence", "operating_hours", "size_range"]
+    # VT-696: no draft → no web-presence ask (it is draft-gated); the dedup contract holds.
+    assert gap_fields == ["operating_hours", "size_range"]
 
 
 def test_gap_synonym_repeat_and_draft_coverage_suppressed():
