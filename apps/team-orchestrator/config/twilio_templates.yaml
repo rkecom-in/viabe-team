@@ -184,6 +184,24 @@ journey_gst_card:
     en: HXdf097aab878f962d3621b619f3f1c0f0
     hi: HXfcf1872a751b277a7c8a49e6a89a91d9
 
+team_activate_button:
+  # VT-700 (Fazal 2026-07-23: the activation ask "could have had a button" + "needs to
+  # introduce the Manager"): the data-inputs consent ask as a tappable quick-reply. The
+  # grant floor is the EXACT phrase "ACTIVATE TEAM" (config/data_inputs_enable_keywords.yaml
+  # + pre_filter exact match), so the button TITLE is exactly that phrase — a tap echoes it
+  # as the inbound Body and rides the EXISTING deterministic grant path (zero classifier
+  # change). "Not now" echoes into the deterministic decline handling. Body = {{1}} (the full
+  # Manager-intro consent prompt) so the enable phrase lands in conversation_log via the
+  # interactive var-1 recording — the runner's consent-ask recognition is unchanged.
+  # NEVER retitle without updating data_inputs_enable_keywords.yaml in the same commit.
+  # Button ids: activate_yes / activate_later.
+  audience: owner
+  agent_selectable: false
+  variables:
+    - consent_prompt
+  languages:
+    en: HXfbdb7ea96b84e45231419e7d4f962fbc
+
 team_signup_consent_buttons:
   # VT-691 (Fazal 2026-07-22): the WhatsApp-signup consent ask as an IN-SESSION interactive
   # quick-reply — the signup does NOT start unless the person explicitly presses "I agree";
