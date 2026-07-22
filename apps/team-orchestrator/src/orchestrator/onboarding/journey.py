@@ -105,6 +105,8 @@ def _is_kickoff_token(body: str) -> bool:
 # ``__``-prefixed bookkeeping idiom that turn_brain._visible_answers already strips from prompts).
 _FLOW_KEY = "__flow__"
 _FLOW_PREVIEWED = "profile_previewed"   # card shown; waiting for the owner to acknowledge
+_FLOW_INTRO_SENT = "team_intro"         # VT-698: how-your-team-works intro sent; waiting for ack
+_FLOW_TRIAL_SENT = "agent_trial"        # VT-698: agent + 1-month-trial terms sent; waiting for ack
 _FLOW_READY_ASKED = "ready_asked"       # readiness ask sent; waiting for yes / later
 _FLOW_DEFERRED = "deferred"             # owner declined; paused but resumable on a clear "connect"
 _FLOW_INTEGRATION_PREFIX = "integration:"  # an integration handoff is in flight (e.g. integration:shopify)
@@ -1197,13 +1199,18 @@ def _completion_recap(answers: dict[str, Any] | None) -> tuple[str, str]:
 def _completion_message(answers: dict[str, Any] | None = None) -> dict[str, Any]:
     recap_en, recap_hi = _completion_recap(answers)
     return {
+        # VT-698: the closer NEVER strands the owner ("we'll take it from here" is banned) —
+        # it hands into the intro arc: the owner's next message triggers the how-your-team-works
+        # beat (_flow_team_intro).
         "reply_en": (
             f"Thanks — that's everything we need to get started.{recap_en} "
-            "We're setting up your assistant now."
+            "We're setting up your assistant now. Next, let me show you how your Viabe Team "
+            "will work for you — just reply OK."
         ),
         "reply_hi": (
             f"धन्यवाद — शुरू करने के लिए हमें इतना ही चाहिए था।{recap_hi} "
-            "हम आपका असिस्टेंट अभी तैयार कर रहे हैं।"
+            "हम आपका असिस्टेंट अभी तैयार कर रहे हैं। आगे, मैं दिखाता हूँ आपकी Viabe Team "
+            "आपके लिए कैसे काम करेगी — बस OK लिखें।"
         ),
         "done": True,
     }
@@ -2212,6 +2219,47 @@ def _fire_integration_seam(tenant_id: UUID | str, recipient: str | None) -> None
 
 # --- VT-576: the paced post-profile flow beats (readiness → one integration → data-landed plan) -----
 
+# VT-698 (Fazal: "the Manager is hired by the owner, so the owner can't be left clueless") —
+# the post-profile INTRO arc: how the team works → specialised agents + the 1-month-per-agent
+# trial terms → then the existing data-connection beats. Deterministic copy; one beat per
+# owner message; "Later" defers into the existing resumable defer machinery.
+_TEAM_INTRO = {
+    "en": (
+        "Before anything else — here's how your Viabe Team works. You've hired a Manager (me). "
+        "I run business tasks for you right here on WhatsApp: tracking sales and customers, "
+        "recovering lapsed buyers, drafting campaigns, and flagging what needs your attention. "
+        "You stay in charge — I always ask before anything goes out to a customer. "
+        "You can also add SPECIALISED AGENTS to your team for specific jobs. Want a quick look?"
+    ),
+    "hi": (
+        "सबसे पहले — आपकी Viabe Team ऐसे काम करती है। आपने एक Manager (मुझे) हायर किया है। "
+        "मैं WhatsApp पर ही आपके बिज़नेस के काम चलाता हूँ: सेल्स और ग्राहकों पर नज़र, पुराने "
+        "ग्राहकों की वापसी, कैंपेन ड्राफ्ट, और ज़रूरी बातों की सूचना। कंट्रोल आपके पास रहता है — "
+        "ग्राहक तक कुछ भी जाने से पहले मैं आपसे पूछता हूँ। आप ख़ास कामों के लिए SPECIALISED "
+        "AGENTS भी जोड़ सकते हैं। एक नज़र डालें?"
+    ),
+}
+_TEAM_INTRO_BUTTONS = {"en": ["Yes, show me", "Later"], "hi": ["हाँ, दिखाइए", "बाद में"]}
+
+_AGENT_TRIAL = {
+    "en": (
+        "Every specialised agent (like Sales Recovery or Customer Win-back) joins your team on a "
+        "FREE 1-MONTH TRIAL — you can start any agent whenever you like. After the month it "
+        "becomes a paid service, and you continue ONLY if the agent is clearly earning for your "
+        "business — nothing is ever charged without your explicit go-ahead, and you can stop "
+        "anytime. To put your team to work, the first step is connecting your business data. "
+        "Shall we set that up?"
+    ),
+    "hi": (
+        "हर specialised agent (जैसे Sales Recovery या Customer Win-back) आपकी टीम में 1 महीने के "
+        "FREE TRIAL पर आता है — कोई भी agent कभी भी शुरू कर सकते हैं। महीने के बाद यह paid "
+        "service है, और आप तभी जारी रखें जब agent आपके बिज़नेस के लिए साफ़ कमाई कर रहा हो — "
+        "आपकी साफ़ हाँ के बिना कभी कोई charge नहीं, और कभी भी बंद कर सकते हैं। टीम को काम पर "
+        "लगाने के लिए पहला कदम है आपका business data जोड़ना। सेट कर दें?"
+    ),
+}
+_AGENT_TRIAL_BUTTONS = {"en": ["Connect my data", "Later"], "hi": ["डेटा जोड़ें", "बाद में"]}
+
 _READINESS_ASK = {
     "en": (
         "Want me to set up your data connections now so I can start finding sales to recover? "
@@ -2297,6 +2345,25 @@ def _integration_resume_live(tenant_id: UUID | str) -> bool:
     except Exception:  # noqa: BLE001 — never block owner inbound on a state read; assume orphaned
         logger.warning("journey flow: integration-resume-live check failed (fail-soft)", exc_info=True)
         return False
+
+
+def _flow_team_intro(tenant_id: UUID | str, recipient: str | None, message_sid: str | None, lang: str) -> dict[str, Any]:
+    """VT-698 beat (a2): the owner acknowledged the profile card → explain HOW the team works
+    (Manager runs tasks on WhatsApp; owner stays in charge) and offer the specialised-agent look."""
+    key = "hi" if lang == "hi" else "en"
+    _send_turn(recipient, _TEAM_INTRO[key], list(_TEAM_INTRO_BUTTONS[key]), lang, tenant_id=tenant_id)
+    _set_flow(tenant_id, _FLOW_INTRO_SENT, message_sid=message_sid)
+    return {"done": False, "routed": "flow_team_intro", "flow": _FLOW_INTRO_SENT}
+
+
+def _flow_agent_trial(tenant_id: UUID | str, recipient: str | None, message_sid: str | None, lang: str) -> dict[str, Any]:
+    """VT-698 beat (a3): the trial terms, stated PLAINLY (Fazal): every specialised agent = a free
+    1-month trial, start anytime, paid after, continue ONLY if valuable, never charged without an
+    explicit go-ahead — then bridge into the existing data-connection beats."""
+    key = "hi" if lang == "hi" else "en"
+    _send_turn(recipient, _AGENT_TRIAL[key], list(_AGENT_TRIAL_BUTTONS[key]), lang, tenant_id=tenant_id)
+    _set_flow(tenant_id, _FLOW_TRIAL_SENT, message_sid=message_sid)
+    return {"done": False, "routed": "flow_agent_trial", "flow": _FLOW_TRIAL_SENT}
 
 
 def _flow_ask_readiness(tenant_id: UUID | str, recipient: str | None, message_sid: str | None, lang: str) -> dict[str, Any]:
@@ -2489,8 +2556,23 @@ def _maybe_handle_post_profile_flow(
         return {"done": False, "already_presented": True, "routed": "flow_dup"}
 
     if flow == _FLOW_PREVIEWED:
-        # The owner's first message after the card = an acknowledgement → ask readiness.
-        return _flow_ask_readiness(tenant_id, recipient, message_sid, lang)
+        # VT-698: the owner's first message after the card = an acknowledgement → the team
+        # INTRO leads (the owner is never left clueless about what they hired), then the trial
+        # terms, then the readiness/connection beats.
+        return _flow_team_intro(tenant_id, recipient, message_sid, lang)
+
+    if flow == _FLOW_INTRO_SENT:
+        # "Later" defers (resumable, same as readiness); anything else → the trial-terms beat.
+        if _resolve_readiness_intent(body) == "decline":
+            return _flow_defer(tenant_id, recipient, message_sid, lang)
+        return _flow_agent_trial(tenant_id, recipient, message_sid, lang)
+
+    if flow == _FLOW_TRIAL_SENT:
+        # Terms acknowledged → straight into the existing one-at-a-time connection offer;
+        # "Later" defers identically.
+        if _resolve_readiness_intent(body) == "decline":
+            return _flow_defer(tenant_id, recipient, message_sid, lang)
+        return _flow_offer_next_integration(tenant_id, recipient, message_sid, lang, body=body)
 
     if flow == _FLOW_READY_ASKED:
         # VT-583: floor-first, brain-mediated middle (see _resolve_readiness_intent). A decline defers;

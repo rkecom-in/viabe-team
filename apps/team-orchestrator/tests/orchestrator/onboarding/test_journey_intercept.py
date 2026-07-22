@@ -363,12 +363,12 @@ def test_complete_journey_drives_flow_then_falls_through(substrate, send_spy):  
     g = journey.get_journey(tenant)
     assert g is not None and g["answers"].get("__flow__") == "profile_previewed", "completion opens the paced flow"
 
-    # The owner's next message enters the flow (readiness ask), NOT a fall-through.
+    # The owner's next message enters the flow (VT-698: the team INTRO leads), NOT a fall-through.
     send_spy.clear()
     result = journey.maybe_handle_journey_reply(
         tenant, "another inbound", "SM-complete-flow", recipient="+919999000555"
     )
-    assert result is not None and result.get("routed") == "flow_readiness_ask"
+    assert result is not None and result.get("routed") == "flow_team_intro"
 
     # Once the flow reaches its terminal beat, the intercept falls through to the brain.
     journey._set_flow(tenant, journey._FLOW_PLAN_KICKED)

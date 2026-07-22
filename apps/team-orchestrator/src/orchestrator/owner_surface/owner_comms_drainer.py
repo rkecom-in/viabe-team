@@ -78,6 +78,33 @@ def drain_one(
                     "clock running)", item["id"],
                 )
                 return None
+        # VT-699 (live: the GST card re-sent 10 min AFTER the journey completed) — a queued
+        # journey-push goes STALE the moment the journey moves past it (the turn path presented
+        # the same question, or the journey completed). Drain-time is the one reliable guard:
+        # drop, never deliver, when the journey is no longer active or the pushed field is
+        # already answered.
+        if payload.get("journey_push") == "true":
+            try:
+                from orchestrator.onboarding.journey import get_journey
+
+                g = get_journey(tenant_id)
+                g_active = g is not None and g.get("status") == "active"
+                pushed_field = str(payload.get("field") or "")
+                field_answered = bool(pushed_field) and pushed_field in (
+                    (g or {}).get("answers") or {}
+                )
+                if not g_active or field_answered:
+                    q.drop_item(tenant_id, item["id"], reason="stale_journey_push")
+                    logger.info(
+                        "owner_comms drain: journey-push item %s dropped (journey %s, field %s)",
+                        item["id"],
+                        "inactive" if not g_active else "active",
+                        "answered" if field_answered else pushed_field or "-",
+                    )
+                    return None
+            except Exception:  # noqa: BLE001 — the guard must never block a legitimate drain
+                logger.warning("owner_comms drain: journey-push staleness check failed (fail-open)")
+
         body = (
             payload.get(f"text_{lang}")
             or payload.get("text_en")
