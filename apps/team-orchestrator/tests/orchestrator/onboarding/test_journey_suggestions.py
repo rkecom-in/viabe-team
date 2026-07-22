@@ -74,3 +74,43 @@ def test_turn_brain_dynamic_buttons_deliver(monkeypatch) -> None:
     monkeypatch.setattr(ts, "send_freeform_message", lambda *a, **k: "MK1")
     j._send_turn("+919811112222", "Busiest days?", ["Weekends", "Festivals"], "en", tenant_id=None)
     assert sent["vars"]["2"] == "Weekends" and sent["vars"]["4"] == "Skip"
+
+
+def test_pending_gst_card_outranks_stale_queue(monkeypatch) -> None:
+    """VT-693/694 recovery: mid-queue, a pending GST identity card replaces whatever the stale
+    queue holds next — identity first; the flushed queue recomposes post-card."""
+    from uuid import uuid4
+
+    tid = str(uuid4())
+    state = {
+        "status": "active", "cursor": 0, "last_message_sid": None,
+        "question_queue": [
+            {"field": "key_business_challenges", "kind": "gap",
+             "prompt_en": "Challenges?", "prompt_hi": "?"},
+            {"field": "number_of_employees", "kind": "gap",
+             "prompt_en": "Employees?", "prompt_hi": "?"},
+        ],
+        "answers": {}, "skipped": [],
+    }
+    monkeypatch.setattr(j, "get_journey", lambda t: dict(state))
+    installed: dict = {}
+
+    def _install(t, queue, sid):
+        installed["fields"] = [q["field"] for q in queue]
+        state["question_queue"] = list(queue)
+        state["cursor"] = 0
+
+    monkeypatch.setattr(j, "_install_recomposed_queue", _install)
+    monkeypatch.setattr(j, "_advance", lambda *a, **k: None)
+    import orchestrator.onboarding.whatsapp_journey as wj
+
+    monkeypatch.setattr(wj, "gst_identity_pending", lambda t, a: True)
+    monkeypatch.setattr(
+        wj, "gst_identity_card_question",
+        lambda t: {"field": "gst_identity", "kind": "confirm", "draft_value": "yes",
+                   "prompt_en": "Here's what I found — is this your business?",
+                   "prompt_hi": "क्या यही आपका बिज़नेस है?"},
+    )
+    out = j.handle_reply(tid, "Consulting and BI work", "SMx1", lang="en")
+    assert installed["fields"] == ["gst_identity"], "card replaces the stale queue"
+    assert "is this your business" in out["reply_en"].lower()
