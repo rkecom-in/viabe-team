@@ -259,10 +259,87 @@ def should_force_complete(tenant_id: UUID | str, answers: dict[str, Any] | None)
         return False
 
 
+def push_next_question_after_discovery(tenant_id: UUID | str) -> bool:
+    """VT-692 addendum (the Fazal 'nothing came after the hold message' flag) — close the
+    copy-promise: when discovery COMPLETES for a WhatsApp tenant with an active journey, the
+    system must speak NEXT, not wait to be spoken to. This enqueues the follow-through into the
+    VT-683 owner-comms queue — the post-turn drain / */10 sweep then delivers it in-session at
+    idle pace (session-open gated by the drainer, so nothing ever pushes outside the window):
+
+      - draft yields pending questions → recompose + install the queue, enqueue the HEAD
+        question's bilingual prompt;
+      - nothing pending AND the profile is deterministically complete → complete the journey
+        and enqueue the honest recap;
+      - nothing pending, not complete → enqueue nothing (never an empty promise).
+
+    Dedup: at most one queued journey-push item per tenant (payload marker). Fail-soft
+    everywhere — discovery's own result recording must never be disturbed. Returns True iff an
+    item was enqueued."""
+    try:
+        row = _tenant_row(tenant_id)
+        if not _is_whatsapp_tenant(row):
+            return False
+        from orchestrator.onboarding import journey as j
+
+        g = j.get_journey(tenant_id)
+        if g is None or g.get("status") != "active":
+            return False
+
+        # Dedup — one pending push at a time (queued-only; a delivered one may be followed).
+        from orchestrator.db.tenant_connection import tenant_connection
+
+        with tenant_connection(tenant_id) as conn:
+            pending = conn.execute(
+                "SELECT 1 FROM owner_comms_queue WHERE tenant_id = %s AND status = 'queued' "
+                "AND payload->>'journey_push' = 'true' LIMIT 1",
+                (str(tenant_id),),
+            ).fetchone()
+        if pending:
+            return False
+
+        answers = dict(g.get("answers") or {})
+        skipped = list(g.get("skipped") or [])
+        _, business_type = j._tenant_phase_and_type(tenant_id)
+        j.populate_profile_from_draft(tenant_id)
+        queue = j._compose_queue(tenant_id, business_type)
+
+        from orchestrator.owner_surface import owner_comms_queue as comms_q
+
+        if queue:
+            j._install_recomposed_queue(tenant_id, queue, None)
+            head = queue[0]
+            payload = {
+                "journey_push": "true",
+                "text_en": head.get("prompt_en", ""),
+                "text_hi": head.get("prompt_hi", ""),
+            }
+        elif j._journey_profile_complete(tenant_id, business_type, answers, skipped):
+            j._complete(tenant_id)
+            done = j._completion_message(answers)
+            payload = {
+                "journey_push": "true",
+                "text_en": done.get("reply_en", ""),
+                "text_hi": done.get("reply_hi", ""),
+            }
+        else:
+            return False
+        if not payload["text_en"]:
+            return False
+        comms_q.enqueue(tenant_id, kind="notice", payload=payload, priority=60)
+        logger.info("whatsapp_journey: post-discovery follow-through queued tenant=%s", tenant_id)
+        return True
+    except Exception:  # noqa: BLE001 — never disturb the discovery run
+        logger.warning(
+            "whatsapp_journey: post-discovery push failed (fail-soft) tenant=%s", tenant_id
+        )
+        return False
+
+
 __all__ = [
     "CORE_FIELDS",
     "maybe_kick_discovery",
     "on_answers_advanced",
     "promote_answers_to_tenant",
+    "push_next_question_after_discovery",
     "should_force_complete",
 ]
