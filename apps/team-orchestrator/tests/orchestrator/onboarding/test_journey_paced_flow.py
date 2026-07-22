@@ -267,21 +267,81 @@ def test_integration_live_resume_defers_to_gate(substrate, _stub_sends):
 # --- beat (b): ack → readiness ask -------------------------------------------------------------
 
 
-def test_ack_after_card_asks_readiness(substrate, _stub_sends):
-    """After the profile card (profile_previewed), the owner's next message = an ack → a readiness ASK
-    (set up connections now, one at a time, or later). It never steamrolls straight into an integration."""
+def test_ack_after_card_leads_with_team_intro(substrate, _stub_sends):
+    """VT-698 (Fazal: the Manager is HIRED — the owner can't be left clueless): after the profile
+    card, the owner's next message = an ack → the how-your-team-works INTRO leads. It never
+    steamrolls into readiness or an integration."""
     from orchestrator.onboarding.journey import maybe_handle_journey_reply
 
     tenant = _new_tenant(substrate.dsn, name="flow ack")
     _seed_completed_journey(substrate.dsn, tenant, "profile_previewed")
 
     r = maybe_handle_journey_reply(tenant, "ok", "SID-ack-1", "+919999003001")
-    assert r is not None and r.get("routed") == "flow_readiness_ask"
-    assert _flow(substrate.dsn, tenant) == "ready_asked"
-    assert _stub_sends and "connect" in _stub_sends[-1].lower()
-    # No integration onboarding started yet — just the ask.
+    assert r is not None and r.get("routed") == "flow_team_intro"
+    assert _flow(substrate.dsn, tenant) == "team_intro"
+    # Button beats ride the interactive object (the stub records a marker); the copy itself
+    # is pinned from the module constant.
+    assert _stub_sends and _stub_sends[-1] == "<interactive>"
+    from orchestrator.onboarding.journey import _TEAM_INTRO
+    assert "how your Viabe Team works" in _TEAM_INTRO["en"]
+    # No integration onboarding started yet — just the intro.
     from orchestrator.onboarding.shopify_onboarding import read_integration_state
     assert read_integration_state(tenant) is None
+
+
+def test_intro_affirm_presents_trial_terms(substrate, _stub_sends):
+    """VT-698 beat (a3): an affirm on the intro → the agent + trial terms, stated PLAINLY (free
+    1-month per agent, start anytime, paid after, continue only if valuable, never charged
+    without an explicit go-ahead)."""
+    from orchestrator.onboarding.journey import maybe_handle_journey_reply
+
+    tenant = _new_tenant(substrate.dsn, name="flow intro affirm")
+    _seed_completed_journey(substrate.dsn, tenant, "team_intro")
+
+    r = maybe_handle_journey_reply(tenant, "Yes, show me", "SID-intro-1", "+919999003011")
+    assert r is not None and r.get("routed") == "flow_agent_trial"
+    assert _flow(substrate.dsn, tenant) == "agent_trial"
+    assert _stub_sends and _stub_sends[-1] == "<interactive>"
+    from orchestrator.onboarding.journey import _AGENT_TRIAL
+    terms = _AGENT_TRIAL["en"]
+    assert "1-MONTH TRIAL" in terms and "paid" in terms
+    assert "without your explicit go-ahead" in terms
+
+
+def test_intro_later_defers_resumably(substrate, _stub_sends):
+    from orchestrator.onboarding.journey import maybe_handle_journey_reply
+
+    tenant = _new_tenant(substrate.dsn, name="flow intro later")
+    _seed_completed_journey(substrate.dsn, tenant, "team_intro")
+
+    r = maybe_handle_journey_reply(tenant, "later", "SID-intro-2", "+919999003012")
+    assert r is not None and _flow(substrate.dsn, tenant) == "deferred"
+
+
+def test_trial_ack_bridges_into_integration_offer(substrate, _stub_sends):
+    """VT-698: trial terms acknowledged → the EXISTING one-at-a-time connection offer (unchanged
+    onward machinery — shopify first, state written for the resume gate)."""
+    from orchestrator.onboarding.journey import maybe_handle_journey_reply
+    from orchestrator.onboarding.shopify_onboarding import read_integration_state
+
+    tenant = _new_tenant(substrate.dsn, name="flow trial ack")
+    _seed_completed_journey(substrate.dsn, tenant, "agent_trial")
+
+    r = maybe_handle_journey_reply(tenant, "Connect my data", "SID-trial-1", "+919999003013")
+    assert r is not None and r.get("routed") == "flow_offer_integration"
+    assert _flow(substrate.dsn, tenant) == "integration:shopify"
+    state = read_integration_state(tenant)
+    assert state is not None and state["current_connector_id"] == "shopify"
+
+
+def test_trial_later_defers_resumably(substrate, _stub_sends):
+    from orchestrator.onboarding.journey import maybe_handle_journey_reply
+
+    tenant = _new_tenant(substrate.dsn, name="flow trial later")
+    _seed_completed_journey(substrate.dsn, tenant, "agent_trial")
+
+    r = maybe_handle_journey_reply(tenant, "later", "SID-trial-2", "+919999003014")
+    assert r is not None and _flow(substrate.dsn, tenant) == "deferred"
 
 
 # --- beat (c): yes → ONE integration, easiest-first, with instructions --------------------------

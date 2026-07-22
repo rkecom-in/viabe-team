@@ -630,7 +630,7 @@ def test_handle_reply_completion_empty_recap_falls_back_to_today_copy(substrate)
     r = journey.handle_reply(tenant, "9 to 9", "SM-recap-empty-1")
     assert r["done"] is True
     assert r["reply_en"] == (
-        "Thanks — that's everything we need to get started. We're setting up your assistant now."
+        "Thanks — that's everything we need to get started. We're setting up your assistant now. Next, let me show you how your Viabe Team will work for you — just reply OK."
     )
 
 
