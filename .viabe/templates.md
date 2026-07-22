@@ -270,6 +270,21 @@ Hi {{1}}, I couldn't send this week's campaign: {{2}} of the targeted customers 
 
 ---
 
+### `team_signup_consent_buttons`  *(VT-691 — INTERACTIVE in-session signup CONSENT ask; NOT a Meta-approved 24h-window template)*
+
+- **Twilio Content SID:** en `HXa81bc34018ba6e4349622962b6235f06`
+- **Content type:** `twilio/quick-reply` (static bilingual body, no variables; two buttons) · **Approval:** NONE NEEDED — in-session interactive (created by CC 2026-07-22, canary `canaries/vt691_consent_buttons_create.py`).
+- **Sent by:** `onboarding/whatsapp_signup._send_consent_prompt` to an UN-onboarded number whose own inbound just opened the 24h window (freeform text with a typed-exact instruction is the fallback).
+- **Fazal ruling (2026-07-22):** the signup does NOT start unless the person explicitly presses **"I agree"**; **"I do not agree"** is the explicit refusal path (DPDP/EU). The button TITLE echoes back as the inbound Body; the consent GRANT set is the exact-normalized title — **fully deterministic, no LLM in the grant path**. Free-text "yes" re-prompts with the buttons (bounded, 3 prompts max → expired+silent).
+- **Button `id` payloads:** `consent_agree` / `consent_disagree`. NEVER change a title without updating `_AGREE_TITLE`/`_DISAGREE_TITLE` in `whatsapp_signup.py` in the same commit.
+
+```
+Namaste! This is Viabe Team — … consent text with viabe.ai/team/dpdp + /privacy links …
+[ I agree ]  [ I do not agree ]
+```
+
+---
+
 ### `team_approval_buttons`  *(VT-683 P2c — INTERACTIVE in-session approval ask; NOT a Meta-approved 24h-window template)*
 
 - **Twilio Content SIDs:** en `HX6b8aa56b3497301f86152983686064d7` · hi `HX3b0f0c7926f557e4de1d007682cdaabe`
