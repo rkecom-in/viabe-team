@@ -136,3 +136,89 @@ def test_on_answers_advanced_never_raises(monkeypatch) -> None:
     monkeypatch.setattr(wj, "_tenant_row", _boom)
     wj.on_answers_advanced(_TID, _ANSWERS)  # must not raise
     wj.on_answers_advanced(_TID, {})        # no core fields → cheap no-op
+
+
+# --- VT-692 addendum: post-discovery follow-through push -----------------------------------------
+
+
+def _wire_push(monkeypatch, *, created_via="whatsapp", journey=None, queue=None,
+               complete=False, pending_push=False):
+    calls: dict[str, Any] = {"enqueued": [], "installed": None, "completed": False}
+    row = {"created_via": created_via, "business_name": "", "business_type": None,
+           "city_tier": None, "whatsapp_number": "+919900112233"}
+    monkeypatch.setattr(wj, "_tenant_row", lambda t: row)
+
+    class _Cur:
+        def __init__(self, r): self._r = r
+        def fetchone(self): return self._r
+
+    class _Conn:
+        def execute(self, sql, p=None): return _Cur((1,) if pending_push else None)
+
+    class _CM:
+        def __enter__(self): return _Conn()
+        def __exit__(self, *a): return False
+
+    import sys
+
+    import orchestrator.db.tenant_connection  # noqa: F401 — ensure the submodule is loaded
+
+    tc_mod = sys.modules["orchestrator.db.tenant_connection"]
+    monkeypatch.setattr(tc_mod, "tenant_connection", lambda t: _CM())
+
+    import orchestrator.onboarding.journey as j
+
+    monkeypatch.setattr(j, "get_journey", lambda t: journey)
+    monkeypatch.setattr(j, "_tenant_phase_and_type", lambda t: ("onboarding", None))
+    monkeypatch.setattr(j, "populate_profile_from_draft", lambda t: {})
+    monkeypatch.setattr(j, "_compose_queue", lambda t, bt: queue or [])
+    monkeypatch.setattr(j, "_install_recomposed_queue",
+                        lambda t, q, sid: calls.__setitem__("installed", [x["field"] for x in q]))
+    monkeypatch.setattr(j, "_journey_profile_complete", lambda t, bt, a, s: complete)
+    monkeypatch.setattr(j, "_complete", lambda t: calls.__setitem__("completed", True))
+    monkeypatch.setattr(j, "_completion_message",
+                        lambda a: {"reply_en": "All set — recap.", "reply_hi": "हो गया।"})
+
+    import orchestrator.owner_surface.owner_comms_queue as cq
+
+    monkeypatch.setattr(cq, "enqueue",
+                        lambda t, *, kind, payload, priority=None, **k:
+                        calls["enqueued"].append({"kind": kind, "payload": payload}) or uuid4())
+    return calls
+
+
+_ACTIVE = {"status": "active", "answers": {"business_name": "X"}, "skipped": []}
+
+
+def test_push_enqueues_recomposed_head(monkeypatch) -> None:
+    q = [{"field": "gstin", "kind": "confirm", "prompt_en": "We found GSTIN 27AB… — is that right?",
+          "prompt_hi": "हमें GSTIN मिला — सही है?"}]
+    calls = _wire_push(monkeypatch, journey=_ACTIVE, queue=q)
+    assert wj.push_next_question_after_discovery(_TID) is True
+    assert calls["installed"] == ["gstin"]
+    assert calls["enqueued"][0]["payload"]["journey_push"] == "true"
+    assert "GSTIN" in calls["enqueued"][0]["payload"]["text_en"]
+
+
+def test_push_completes_and_enqueues_recap_when_done(monkeypatch) -> None:
+    calls = _wire_push(monkeypatch, journey=_ACTIVE, queue=[], complete=True)
+    assert wj.push_next_question_after_discovery(_TID) is True
+    assert calls["completed"] is True
+    assert calls["enqueued"][0]["payload"]["text_en"] == "All set — recap."
+
+
+def test_push_never_enqueues_empty_promise(monkeypatch) -> None:
+    calls = _wire_push(monkeypatch, journey=_ACTIVE, queue=[], complete=False)
+    assert wj.push_next_question_after_discovery(_TID) is False
+    assert calls["enqueued"] == []
+
+
+def test_push_dedups_and_gates(monkeypatch) -> None:
+    calls = _wire_push(monkeypatch, journey=_ACTIVE, queue=[{"field": "x", "kind": "gap",
+                       "prompt_en": "Q", "prompt_hi": "Q"}], pending_push=True)
+    assert wj.push_next_question_after_discovery(_TID) is False  # one pending push at a time
+    calls2 = _wire_push(monkeypatch, created_via="web", journey=_ACTIVE, queue=[])
+    assert wj.push_next_question_after_discovery(_TID) is False  # web tenants never pushed
+    calls3 = _wire_push(monkeypatch, journey=None)
+    assert wj.push_next_question_after_discovery(_TID) is False  # no active journey
+    assert calls["enqueued"] == calls2["enqueued"] == calls3["enqueued"] == []
