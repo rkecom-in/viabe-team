@@ -1,0 +1,76 @@
+"""VT-694 — suggestion-button delivery (dep-less units)."""
+from __future__ import annotations
+
+import pytest
+
+pytest.importorskip("psycopg")
+pytest.importorskip("dbos")
+
+from orchestrator.onboarding import journey as j  # noqa: E402
+
+_TID = "22222222-2222-2222-2222-222222222222"
+
+
+def _wire(monkeypatch, *, content_sid="HXsuggest", raise_send=False):
+    sent: dict = {}
+    import orchestrator.templates_registry as tr
+    import orchestrator.utils.twilio_send as ts
+
+    monkeypatch.setattr(tr, "content_sid_for", lambda name, lang="en": content_sid)
+
+    def _send(sid, phone, *, content_variables=None, tenant_id=None, surface=None):
+        if raise_send:
+            raise RuntimeError("transport down")
+        sent.update({"sid": sid, "vars": content_variables})
+        return "MKDEVx"
+
+    monkeypatch.setattr(ts, "send_interactive_message", _send)
+    return sent
+
+
+def test_suggestion_send_pads_with_skip(monkeypatch) -> None:
+    sent = _wire(monkeypatch)
+    ok = j._send_suggestion_buttons("+919811112222", "Hours?", ["24/7 online"], tenant_id=_TID)
+    assert ok is True
+    assert sent["vars"] == {"1": "Hours?", "2": "24/7 online", "3": "Skip", "4": "Skip"}
+
+
+def test_suggestion_send_clamps_and_orders(monkeypatch) -> None:
+    sent = _wire(monkeypatch)
+    ok = j._send_suggestion_buttons(
+        "+919811112222", "Q?", ["Most likely answer!!", "Alt two", "Alt three", "Alt four"],
+        tenant_id=_TID,
+    )
+    assert ok and sent["vars"]["2"] == "Most likely answer!!"[:20]
+    assert "Alt four" not in sent["vars"].values()
+
+
+def test_suggestion_send_false_paths(monkeypatch) -> None:
+    _wire(monkeypatch)
+    assert j._send_suggestion_buttons("+91981", "Q?", [], tenant_id=_TID) is False
+    assert j._send_suggestion_buttons(None, "Q?", ["A"], tenant_id=_TID) is False
+    _wire(monkeypatch, raise_send=True)
+    assert j._send_suggestion_buttons("+91981", "Q?", ["A"], tenant_id=_TID) is False
+
+
+def test_walker_send_routes_gap_suggestions(monkeypatch) -> None:
+    sent = _wire(monkeypatch)
+    frees: list[str] = []
+    import orchestrator.utils.twilio_send as ts
+
+    monkeypatch.setattr(ts, "send_freeform_message",
+                        lambda text, phone, **k: frees.append(text) or "MK1")
+    q = {"kind": "gap", "prompt_en": "Hours?", "prompt_hi": "?",
+         "suggestions_en": ["24/7 online", "10am-9pm"]}
+    j._send("+919811112222", q, "en", tenant_id=_TID)
+    assert sent["vars"]["1"] == "Hours?" and sent["vars"]["2"] == "24/7 online"
+    assert frees == [], "buttons delivered — no freeform double-send"
+
+
+def test_turn_brain_dynamic_buttons_deliver(monkeypatch) -> None:
+    sent = _wire(monkeypatch)
+    import orchestrator.utils.twilio_send as ts
+
+    monkeypatch.setattr(ts, "send_freeform_message", lambda *a, **k: "MK1")
+    j._send_turn("+919811112222", "Busiest days?", ["Weekends", "Festivals"], "en", tenant_id=None)
+    assert sent["vars"]["2"] == "Weekends" and sent["vars"]["4"] == "Skip"
