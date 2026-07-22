@@ -151,3 +151,50 @@ def test_has_queued_task_ref_true_and_false() -> None:
     assert params == (_TID, "task-9")
     miss = _FakeConn(rows=[])
     assert q.has_queued_task_ref(_TID, "task-9", conn=miss) is False
+
+
+# --- REAL-PG pin (the 2026-07-22 live bug: untyped NULL into make_interval) ---------------------
+
+import os as _os  # noqa: E402 — realdb-pin section
+import uuid as _uuid  # noqa: E402
+
+@pytest.mark.skipif(not _os.environ.get("DATABASE_URL"), reason="DATABASE_URL not set")
+def test_mark_delivered_notice_kind_real_pg():
+    """kind='notice' (ttl None) must flip to 'delivered' on REAL Postgres. The live bug: the
+    untyped NULL param made make_interval type-reject at PLAN time, the drain fail-softed, and
+    the */10 sweep re-sent the same item every 10 minutes (10× to the first customer). Fake
+    conns can't catch plan-time type errors — only this pin can."""
+    import psycopg as _psycopg
+
+    dsn = _os.environ["DATABASE_URL"]
+    import apply_migrations
+
+    assert not apply_migrations.apply(dsn=dsn)["failed"]
+    with _psycopg.connect(dsn, autocommit=True) as conn:
+        trow = conn.execute(
+            "INSERT INTO tenants (business_name, plan_tier, phase, phase_entered_at) "
+            "VALUES ('QueuePin', 'standard', 'onboarding', now()) RETURNING id"
+        ).fetchone()
+        tid = str(trow[0])
+        item = str(_uuid.uuid4())
+        conn.execute(
+            "INSERT INTO owner_comms_queue (id, tenant_id, kind, payload) "
+            "VALUES (%s, %s, 'notice', '{}'::jsonb)", (item, tid),
+        )
+        q.mark_delivered(tid, item, kind="notice", message_sid="MKpin", conn=conn)
+        row = conn.execute(
+            "SELECT status, decision_deadline_at FROM owner_comms_queue WHERE id = %s", (item,)
+        ).fetchone()
+        assert row[0] == "delivered", "notice items MUST flip (the 10x-resend live bug)"
+        assert row[1] is None, "no decision deadline for a notice"
+        # approval kind still gets its POINT-A deadline
+        item2 = str(_uuid.uuid4())
+        conn.execute(
+            "INSERT INTO owner_comms_queue (id, tenant_id, kind, payload) "
+            "VALUES (%s, %s, 'approval', '{}'::jsonb)", (item2, tid),
+        )
+        q.mark_delivered(tid, item2, kind="approval", message_sid="MKpin2", conn=conn)
+        row2 = conn.execute(
+            "SELECT status, decision_deadline_at FROM owner_comms_queue WHERE id = %s", (item2,)
+        ).fetchone()
+        assert row2[0] == "delivered" and row2[1] is not None
