@@ -48,6 +48,13 @@ _FIELD_ALIASES: dict[str, str] = {
     "pricing": "price_range", "pricing_model": "price_range",
     "prices": "price_range", "typical_price_range": "price_range",
     "location": "city", "area": "city", "locality": "city",
+    # VT-696 — one canonical field for ANY online presence link (the single highest-value
+    # capture, Fazal 2026-07-22: website/FB/Instagram/LinkedIn/IndiaMART all land here).
+    "website": "web_presence", "webpage": "web_presence", "web_page": "web_presence",
+    "website_url": "web_presence", "online_presence": "web_presence",
+    "social_media": "web_presence", "social_page": "web_presence",
+    "facebook_page": "web_presence", "instagram_page": "web_presence",
+    "linkedin_page": "web_presence",
 }
 
 
@@ -67,6 +74,8 @@ def covered_by_draft(draft_attrs: dict[str, Any]) -> set[str]:
         covered.add("city")
     if draft_attrs.get("legal_name") or draft_attrs.get("trade_name"):
         covered.add("business_name")
+    if draft_attrs.get("website"):
+        covered.add("web_presence")
     return covered
 _COMPOSE_TIMEOUT_S = 20.0  # bound the gap-compose LLM call (runs on the owner-inbound hot path)
 
@@ -172,14 +181,58 @@ def compose_onboarding_questions(
         | covered_by_draft(draft_attrs)
     )
     max_gaps = _MAX_GAPS_WITH_DRAFT if draft_attrs else _MAX_GAPS
+    # VT-696 — HONEST TOTAL BUDGET (Fazal, live run: "it said last question, and then it
+    # continued to ask more"). The cap is a per-JOURNEY budget, not per-recompose: every
+    # residual answer the owner has ALREADY given consumes one slot, so an answered question
+    # can never refill the window with a fresh one. Identity captures (name/owner/GST card)
+    # and confirm-style answers (fields the draft itself carries) are not residuals.
+    _non_residual = {"business_name", "owner_name", "gst_identity"}
+    _draft_canon = {_canonical_field(f) for f in draft_attrs}
+    spent = sum(
+        1 for f in answered_set
+        if _canonical_field(f) not in _non_residual and _canonical_field(f) not in _draft_canon
+    )
+    max_gaps = max(0, max_gaps - spent)
+
+    # VT-696 — the ONE highest-value capture asks FIRST (Fazal: a website / FB / LinkedIn /
+    # IndiaMART link yields products, offering, type and nature in one shot): deterministic,
+    # never LLM-chosen, budget-consuming like any other residual. DRAFT-GATED: with no draft,
+    # ``_compose_queue`` early-returns [] (the question could never present), so counting it
+    # in ``profile_collection_complete`` would zombie pre-draft journeys — never complete,
+    # never asked. The web ask therefore exists only where the discovery arc runs.
+    web_q: Question | None = None
+    if draft_attrs and "web_presence" not in known and max_gaps > 0:
+        web_q = Question(
+            field="web_presence",
+            kind="gap",
+            prompt_en=(
+                "Does your business have a website or an online page — Google, Facebook, "
+                "Instagram, LinkedIn or IndiaMART? Paste the link and we'll pick up the "
+                "details ourselves."
+            ),
+            prompt_hi=(
+                "क्या आपके बिज़नेस की कोई वेबसाइट या ऑनलाइन पेज है — Google, Facebook, "
+                "Instagram, LinkedIn या IndiaMART? लिंक भेज दें, बाकी जानकारी हम खुद ले लेंगे।"
+            ),
+            suggestions_en=("No website",),
+            suggestions_hi=("वेबसाइट नहीं",),
+        )
+        known.add("web_presence")
     try:
-        raw = (llm_fn or _llm_compose_gaps)(business_type, draft_attrs, sorted(answered_set))
+        # VT-696 — no LLM spend on the hot path when the budget is already exhausted (or the
+        # deterministic web-presence question consumes the last slot).
+        if max_gaps <= (1 if web_q else 0):
+            raw = []
+        else:
+            raw = (llm_fn or _llm_compose_gaps)(business_type, draft_attrs, sorted(answered_set))
     except Exception:  # noqa: BLE001 — gap reasoning is best-effort; the confirm questions still stand
         logger.warning("question_brain: gap source raised business_type=%s — confirms only", business_type)
         raw = []
-    gaps: list[Question] = []
+    gaps: list[Question] = [web_q] if web_q else []
     seen: set[str] = set()
     for g in raw or []:
+        if len(gaps) >= max_gaps:  # VT-696 — budget check BEFORE append (0-budget → no gaps)
+            break
         field = _canonical_field((g.get("field") or "").strip())
         if not field or field in known or field in seen:
             continue

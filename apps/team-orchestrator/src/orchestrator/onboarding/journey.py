@@ -1550,6 +1550,43 @@ def _opener() -> dict[str, Any]:
 # construction → buttons are always deliverable here (no separate window check needed).
 _CONFIRM_BUTTONS_TEMPLATE = "onboarding_confirm_yesno"
 
+# VT-695 — the STRUCTURED GST identity card (formatted static body + 5 single-line variables +
+# fixed Yes/No/Skip). In-session only, like every journey interactive object.
+_GST_CARD_TEMPLATE = "journey_gst_card"
+
+
+def _send_gst_card(
+    recipient: str | None,
+    card_vars: dict[str, str] | None,
+    lang: str,
+    *,
+    tenant_id: UUID | str | None = None,
+) -> bool:
+    """VT-695 (Fazal: in-session, so use a real card, not a semicolon blob) — send the GST
+    identity confirm as the formatted ``journey_gst_card`` Content object. Layout lives in the
+    template's static body (Meta forbids newlines in variables); ``card_vars`` are the 5
+    single-line fields from ``gst_identity_card_question``. Returns True on a delivered send;
+    False → the caller falls back to the blob confirm object / freeform text."""
+    try:
+        if not recipient or not card_vars or not str(card_vars.get("1") or "").strip():
+            return False
+        from orchestrator.templates_registry import content_sid_for
+
+        content_sid = content_sid_for(_GST_CARD_TEMPLATE, "hi" if lang == "hi" else "en")
+        if not content_sid:
+            return False
+        from orchestrator.utils.twilio_send import send_interactive_message
+
+        send_interactive_message(
+            content_sid, recipient,
+            content_variables={k: str(card_vars.get(k) or "—") for k in ("1", "2", "3", "4", "5")},
+            tenant_id=tenant_id, surface="journey",
+        )
+        return True
+    except Exception:  # noqa: BLE001 — the card is an enhancement; the caller falls back
+        logger.warning("journey: gst-card send failed — falling back to blob confirm")
+        return False
+
 
 def _send(
     recipient: str | None, q: dict[str, Any], lang: str, *, tenant_id: UUID | str | None = None
@@ -1572,6 +1609,15 @@ def _send(
         return
     text = q.get("prompt_hi") if lang == "hi" else q.get("prompt_en")
     if not text:
+        return
+    # VT-695 — the GST identity confirm rides its dedicated FORMATTED card object when the
+    # question carries per-field values; any failure falls through to the blob confirm below.
+    if (
+        q.get("kind") == "confirm"
+        and q.get("field") == "gst_identity"
+        and q.get("card_vars")
+        and _send_gst_card(recipient, q.get("card_vars"), lang, tenant_id=tenant_id)
+    ):
         return
     # CONFIRM → try interactive Yes/No/Skip buttons first; fall back to plain text on any failure.
     if q.get("kind") == "confirm":
@@ -1668,6 +1714,7 @@ def _send_turn(
     lang: str,
     *,
     tenant_id: UUID | str | None = None,
+    card_vars: dict[str, str] | None = None,
 ) -> None:
     """Send a turn-brain reply: ``text`` free-form, with quick-reply buttons when they help. A Yes/No/
     Skip button set reuses the registered interactive Content object (parity with the confirm-question
@@ -1683,6 +1730,11 @@ def _send_turn(
     if not recipient or not text:
         return
     body = text
+    # VT-695 — a turn carrying GST-card fields (the card-priority injection) goes out as the
+    # formatted card object; failure falls through to the confirm-button / freeform ladder.
+    if card_vars and _send_gst_card(recipient, card_vars, lang):
+        _record_flow_turn(tenant_id, text)
+        return
     if buttons and _is_confirm_button_set(buttons):
         try:
             from orchestrator.templates_registry import content_sid_for
@@ -1968,6 +2020,59 @@ def _handle_reply_with_turn_brain(
             # acknowledges + extracts from this same message.
             g = get_journey(tenant_id) or g
 
+    # VT-697 — deterministic TAP fast-path (Fazal: "minimum 10 secs or more" per message): a
+    # quick-reply tap echoes the suggestion text VERBATIM as the inbound body. When the body
+    # exactly matches a suggestion of the presented gap question, record + advance + present
+    # the next question deterministically — the LLM leaves the hot path entirely (sub-second
+    # vs the compose_turn round-trip). Typed free text, corrections, and Skip taps keep the
+    # full brain. Exact-match only: no fuzzy interpretation lives here (Pillar 1 discipline).
+    _cur_q = _current(g)  # re-read — the gst block above may have advanced the cursor
+    if _cur_q and _cur_q.get("kind") == "gap":
+        _body_norm = (body or "").strip().lower()
+        _suggs = [
+            str(s).strip()
+            for s in (list(_cur_q.get("suggestions_en") or []) + list(_cur_q.get("suggestions_hi") or []))
+            if str(s).strip()
+        ]
+        if _body_norm and any(_body_norm == s.lower() for s in _suggs) and not (_tokens(body) & _SKIP):
+            answers = dict(g.get("answers") or {})
+            answers[_cur_q["field"]] = (body or "").strip()
+            skipped = list(g.get("skipped") or [])
+            _advance(tenant_id, int(g.get("cursor") or 0) + 1, answers, skipped, message_sid)
+            g2 = get_journey(tenant_id) or g
+            nxt = _current(g2)
+            # Card-priority parity (VT-693): a pending GST identity card outranks the queue
+            # head on THIS path too — the fast-path must never freelance past an identity
+            # decision the slow path would have presented.
+            if "gst_identity" not in answers:
+                from orchestrator.onboarding.whatsapp_journey import (
+                    gst_identity_card_question,
+                    gst_identity_pending,
+                )
+
+                if gst_identity_pending(tenant_id, answers):
+                    _card_q2 = gst_identity_card_question(tenant_id)
+                    if _card_q2:
+                        _install_recomposed_queue(tenant_id, [_card_q2], message_sid)
+                        nxt = _card_q2
+            if nxt is not None:
+                _append_recent_turns(
+                    tenant_id, {"role": "owner", "text": body},
+                    {"role": "bot", "text": nxt.get("prompt_en", "")}, message_sid=message_sid,
+                )
+                return {
+                    "next_q": nxt,
+                    "reply_en": nxt.get("prompt_en", ""),
+                    "reply_hi": nxt.get("prompt_hi", ""),
+                    "done": False,
+                }
+            r = _complete_or_hold(tenant_id, answers, skipped, message_sid)
+            _append_recent_turns(
+                tenant_id, {"role": "owner", "text": body},
+                {"role": "bot", "text": r.get("reply_en", "")}, message_sid=message_sid,
+            )
+            return r
+
     from orchestrator.onboarding import turn_brain
     from orchestrator.onboarding.draft_profile import get_draft
 
@@ -2039,6 +2144,8 @@ def _handle_reply_with_turn_brain(
                     "reply_en": _card_q["prompt_en"],
                     "reply_hi": _card_q["prompt_hi"],
                     "buttons": ["Yes", "No", "Skip"],
+                    # VT-695 — the formatted card object carries the send when present.
+                    "card_vars": _card_q.get("card_vars"),
                     "done": False,
                 }
 
@@ -2433,9 +2540,18 @@ def _run_turn_brain_and_send(
     )
     if not r.get("already_presented"):
         if r.get("turn_brain"):
-            _send_turn(recipient, r.get("reply_text", ""), r.get("buttons") or [], lang)
+            _send_turn(
+                recipient, r.get("reply_text", ""), r.get("buttons") or [], lang,
+                card_vars=r.get("card_vars"),
+            )
         else:
-            _send(recipient, {"prompt_en": r.get("reply_en", ""), "prompt_hi": r.get("reply_hi", "")}, lang, tenant_id=tenant_id)
+            # VT-697 — a fast-path result carries the FULL next question (kind / suggestions /
+            # card_vars), so its buttons and card formatting ride the normal walker send.
+            _send(
+                recipient,
+                r.get("next_q") or {"prompt_en": r.get("reply_en", ""), "prompt_hi": r.get("reply_hi", "")},
+                lang, tenant_id=tenant_id,
+            )
     # VT-576: NO integration seam fires here — the profile card is the completion's ONLY immediate
     # message. ``_complete`` set ``__flow__ = profile_previewed``; the owner's NEXT message enters the
     # paced flow (readiness ask → one integration → data-landed plan) via _maybe_handle_post_profile_flow.

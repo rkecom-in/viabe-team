@@ -60,9 +60,10 @@ def test_next_question_is_confirm_first_then_gap() -> None:
     # category is a confirmable draft field — it comes before the operating_hours gap.
     assert decision.next_question.field == "category"
     assert decision.next_question.kind == "confirm"
-    # the full remaining set is registry-bounded (confirm fields + the one gap).
+    # the full remaining set is registry-bounded (confirm fields + the deterministic VT-696
+    # web-presence capture + the one gap).
     fields = [q.field for q in decision.remaining]
-    assert fields == ["category", "city", "operating_hours"]
+    assert fields == ["category", "city", "web_presence", "operating_hours"]
 
 
 def test_next_question_advances_to_gap_once_confirms_answered() -> None:
@@ -71,7 +72,7 @@ def test_next_question_advances_to_gap_once_confirms_answered() -> None:
     decision = decide_next_question(
         business_type="restaurant",
         draft=_draft(category="restaurant", city="Pune"),
-        answered=["category", "city"],
+        answered=["category", "city", "web_presence"],
         skipped=[],
         llm_fn=_gaps("operating_hours"),
     )
@@ -112,7 +113,7 @@ def test_skipped_field_is_deferred_not_repressed() -> None:
         business_type="restaurant",
         draft=_draft(category="restaurant"),
         answered=["category"],
-        skipped=["operating_hours"],
+        skipped=["operating_hours", "web_presence"],
         llm_fn=_gaps("operating_hours", "price_range"),
     )
     # Default pass: the skipped field is deferred; next is the un-skipped gap.
@@ -142,12 +143,12 @@ def test_completion_is_deterministic_not_self_declared() -> None:
     )
     assert not_done is False
 
-    # All confirms answered + the gap skipped (an owner decision to omit) -> complete.
+    # All confirms answered + the gaps skipped (an owner decision to omit) -> complete.
     done = profile_collection_complete(
         business_type="restaurant",
         draft=_draft(category="restaurant", city="Pune"),
         answered=["category", "city"],
-        skipped=["operating_hours"],
+        skipped=["operating_hours", "web_presence"],
         llm_fn=_gaps("operating_hours"),
     )
     assert done is True
@@ -160,7 +161,7 @@ def test_next_question_none_signals_but_does_not_self_complete() -> None:
     decision = decide_next_question(
         business_type="restaurant",
         draft=_draft(category="restaurant"),
-        answered=["category"],
+        answered=["category", "web_presence"],
         skipped=[],
         llm_fn=_gaps(),  # no gaps
     )
@@ -170,7 +171,7 @@ def test_next_question_none_signals_but_does_not_self_complete() -> None:
     assert profile_collection_complete(
         business_type="restaurant",
         draft=_draft(category="restaurant"),
-        answered=["category"],
+        answered=["category", "web_presence"],
         skipped=[],
         llm_fn=_gaps(),
     ) is True

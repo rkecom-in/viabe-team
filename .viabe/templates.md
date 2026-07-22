@@ -301,6 +301,30 @@ Namaste! This is Viabe Team — … consent text with viabe.ai/team/dpdp + /priv
 
 ---
 
+### `journey_gst_card`  *(VT-695 — the FORMATTED GST identity card; NOT a Meta-approved template)*
+
+- **Twilio Content SIDs:** en `HXdf097aab878f962d3621b619f3f1c0f0` · hi `HXfcf1872a751b277a7c8a49e6a89a91d9`
+- **Content type:** `twilio/quick-reply`, STRUCTURED multi-line body — WhatsApp formatting (bold name, emoji field markers) lives in the STATIC template body because Meta forbids newlines inside variables; every variable is one single-line field. Canary `canaries/vt695_gst_card_create.py`.
+- **Sent by:** `journey._send_gst_card` — the gst_identity confirm on BOTH paths (walker `_send` confirm branch + turn-brain card-priority via `_send_turn`). Falls back to the plain-blob `onboarding_confirm_yesno` then freeform on any failure.
+- **Variables:** `{{1}}` business name · `{{2}}` constitution · `{{3}}` address (cleaned/title-cased) · `{{4}}` nature of business · `{{5}}` GSTIN tail.
+- **Button `id` payloads:** `gst_yes` / `gst_no` / `gst_skip`. **LOAD-BEARING:** titles (en Yes/No/Skip · hi हां/नहीं/Skip) echo back as the inbound Body and must stay inside the journey's `_YES`/`_NO`/`_SKIP` token sets — never retitle without checking those sets in `journey.py`.
+
+```
+Found your business online 🔎
+
+*{{1}}*
+{{2}}
+
+📍 {{3}}
+💼 {{4}}
+🧾 GSTIN ending {{5}}
+
+Is this your business?
+[ Yes ]  [ No ]  [ Skip ]
+```
+
+---
+
 ### `team_approval_buttons`  *(VT-683 P2c — INTERACTIVE in-session approval ask; NOT a Meta-approved 24h-window template)*
 
 - **Twilio Content SIDs:** en `HX6b8aa56b3497301f86152983686064d7` · hi `HX3b0f0c7926f557e4de1d007682cdaabe`

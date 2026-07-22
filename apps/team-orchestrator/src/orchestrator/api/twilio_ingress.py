@@ -315,6 +315,13 @@ def twilio_ingress(
                     # whatsapp_signup_run is imported at module top (register-before-launch —
                     # the customer_inbound_run pattern; a lazily-registered workflow would land
                     # after app_version is hashed, the VT-464 recovery hazard).
+                    # VT-697 — typing feedback for the signup path too (consent card compose).
+                    try:
+                        from orchestrator.utils.twilio_send import send_typing_indicator
+
+                        send_typing_indicator(message_sid)
+                    except Exception:  # noqa: BLE001
+                        pass
                     workflow_id = f"wa_signup_{message_sid}"
                     prior = DBOS.get_workflow_status(workflow_id)
                     with SetWorkflowID(workflow_id):
@@ -347,6 +354,16 @@ def twilio_ingress(
                 message_sid,
             )
             return {"workflow_id": None, "reason": "rate_limit_exceeded"}
+
+        # VT-697 — read-tick + "typing…" the moment an OWNER inbound lands (fire-and-forget
+        # daemon thread; zero hot-path latency, fail-soft). Transport-only feedback — no
+        # classification here (Pillar 1). Clears when our reply delivers (or 25s).
+        try:
+            from orchestrator.utils.twilio_send import send_typing_indicator
+
+            send_typing_indicator(message_sid)
+        except Exception:  # noqa: BLE001 — presentation only, never blocks ingress
+            pass
 
         workflow_id = f"twilio_inbound_{message_sid}"
         run_id = str(uuid5(NAMESPACE_URL, message_sid))

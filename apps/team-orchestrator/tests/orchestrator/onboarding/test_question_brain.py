@@ -51,6 +51,7 @@ def test_gap_dedup():
     # 'operating_hours') BEFORE dedup, so synonym-renamed repeats can never reach the owner.
     qs = compose_onboarding_questions("apparel", {"attributes": {}}, answered=[], llm_fn=_gaps("hours", "hours", "size_range"))
     gap_fields = [q.field for q in qs if q.kind == "gap"]
+    # VT-696: no draft → no web-presence ask (it is draft-gated); the dedup contract holds.
     assert gap_fields == ["operating_hours", "size_range"]
 
 
@@ -75,8 +76,10 @@ def test_llm_failure_falls_back_to_confirms_only():
         raise RuntimeError("llm down")
 
     qs = compose_onboarding_questions("apparel", _DRAFT, answered=[], llm_fn=boom)
-    # the confirm questions still stand; no crash, no gaps
-    assert qs and all(q.kind == "confirm" for q in qs)
+    # the confirm questions still stand; no crash. VT-696: the deterministic web-presence
+    # capture survives an LLM outage (it never depends on the gap LLM).
+    assert qs and all(q.kind == "confirm" or q.field == "web_presence" for q in qs)
+    assert any(q.kind == "confirm" for q in qs)
 
 
 def test_empty_draft_no_confirms():
@@ -154,7 +157,7 @@ def test_gap_suggestions_pass_through_clamped():
                  "suggestions_hi": ["२४/७"]}]
 
     qs = compose_onboarding_questions("services", {"attributes": {}}, answered=[], llm_fn=_llm)
-    q = [x for x in qs if x.kind == "gap"][0]
+    q = [x for x in qs if x.kind == "gap" and x.field == "operating_hours"][0]
     assert q.suggestions_en[0] == "24/7 online"
     assert len(q.suggestions_en) == 3, "clamped to 3"
     assert all(len(s) <= 20 for s in q.suggestions_en), "20-char button-title clamp"
