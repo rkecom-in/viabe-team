@@ -161,3 +161,57 @@ def test_turn_brain_path_card_priority(monkeypatch) -> None:
     assert r.get("turn_brain") is True and r.get("buttons") == ["Yes", "No", "Skip"]
     assert "is this your business" in r["reply_text"].lower()
     assert installed.get("fields") == ["gst_identity"], "card replaces the plan's queue"
+
+
+def test_turn_brain_gst_identity_deterministic_pre_handling(monkeypatch) -> None:
+    """VT-693 live gap #2: a typed identity decision ('This is mine, but…') on the presented
+    card runs accept BEFORE the LLM turn — side effects fire, the answer records, and the
+    correction in the same message still reaches the turn-brain."""
+    from types import SimpleNamespace
+    from uuid import uuid4
+
+    tid = str(uuid4())
+    card = {"field": "gst_identity", "kind": "confirm", "draft_value": "yes",
+            "prompt_en": "Is this your business?", "prompt_hi": "?"}
+    state = {"status": "active", "cursor": 0, "last_message_sid": None,
+             "question_queue": [card], "answers": {}, "skipped": []}
+    monkeypatch.setattr(j, "get_journey", lambda t: dict(state))
+    advanced: dict = {}
+
+    def _adv(t, cursor, answers, skipped, sid):
+        advanced.update(cursor=cursor, answers=dict(answers))
+        state["cursor"] = cursor
+        state["answers"] = dict(answers)
+
+    monkeypatch.setattr(j, "_advance", _adv)
+    monkeypatch.setattr(j, "_append_recent_turns", lambda *a, **k: None)
+    monkeypatch.setattr(j, "_capture_missed_about_gap", lambda *a, **k: None)
+    monkeypatch.setattr(j, "_advance_cursor_past_answered", lambda g, a, s: state["cursor"])
+    monkeypatch.setattr(j, "_install_recomposed_queue", lambda *a, **k: None)
+    monkeypatch.setattr(j, "populate_profile_from_draft", lambda t: {})
+    monkeypatch.setattr(j, "_complete_or_hold",
+                        lambda *a, **k: {"reply_en": "next", "reply_hi": "n", "done": False})
+
+    accepted: dict = {}
+    import orchestrator.onboarding.whatsapp_journey as wj
+
+    monkeypatch.setattr(wj, "accept_gst_identity", lambda t: accepted.__setitem__("t", t))
+    monkeypatch.setattr(wj, "decline_gst_identity", lambda t: accepted.__setitem__("declined", t))
+    monkeypatch.setattr(wj, "gst_identity_pending", lambda t, a: False)
+
+    import orchestrator.onboarding.turn_brain as tb
+
+    plan = SimpleNamespace(reply_text="Noted — BI services.", buttons=(), extracted_answers={},
+                           mark_confirmed=[], mark_rejected=[], done_hint=False, reasoning="")
+    monkeypatch.setattr(tb, "compose_turn", lambda *a, **k: plan)
+    import orchestrator.onboarding.draft_profile as dp
+
+    monkeypatch.setattr(dp, "get_draft", lambda t: {"attributes": {}, "provenance": {}})
+
+    j._handle_reply_with_turn_brain(
+        tid, "This is mine, but our nature of business is Business Intelligence Services",
+        "SMgst1", lang="en",
+    )
+    assert accepted.get("t") == tid, "accept side effects MUST fire on 'this is mine'"
+    assert advanced["answers"].get("gst_identity") == "yes"
+    assert "declined" not in accepted
