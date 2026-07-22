@@ -1937,6 +1937,37 @@ def _handle_reply_with_turn_brain(
     if message_sid and message_sid == g.get("last_message_sid"):
         return {"already_presented": True, "done": _current(g) is None}
 
+    # VT-693 (live-proven, the "This is mine, but…" turn): when the PRESENTED question is the
+    # GST identity card, the decision is handled DETERMINISTICALLY before any LLM turn —
+    # yes-tokens (or an ownership-affirming lead like "this is mine") accept; no-tokens
+    # decline; anything genuinely ambiguous re-presents the card with its buttons. The
+    # turn-brain must never generically consume an identity decision (it reads the intent
+    # fine but the accept/verify side effects never fire — the measured gap).
+    _cur_q = _current(g)
+    if (_cur_q or {}).get("field") == "gst_identity":
+        _toks = _tokens(body)
+        _affirm = bool(_toks & _YES) or ("mine" in _toks and not (_toks & _NO))
+        _reject = bool(_toks & _NO) and not _affirm
+        if _affirm or _reject:
+            from orchestrator.onboarding.whatsapp_journey import (
+                accept_gst_identity,
+                decline_gst_identity,
+            )
+
+            try:
+                (accept_gst_identity if _affirm else decline_gst_identity)(tenant_id)
+            except Exception:  # noqa: BLE001 — never stall the record/advance
+                logger.exception("journey: turn-brain gst_identity side effects failed tenant=%s",
+                                 tenant_id)
+            answers = dict(g.get("answers") or {})
+            answers["gst_identity"] = "yes" if _affirm else "no"
+            skipped = list(g.get("skipped") or [])
+            _advance(tenant_id, int(g.get("cursor") or 0) + 1, answers, skipped, message_sid)
+            # The rest of the reply (a correction like "…but our nature of business is X") is
+            # NOT lost: fall through to the normal turn-brain below on the ADVANCED state so it
+            # acknowledges + extracts from this same message.
+            g = get_journey(tenant_id) or g
+
     from orchestrator.onboarding import turn_brain
     from orchestrator.onboarding.draft_profile import get_draft
 
