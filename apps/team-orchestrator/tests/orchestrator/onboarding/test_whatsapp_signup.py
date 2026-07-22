@@ -22,70 +22,42 @@ from orchestrator.onboarding import whatsapp_signup as ws  # noqa: E402
 _PHONE = "+919900112233"
 
 
-# --- classify_consent_reply ---------------------------------------------------------------------
+# --- classify_consent_reply (FULLY DETERMINISTIC — Fazal 2026-07-22 button ruling) ----------------
 
 
-def _llm_returning(payload: dict[str, Any]):
-    def _call(tier, *, system, user, max_tokens, agent, call_site, tenant_id=None):
-        return json.dumps(payload)
-
-    return _call
-
-
-def test_optout_dsr_veto_wins_over_everything(monkeypatch) -> None:
-    """A STOP/DSR phrasing is a person telling us to go away — deterministic 'declined',
-    LLM never consulted (veto runs first)."""
-    def _explode(*a, **k):
-        raise AssertionError("LLM must not run on a hard-stop")
-
-    assert ws.classify_consent_reply("STOP", text_call=_explode) == "declined"
-    assert ws.classify_consent_reply("band karo", text_call=_explode) == "declined"
+def test_optout_dsr_veto_wins_over_everything() -> None:
+    """A STOP/DSR phrasing is a person telling us to go away — deterministic 'declined'."""
+    assert ws.classify_consent_reply("STOP") == "declined"
+    assert ws.classify_consent_reply("band karo") == "declined"
 
 
-def test_exact_prompt_instructed_tokens_consent_without_llm() -> None:
-    def _explode(*a, **k):
-        raise AssertionError("LLM must not run on an exact token")
-
-    for reply in ("YES", "yes", " Haan ", "हाँ", "Agree", "I agree", "yes, I agree", "हाँ।"):
-        assert ws.classify_consent_reply(reply, text_call=_explode) == "consent", reply
-
-
-def test_free_text_containing_yes_is_not_exact() -> None:
-    """'yes but first tell me the price' must NOT hit the exact fast-path — it goes to the
-    LLM, and an unclear verdict re-asks."""
-    called = {"n": 0}
-
-    def _call(*a, **k):
-        called["n"] += 1
-        return json.dumps({"decision": "unclear", "cited_cue": "first tell me", "confidence": 0.9})
-
-    out = ws.classify_consent_reply("yes but first tell me the price", text_call=_call)
-    assert out == "unclear" and called["n"] == 1
+def test_agree_button_title_is_the_only_grant() -> None:
+    """Consent is granted ONLY by the exact agree-button title (tap echoes it as Body; a
+    byte-identical typed reply is the same explicit act). Case/whitespace/punct-trim tolerant."""
+    for reply in ("I agree", "i agree", "  I AGREE  ", "I agree."):
+        assert ws.classify_consent_reply(reply) == "consent", reply
 
 
-def test_llm_consent_needs_grounding_and_confidence() -> None:
-    body = "ha bilkul, sign me up please"
-    ok = _llm_returning({"decision": "consent", "cited_cue": "sign me up", "confidence": 0.95})
-    assert ws.classify_consent_reply(body, text_call=ok) == "consent"
-
-    low_conf = _llm_returning({"decision": "consent", "cited_cue": "sign me up", "confidence": 0.5})
-    assert ws.classify_consent_reply(body, text_call=low_conf) == "unclear"
-
-    ungrounded = _llm_returning({"decision": "consent", "cited_cue": "yes I fully agree", "confidence": 0.99})
-    assert ws.classify_consent_reply(body, text_call=ungrounded) == "unclear", \
-        "a cited_cue that is not a verbatim substring must never ground a consent"
+def test_disagree_button_title_declines() -> None:
+    for reply in ("I do not agree", "i do not agree", "  I DO NOT AGREE "):
+        assert ws.classify_consent_reply(reply) == "declined", reply
 
 
-def test_llm_error_or_garbage_never_consents() -> None:
-    def _boom(*a, **k):
-        raise RuntimeError("provider down")
+def test_free_text_yes_never_grants() -> None:
+    """The pre-button grant set is GONE: free-text affirmations re-prompt with the buttons,
+    they never create a tenant (the explicit-press ruling)."""
+    for reply in ("yes", "YES", "haan", "हाँ", "agree", "yes I agree", "ok sign me up",
+                  "I agree with the terms and want to start", "sure go ahead"):
+        assert ws.classify_consent_reply(reply) == "unclear", reply
 
-    assert ws.classify_consent_reply("thik hai chalo", text_call=_boom) == "unclear"
 
-    def _garbage(*a, **k):
-        return "I think they probably agree!"
+def test_no_llm_in_the_grant_path() -> None:
+    """classify_consent_reply takes NO llm/text_call seam anymore — the grant path is
+    structurally deterministic (a signature pin, so an LLM can never be reintroduced silently)."""
+    import inspect
 
-    assert ws.classify_consent_reply("thik hai chalo", text_call=_garbage) == "unclear"
+    params = inspect.signature(ws.classify_consent_reply).parameters
+    assert list(params) == ["body"], params
 
 
 # --- handle_unknown_inbound state machine -------------------------------------------------------
@@ -103,6 +75,9 @@ def _wire(monkeypatch, *, session, classify=None):
     monkeypatch.setattr(ws, "mark_status", lambda p, s: calls.__setitem__("status", s))
     monkeypatch.setattr(ws, "mark_consented", lambda p, t: calls.__setitem__("consented", str(t)))
     monkeypatch.setattr(ws, "_send", lambda p, text: calls["sent"].append(text))
+    monkeypatch.setattr(
+        ws, "_send_consent_prompt", lambda p: calls["sent"].append("<consent-buttons>")
+    )
     if classify is not None:
         monkeypatch.setattr(ws, "classify_consent_reply", classify)
 
@@ -153,7 +128,7 @@ def test_first_contact_prompts_consent(monkeypatch) -> None:
     out = ws.handle_unknown_inbound(_PHONE, "Hi", "SM1")
     assert out["outcome"] == "consent_prompted"
     assert calls["prompted"] == 1
-    assert calls["sent"] == [ws.CONSENT_PROMPT]
+    assert calls["sent"] == ["<consent-buttons>"]
     assert calls["created"] == 0, "a cold inbound must NEVER create a tenant (DPDP)"
 
 
@@ -193,20 +168,15 @@ def test_declined_session_stays_silent_forever(monkeypatch) -> None:
     assert calls["sent"] == [] and calls["prompted"] == 0
 
 
-def test_unclear_within_cooldown_is_silent_and_burns_no_prompt(monkeypatch) -> None:
-    calls = _wire(monkeypatch, session=_pending(prompts=1, last_prompt_age_hours=0.1),
+def test_unclear_reply_reprompts_with_buttons_immediately(monkeypatch) -> None:
+    """Free-text 'yes' (or anything non-button) re-prompts with the buttons right away —
+    bounded only by MAX_CONSENT_PROMPTS."""
+    calls = _wire(monkeypatch, session=_pending(prompts=1),
                   classify=lambda b, **k: "unclear")
-    out = ws.handle_unknown_inbound(_PHONE, "Hi", "SM5")
-    assert out["outcome"] == "unclear_cooldown_silent"
-    assert calls["sent"] == [] and calls["prompted"] == 0
-
-
-def test_unclear_past_cooldown_reprompts(monkeypatch) -> None:
-    calls = _wire(monkeypatch, session=_pending(prompts=1, last_prompt_age_hours=13.0),
-                  classify=lambda b, **k: "unclear")
-    out = ws.handle_unknown_inbound(_PHONE, "what is this?", "SM6")
+    out = ws.handle_unknown_inbound(_PHONE, "yes", "SM5")
     assert out["outcome"] == "consent_reprompted"
-    assert calls["prompted"] == 1 and calls["sent"] == [ws.CONSENT_PROMPT]
+    assert calls["prompted"] == 1 and calls["sent"] == ["<consent-buttons>"]
+    assert calls["created"] == 0
 
 
 def test_prompts_exhausted_expires_silently(monkeypatch) -> None:

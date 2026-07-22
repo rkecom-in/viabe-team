@@ -143,6 +143,22 @@ onboarding_confirm_yesno:
   languages:
     en: HX60ace8008b02439ca0db444dee6327d2
 
+team_signup_consent_buttons:
+  # VT-691 (Fazal 2026-07-22): the WhatsApp-signup consent ask as an IN-SESSION interactive
+  # quick-reply — the signup does NOT start unless the person explicitly presses "I agree";
+  # "I do not agree" is the explicit refusal path (DPDP/EU). Static bilingual body (no vars),
+  # links to the real notice pages. NOT Meta-approved — in-session interactive registration
+  # only (canary canaries/vt691_consent_buttons_create.py). The button TITLE echoes back as
+  # the inbound Body; whatsapp_signup's grant set is the EXACT-normalized title ("i agree") —
+  # the consent GRANT is fully deterministic (no LLM in the grant path). NEVER change a title
+  # without updating _AGREE_TITLE/_DISAGREE_TITLE in onboarding/whatsapp_signup.py in the
+  # same commit. Button ids: consent_agree / consent_disagree.
+  audience: owner
+  agent_selectable: false
+  variables: []
+  languages:
+    en: HXa81bc34018ba6e4349622962b6235f06
+
 team_approval_buttons:
   # VT-683 P2c: the IN-SESSION interactive approval ask (twilio/quick-reply, two decision buttons).
   # When the owner's 24h session is open, arm_pause_request sends THIS via send_interactive_message

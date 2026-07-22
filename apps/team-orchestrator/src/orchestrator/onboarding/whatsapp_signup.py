@@ -3,15 +3,21 @@
 For a WhatsApp-first product (CL-443) the natural front door is the inbound WhatsApp itself.
 Flow (consent-gated, DPDP — the gates here never bend):
 
-  1. unknown inbound → reply a welcome + CONSENT request (freeform — the inbound just opened
-     the 24h customer-service window, so no template is needed). NO tenant yet; the pending
-     state lives in ``whatsapp_signup_sessions`` (mig 180, FORCE-RLS deny-all, service-role
-     only — the waitlist_signups pre-tenant-PII posture).
-  2. their next reply → consent classification, LLM-PRIMARY with deterministic code only
-     vetoing hard-stops (the no-keyword-lists standing; the VT-648 send_intent shape):
-     opt-out/DSR veto FIRST → an exact prompt-instructed token ("yes"/"haan"/…, full-string
-     only — a finite exact-match outcome, allowed) → else the LLM (grounded cited_cue +
-     confidence ≥ 0.8, uncertain → ``unclear`` → re-ask, NEVER a manufactured consent).
+  1. unknown inbound → the CONSENT ask (in-session interactive quick-reply buttons — the
+     inbound just opened the 24h window, so no Meta template is needed; freeform text with a
+     typed-exact instruction is the fallback). NO tenant yet; the pending state lives in
+     ``whatsapp_signup_sessions`` (mig 180, FORCE-RLS deny-all, service-role only — the
+     waitlist_signups pre-tenant-PII posture).
+  2. their next reply → consent classification, FULLY DETERMINISTIC (Fazal ruling
+     2026-07-22: the signup does not start unless the person EXPLICITLY presses the
+     "I agree" button — the consent ask is an in-session interactive quick-reply,
+     team_signup_consent_buttons, with an explicit "I do not agree" refusal path for
+     DPDP/EU). A tap echoes the button TITLE as the inbound Body, so the grant set is the
+     exact-normalized title (a typed byte-identical "I agree" is indistinguishable from a
+     tap and equally explicit). Order: opt-out/DSR veto → exact agree-title → consent;
+     exact disagree-title → declined; ANYTHING else (incl. free-text "yes") → re-prompt
+     with the buttons, bounded. No LLM anywhere in the grant path — the strongest DPDP
+     capture posture (finite exact-match outcomes only, per the no-keyword-lists rule).
   3. consent → ``signup.create_whatsapp_signup_tenant`` (consent proof + trial; NO OTP — the
      WhatsApp inbound is already Meta-phone-verified; ``created_via='whatsapp'``) → the
      onboarding journey kicks off in-session via the proven ``"complete setup"`` token path
@@ -20,8 +26,8 @@ Flow (consent-gated, DPDP — the gates here never bend):
 Abuse gates: the whole path is behind ``ENABLE_WHATSAPP_SIGNUP`` (default OFF — unknown_sender
 behavior is byte-identical to today); the ingress adds a workspace-wide per-minute bucket for
 unknown-sender prompts; per-number the UNIQUE session row is the idempotency anchor and
-``consent_prompt_count``/``last_prompt_at`` carry the cooldown (max prompts, min re-prompt
-interval). A declined session goes SILENT — a refusal is respected, never re-prompted.
+``consent_prompt_count`` is the hard prompt budget (MAX_CONSENT_PROMPTS, then 'expired' +
+silent). A declined session goes SILENT — a refusal is respected, never re-prompted.
 
 Pillar 1: this module is called from a DBOS workflow (``whatsapp_signup_run``) the ingress
 starts — classification never runs inside the transport endpoint.
@@ -32,11 +38,9 @@ deny-all session table and the tenant row it converts into.
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 import unicodedata
-from datetime import timedelta
 from typing import Any
 from uuid import UUID
 
@@ -49,39 +53,31 @@ logger = logging.getLogger(__name__)
 # --- knobs -------------------------------------------------------------------------------------
 
 #: Hard cap on consent prompts per number (initial prompt + re-asks). Exhausted → 'expired',
-#: silent. A spammer or an uninterested person is never nagged past this.
+#: silent. With explicit buttons a genuine user converges in one tap; three chances is plenty,
+#: and a spammer / repeated cold "Hi" burns out fast and goes silent.
 MAX_CONSENT_PROMPTS = 3
-
-#: A re-prompt for an UNCLEAR reply is immediate (they just wrote to us — answering is not
-#: spam); a repeated cold inbound ("Hi" … "Hi" again) only re-prompts after this interval.
-REPROMPT_MIN_INTERVAL = timedelta(hours=12)
 
 #: Module-owned retention (pre-tenant PII is outside the tenant DSR purge): stale
 #: non-converted sessions are deleted opportunistically at prompt time past this age.
 RETENTION_DAYS = 30
 
-#: LLM gate floor — mirrors the prompt's own instruction (below this → unclear → re-ask).
-_CONSENT_MIN_CONFIDENCE = 0.8
+# The interactive consent ask (registry entry; canary vt691_consent_buttons_create.py). The
+# button TITLES are the consent contract — the grant/refusal sets below are their exact
+# normalized forms. NEVER change one without the other, same commit.
+INTERACTIVE_CONSENT_TEMPLATE = "team_signup_consent_buttons"
+_AGREE_TITLE = "I agree"
+_DISAGREE_TITLE = "I do not agree"
 
-_PROMPT_FILE = "prompts/signup_consent_v1.md"
-
-# Prompt-instructed exact affirmations (the consent ask says "reply YES"). FULL-STRING match
-# after normalization ONLY — a finite exact-match outcome (the no-keyword-lists rule bans
-# lists for open-ended language, never enums). Anything else goes to the LLM.
-_EXACT_CONSENT_TOKENS = frozenset({
-    "yes", "haan", "हाँ", "हां", "agree", "i agree", "yes i agree", "yes, i agree",
-    "हाँ मंज़ूर है", "haan manzoor hai",
-})
-
-# The bilingual consent ask (links are the real public pages). One explicit reply covers the
-# same two consents the public page captures as checkboxes (DPDP notice + India residency).
+# The freeform FALLBACK consent ask (interactive send failure only): same consent text, with a
+# typed-exact instruction that matches the same grant set.
 CONSENT_PROMPT = (
     "Namaste! This is Viabe Team — an AI teammate that runs everyday business tasks for you "
     "on WhatsApp.\n\n"
     "To create your account I need your consent: I'll process your business data as described "
     "in our data-processing notice (viabe.ai/team/dpdp) and store it in India "
     "(viabe.ai/team/privacy).\n\n"
-    "Reply YES to agree and start your free trial. / शुरू करने के लिए हाँ लिखें।"
+    "Reply exactly “I agree” to agree and start your free trial — or “I do not agree” to "
+    "decline. / शुरू करने के लिए “I agree” लिखें।"
 )
 
 DECLINED_ACK = (
@@ -215,51 +211,24 @@ def consent_hard_stop(body: str) -> str | None:
     return None
 
 
-def _load_prompt() -> str:
-    from pathlib import Path
+def classify_consent_reply(body: str) -> str:
+    """'consent' | 'declined' | 'unclear' — the DPDP gate, FULLY DETERMINISTIC (Fazal
+    2026-07-22: consent is captured ONLY by the explicit "I agree" button press — its title
+    echoes back as the Body; a byte-identical typed reply is the same explicit act).
 
-    return (Path(__file__).resolve().parent / _PROMPT_FILE).read_text(encoding="utf-8")
-
-
-def classify_consent_reply(body: str, *, text_call: Any = None) -> str:
-    """'consent' | 'declined' | 'unclear' — the DPDP gate.
-
-    Order: hard-stop veto → exact prompt-instructed token → LLM (grounded + confident).
-    EVERY uncertain/errored path resolves to 'unclear' (re-ask), never to consent.
+    Order: hard-stop veto (STOP/DSR → declined) → exact agree-title → consent → exact
+    disagree-title → declined → EVERYTHING else (free-text "yes" included) → 'unclear',
+    which re-prompts with the buttons. No LLM anywhere in the grant path.
     """
     veto = consent_hard_stop(body)
     if veto is not None:
         return veto
-
-    if _normalize_exact(body) in _EXACT_CONSENT_TOKENS:
+    normalized = _normalize_exact(body)
+    if normalized == _normalize_exact(_AGREE_TITLE):
         return "consent"
-
-    try:
-        if text_call is None:
-            from orchestrator.llm.structured import structured_text_call as text_call  # noqa: PLC0415
-
-        raw = text_call(
-            "complex",
-            system=_load_prompt(),
-            user=(body or "")[:2000],
-            max_tokens=300,
-            agent="whatsapp_signup",
-            call_site="signup_consent_v1",
-            tenant_id=None,  # pre-tenant by definition
-        )
-        parsed = json.loads(raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```"))
-        decision = str(parsed.get("decision", ""))
-        cue = str(parsed.get("cited_cue", ""))
-        confidence = float(parsed.get("confidence", 0.0) or 0.0)
-        grounded = bool(cue) and cue in (body or "")
-        if decision == "consent" and grounded and confidence >= _CONSENT_MIN_CONFIDENCE:
-            return "consent"
-        if decision == "declined" and grounded:
-            return "declined"
-        return "unclear"
-    except Exception:  # noqa: BLE001 — an LLM/transport error must never manufacture consent
-        logger.warning("whatsapp_signup: consent classify failed (→ unclear)", exc_info=True)
-        return "unclear"
+    if normalized == _normalize_exact(_DISAGREE_TITLE):
+        return "declined"
+    return "unclear"
 
 
 # --- the flow driver ----------------------------------------------------------------------------
@@ -271,6 +240,23 @@ def _send(phone_e164: str, text: str) -> None:
     from orchestrator.utils.twilio_send import send_freeform_message
 
     send_freeform_message(text, phone_e164)
+
+
+def _send_consent_prompt(phone_e164: str) -> None:
+    """The consent ask: interactive quick-reply FIRST (the explicit I-agree / I-do-not-agree
+    buttons — the Fazal-ruled capture), freeform text with the typed-exact instruction as the
+    fallback on any interactive failure. Same in-session window either way."""
+    try:
+        from orchestrator.templates_registry import content_sid_for
+        from orchestrator.utils.twilio_send import send_interactive_message
+
+        content_sid = content_sid_for(INTERACTIVE_CONSENT_TEMPLATE, "en")
+        if content_sid:
+            send_interactive_message(content_sid, phone_e164)
+            return
+    except Exception:  # noqa: BLE001 — the buttons are the preferred surface, never the only one
+        logger.warning("whatsapp_signup: interactive consent send failed — freeform fallback")
+    _send(phone_e164, CONSENT_PROMPT)
 
 
 def handle_unknown_inbound(phone_e164: str, body: str, message_sid: str | None) -> dict[str, Any]:
@@ -298,7 +284,7 @@ def handle_unknown_inbound(phone_e164: str, body: str, message_sid: str | None) 
                 logger.info("whatsapp_signup: first contact was a refusal → silent from=%s", token)
                 return {"outcome": "declined_silent", "phone_token": token}
             upsert_prompted(phone_e164)
-            _send(phone_e164, CONSENT_PROMPT)
+            _send_consent_prompt(phone_e164)
             logger.info("whatsapp_signup: consent prompted (first contact) from=%s", token)
             return {"outcome": "consent_prompted", "phone_token": token}
 
@@ -367,25 +353,18 @@ def handle_unknown_inbound(phone_e164: str, body: str, message_sid: str | None) 
             logger.info("whatsapp_signup: declined from=%s", token)
             return {"outcome": "declined", "phone_token": token}
 
-        # 'unclear' → bounded, cooled-down re-ask. Inside the cooldown window: silent, no
-        # prompt burned — a burst of "Hi Hi Hi" must neither spam the person nor exhaust the
-        # prompt budget a genuine-but-confused user needs later.
+        # 'unclear' (anything that isn't the agree/disagree title or a hard-stop — free-text
+        # "yes" included) → immediate bounded re-prompt with the buttons. Buttons converge a
+        # genuine user in one tap; the hard MAX_CONSENT_PROMPTS cap is the spam bound, after
+        # which the session expires silent.
         prompts = int(session.get("consent_prompt_count") or 0)
         if prompts >= MAX_CONSENT_PROMPTS:
             mark_status(phone_e164, "expired")
             logger.info("whatsapp_signup: prompts exhausted → expired from=%s", token)
             return {"outcome": "expired", "phone_token": token}
-        last_prompt = session.get("last_prompt_at")
-        if last_prompt is not None:
-            from datetime import datetime, timezone
-
-            age = datetime.now(timezone.utc) - last_prompt
-            if age < REPROMPT_MIN_INTERVAL:
-                logger.info("whatsapp_signup: unclear within cooldown → silent from=%s", token)
-                return {"outcome": "unclear_cooldown_silent", "phone_token": token}
         upsert_prompted(phone_e164)
-        _send(phone_e164, CONSENT_PROMPT)
-        logger.info("whatsapp_signup: unclear reply → re-asked (%d/%d) from=%s",
+        _send_consent_prompt(phone_e164)
+        logger.info("whatsapp_signup: unclear reply → re-prompted with buttons (%d/%d) from=%s",
                     prompts + 1, MAX_CONSENT_PROMPTS, token)
         return {"outcome": "consent_reprompted", "phone_token": token}
     except Exception:  # noqa: BLE001 — never crash the workflow into retry-spam

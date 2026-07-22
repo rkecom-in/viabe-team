@@ -203,7 +203,16 @@ def test_whatsapp_signup_flag_on_starts_workflow_and_prompts_consent(ingress, mo
     import orchestrator.onboarding.whatsapp_signup as ws
 
     monkeypatch.setenv("ENABLE_WHATSAPP_SIGNUP", "true")
+    # Fazal 2026-07-22: the consent ask is the interactive I-agree/I-do-not-agree quick-reply.
+    # Capture the interactive send (registry-resolved HX) and keep the freeform fallback
+    # captured too — exactly one of the two must fire.
+    import orchestrator.utils.twilio_send as ts
+
     sent: list[str] = []
+    monkeypatch.setattr(
+        ts, "send_interactive_message",
+        lambda content_sid, phone, **k: (sent.append(f"interactive:{content_sid}"), "MKDEVtest")[1],
+    )
     monkeypatch.setattr(ws, "_send", lambda p, text: sent.append(text))
 
     phone = _phone()
@@ -229,7 +238,10 @@ def test_whatsapp_signup_flag_on_starts_workflow_and_prompts_consent(ingress, mo
         time.sleep(0.5)
     assert row is not None, "the signup session row must be durably created"
     assert row[0] == "consent_pending"
-    assert sent == [ws.CONSENT_PROMPT]
+    from orchestrator.templates_registry import content_sid_for
+
+    expected_sid = content_sid_for(ws.INTERACTIVE_CONSENT_TEMPLATE, "en")
+    assert sent == [f"interactive:{expected_sid}"], sent
 
     # DPDP: no tenant yet.
     with psycopg.connect(ingress.dsn, autocommit=True) as conn:
