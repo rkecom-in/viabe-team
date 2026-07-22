@@ -848,6 +848,24 @@ def handle_reply(
     # ``maybe_handle_journey_reply``); the cursor then walks that composed queue deterministically.
     g2 = get_journey(tenant_id)
     nxt = _current(g2) if g2 else None
+    # VT-693/694 mid-queue card injection: a PENDING GST identity card outranks whatever a
+    # stale (pre-card) queue holds next — identity first, always. Installing [card] alone also
+    # FLUSHES a pre-VT-694 interview queue: once the card resolves, the exhaustion path
+    # recomposes the residual under the new rules (≤3, inferred suggestions, draft-covered
+    # facts suppressed). The reply just processed was recorded against ITS presented question
+    # above, so nothing mis-maps. (The live first-customer recovery: his queue carried five
+    # stale interview questions ahead of the card.)
+    if (nxt or {}).get("field") != "gst_identity":
+        from orchestrator.onboarding.whatsapp_journey import (
+            gst_identity_card_question,
+            gst_identity_pending,
+        )
+
+        if gst_identity_pending(tenant_id, answers):
+            card = gst_identity_card_question(tenant_id)
+            if card:
+                _install_recomposed_queue(tenant_id, [card], message_sid)
+                nxt = card
     if nxt is None:
         # VT-660 — same honest gate as the entry path: exhausting the (possibly thin) queue after this
         # answer does NOT prove the profile is complete. Complete only on profile_collection_complete;
