@@ -222,3 +222,75 @@ def test_push_dedups_and_gates(monkeypatch) -> None:
     calls3 = _wire_push(monkeypatch, journey=None)
     assert wj.push_next_question_after_discovery(_TID) is False  # no active journey
     assert calls["enqueued"] == calls2["enqueued"] == calls3["enqueued"] == []
+
+
+# --- VT-693: GST identity card ------------------------------------------------------------------
+
+
+_GST_ATTRS = {
+    "legal_name": "RKECOM SERVICES PRIVATE LIMITED", "trade_name": "Rkecom Services",
+    "principal_address": "Andheri East, Mumbai, MH 400069",
+    "nature_of_business": ["Service Provision"], "gstin_candidate": "27ABCDE1234F1Z5",
+}
+
+
+def _patch_draft(monkeypatch, attrs):
+    import orchestrator.onboarding.draft_profile as dp
+
+    monkeypatch.setattr(dp, "get_draft", lambda t: {"attributes": dict(attrs)})
+
+
+def test_gst_card_pending_and_composed(monkeypatch) -> None:
+    _patch_draft(monkeypatch, _GST_ATTRS)
+    assert wj.gst_identity_pending(_TID, {}) is True
+    assert wj.gst_identity_pending(_TID, {"gst_identity": "yes"}) is False
+    card = wj.gst_identity_card_question(_TID)
+    assert card["field"] == "gst_identity" and card["kind"] == "confirm"
+    assert "Rkecom Services" in card["prompt_en"]
+    assert "…F1Z5" in card["prompt_en"], "only the GSTIN tail is shown"
+    assert "27ABCDE1234F1Z5" not in card["prompt_en"], "never the full candidate GSTIN"
+
+
+def test_with_gst_card_prepends_once(monkeypatch) -> None:
+    _patch_draft(monkeypatch, _GST_ATTRS)
+    q = [{"field": "operating_hours", "kind": "gap", "prompt_en": "Hours?", "prompt_hi": "?"}]
+    out = wj.with_gst_card(_TID, q, {})
+    assert out[0]["field"] == "gst_identity" and out[1]["field"] == "operating_hours"
+    assert wj.with_gst_card(_TID, out, {})[0]["field"] == "gst_identity" and len(
+        wj.with_gst_card(_TID, out, {})
+    ) == 2  # no double-prepend
+    assert wj.with_gst_card(_TID, q, {"gst_identity": "no"}) == q  # answered → no card
+
+
+def test_accept_gst_identity_anchors_populates_verifies(monkeypatch) -> None:
+    _patch_draft(monkeypatch, _GST_ATTRS)
+    calls: dict[str, Any] = {"written": [], "populated": False, "verified": None}
+    import orchestrator.onboarding.draft_profile as dp
+
+    monkeypatch.setattr(dp, "write_draft",
+                        lambda t, fields, *, source, **k: calls["written"].append((source, dict(fields))))
+    import orchestrator.onboarding.journey as j
+
+    monkeypatch.setattr(j, "populate_profile_from_draft",
+                        lambda t: calls.__setitem__("populated", True) or {})
+    import orchestrator.onboarding.entity_match as em
+
+    monkeypatch.setattr(em, "confirm_and_verify",
+                        lambda t, g, *, name_anchor=None, **k:
+                        calls.__setitem__("verified", (g, name_anchor)) or {})
+    wj.accept_gst_identity(_TID)
+    assert calls["written"][0][1]["entity_resolution"]["decision"] == "accept"
+    assert calls["populated"] is True
+    assert calls["verified"] == ("27ABCDE1234F1Z5", "RKECOM SERVICES PRIVATE LIMITED"), \
+        "the owner's YES routes the candidate through the FORMAL Sandbox verify"
+
+
+def test_decline_gst_identity_removes_everything(monkeypatch) -> None:
+    removed: list[str] = []
+    import orchestrator.onboarding.draft_profile as dp
+
+    monkeypatch.setattr(dp, "remove_draft_fields", lambda t, fields: removed.extend(fields))
+    wj.decline_gst_identity(_TID)
+    for f in ("legal_name", "principal_address", "nature_of_business", "gstin_candidate",
+              "entity_resolution"):
+        assert f in removed, f"decline must remove {f} — nothing survives, even as a hint"

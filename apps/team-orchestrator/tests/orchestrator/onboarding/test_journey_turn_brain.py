@@ -368,9 +368,11 @@ def test_reprompt_after_no_is_non_identical(substrate):
     assert "correct" in journey._reprompt_after_no(_confirm_q("about", "x"))["reply_en"].lower()
 
 
-def test_confirm_button_set_detection_and_inline_cap(substrate, monkeypatch):
-    """Yes/No/Skip button sets route to the interactive Content object; other button sets have no
-    registered object and degrade to an inline list capped at 3."""
+def test_confirm_button_set_detection_and_dynamic_delivery(substrate, monkeypatch):
+    """Yes/No/Skip sets route to the confirm Content object; VT-694: any OTHER button set now
+    delivers as REAL tappable buttons via the variable-titled journey_suggest_3 object (capped
+    at 3, padded with Skip); the inline "(A / B / C)" text is only the transport-failure
+    fallback."""
     from orchestrator.onboarding import journey
     from orchestrator.utils import twilio_send
 
@@ -379,11 +381,28 @@ def test_confirm_button_set_detection_and_inline_cap(substrate, monkeypatch):
     assert journey._is_confirm_button_set(["Retail", "Other"]) is False
     assert journey._is_confirm_button_set([]) is False
 
-    sent: list[str] = []
-    monkeypatch.setattr(twilio_send, "send_freeform_message", lambda body, *a, **k: sent.append(body) or "SM0")
+    # Happy path: dynamic buttons DELIVER interactively (cap 3 — the 4th drops).
+    inter: list[dict] = []
+    monkeypatch.setattr(
+        twilio_send, "send_interactive_message",
+        lambda sid, phone, *, content_variables=None, **k: inter.append(content_variables) or "MK1",
+    )
+    frees: list[str] = []
+    monkeypatch.setattr(twilio_send, "send_freeform_message",
+                        lambda body, *a, **k: frees.append(body) or "SM0")
     journey._send_turn("+919999000009", "Pick one:", ["A", "B", "C", "D"], "en")
-    assert sent and sent[-1].count("/") == 2, "at most 3 inline options (2 separators)"
-    assert "D" not in sent[-1], "the 4th option is dropped (cap 3)"
+    assert inter and inter[-1]["2"] == "A" and inter[-1]["4"] == "C"
+    assert "D" not in inter[-1].values(), "the 4th option is dropped (cap 3)"
+    assert frees == [], "buttons delivered — no freeform double-send"
+
+    # Failure path: interactive down → the inline text fallback, capped at 3.
+    def _boom(*a, **k):
+        raise RuntimeError("transport down")
+
+    monkeypatch.setattr(twilio_send, "send_interactive_message", _boom)
+    journey._send_turn("+919999000009", "Pick one:", ["A", "B", "C", "D"], "en")
+    assert frees and frees[-1].count("/") == 2, "at most 3 inline options (2 separators)"
+    assert "D" not in frees[-1], "the 4th option is dropped (cap 3)"
 
 
 # ---------------------------------------------------------------------------
