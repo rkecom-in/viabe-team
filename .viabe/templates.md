@@ -325,6 +325,20 @@ Is this your business?
 
 ---
 
+### `team_activate_button`  *(VT-700 — the Manager-introducing data-inputs consent ask with a tappable grant; NOT a Meta-approved template)*
+
+- **Twilio Content SID:** en `HXfbdb7ea96b84e45231419e7d4f962fbc`
+- **Content type:** `twilio/quick-reply`, body `{{1}}` = the full consent prompt (Manager intro + consent-bearing language). Canary `canaries/vt700_activate_button_create.py`.
+- **Sent by:** `consent_required_handler` (interactive-first; freeform fallback). The `{{1}}` var-recording keeps the enable phrase in conversation_log — the runner's consent-ask recognition is unchanged.
+- **Button `id` payloads:** `activate_yes` / `activate_later`. **LOAD-BEARING:** the "ACTIVATE TEAM" title IS the exact grant floor (`config/data_inputs_enable_keywords.yaml` + pre_filter exact match) — a tap echoes it as the inbound Body and rides the existing deterministic grant path. NEVER retitle without updating the keywords file in the same commit. "Not now" echoes into the deterministic decline handling.
+
+```
+{{1}}
+[ ACTIVATE TEAM ]  [ Not now ]
+```
+
+---
+
 ### `team_approval_buttons`  *(VT-683 P2c — INTERACTIVE in-session approval ask; NOT a Meta-approved 24h-window template)*
 
 - **Twilio Content SIDs:** en `HX6b8aa56b3497301f86152983686064d7` · hi `HX3b0f0c7926f557e4de1d007682cdaabe`

@@ -36,10 +36,18 @@ from orchestrator.state import SubscriberState
 from orchestrator.types import WebhookEvent
 from orchestrator.utils.twilio_send import send_freeform_message
 
+# VT-700 (Fazal 2026-07-23: after the go-ahead "the owner must be able to choose from the
+# list of specialist agents to activate") — the grant confirm IS the agent chooser: one
+# message, tappable agent buttons, trial terms stated plainly. Titles must stay EXACTLY in
+# sync with journey._AGENT_CATALOG (the tap echo is the deterministic choice).
 _CONFIRM = (
-    "Done — data inputs enabled. Your AI team is now active and will start "
-    "working on recovering sales for you. Reply STOP anytime to pause."
+    "Done — data inputs enabled, your AI team is active! Reply STOP anytime to pause.\n\n"
+    "Now pick the first specialist agent for your team — every agent starts with a FREE "
+    "1-month trial, and after the month it's paid ONLY if you choose to continue.\n\n"
+    "Which one shall we start with?"
 )
+_AGENT_BUTTONS = ["Sales Recovery", "Customer Win-back", "Campaigns"]
+_CHOOSER_TEMPLATE = "journey_suggest_3"
 
 
 @DBOS.step()
@@ -62,9 +70,47 @@ def data_inputs_enable_handler(
         try:
             # VT-611 Package H0 — thread tenant_id/surface so this confirm lands in the lifetime
             # conversation_log (was bare -> _record_owner_conversation_turn no-op'd).
-            sid = send_freeform_message(
-                _CONFIRM, recipient, tenant_id=state["tenant_id"], surface="system"
-            )
+            # VT-700 — the confirm carries the agent chooser as tappable buttons (the generic
+            # variable-titled object); freeform fallback keeps delivery unconditional.
+            try:
+                from orchestrator.templates_registry import content_sid_for
+                from orchestrator.utils.twilio_send import send_interactive_message
+
+                content_sid = content_sid_for(_CHOOSER_TEMPLATE, "en")
+                if content_sid:
+                    sid = send_interactive_message(
+                        content_sid,
+                        recipient,
+                        content_variables={
+                            "1": _CONFIRM,
+                            "2": _AGENT_BUTTONS[0],
+                            "3": _AGENT_BUTTONS[1],
+                            "4": _AGENT_BUTTONS[2],
+                        },
+                        tenant_id=state["tenant_id"],
+                        surface="system",
+                    )
+            except Exception:  # noqa: BLE001 — buttons are an enhancement; freeform below
+                sid = None
+            if sid is None:
+                sid = send_freeform_message(
+                    f"{_CONFIRM}\n\n({' / '.join(_AGENT_BUTTONS)})",
+                    recipient, tenant_id=state["tenant_id"], surface="system",
+                )
+            # VT-700 — arm the deterministic agent-choice beat on the paced flow (only where a
+            # COMPLETED journey exists; fail-soft — activation must never depend on journey state).
+            try:
+                from orchestrator.onboarding.journey import (
+                    _FLOW_AGENT_CHOICE,
+                    _set_flow,
+                    get_journey,
+                )
+
+                g = get_journey(state["tenant_id"])
+                if g is not None and g.get("status") == "complete":
+                    _set_flow(state["tenant_id"], _FLOW_AGENT_CHOICE)
+            except Exception:  # noqa: BLE001
+                pass
         except Exception as exc:  # noqa: BLE001 — honest send outcome, never crash the pipeline
             error = repr(exc)
     else:
