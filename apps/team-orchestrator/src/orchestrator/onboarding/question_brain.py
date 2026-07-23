@@ -100,6 +100,47 @@ class Question:
     # works. Empty for confirms (they have Yes/No/Skip) and open questions (a name).
     suggestions_en: tuple[str, ...] = ()
     suggestions_hi: tuple[str, ...] = ()
+    # VT-701 — one plain-language line explaining WHAT the question means + an example, shown
+    # when the owner is confused (the turn-brain's explain move + the represent guard's
+    # fallback). LLM-composed per gap; _FIELD_HELP backfills the canonical fields.
+    help_en: str = ""
+    help_hi: str = ""
+
+
+# VT-701 — deterministic plain-language help for the canonical question fields (the finite
+# enum — allowed under the no-keyword-lists rule). Used when the gap LLM omits help and by
+# the runner's represent guard.
+_FIELD_HELP: dict[str, tuple[str, str]] = {
+    "operating_hours": (
+        "I'm asking when customers can reach your business — like 10am-8pm, or 24/7 if you're always online.",
+        "मैं पूछ रहा हूँ ग्राहक आपसे कब संपर्क कर सकते हैं — जैसे 10am-8pm, या हमेशा online हों तो 24/7।",
+    ),
+    "about": (
+        "Just tell me in your own words what your business sells or does — one line is enough.",
+        "बस अपने शब्दों में बताइए आपका बिज़नेस क्या बेचता या करता है — एक लाइन काफ़ी है।",
+    ),
+    "typical_customer": (
+        "Who usually buys from you — other businesses, individual customers, or both?",
+        "आपसे आमतौर पर कौन खरीदता है — दूसरे बिज़नेस, आम ग्राहक, या दोनों?",
+    ),
+    "price_range": (
+        "Roughly what do your products or services cost — a typical range is fine.",
+        "आपके प्रोडक्ट या सर्विस की कीमत लगभग क्या है — एक अंदाज़न रेंज काफ़ी है।",
+    ),
+    "city": (
+        "Which city or area is your business based in?",
+        "आपका बिज़नेस किस शहर या इलाके में है?",
+    ),
+    "web_presence": (
+        "Any link where your business appears online — your website, Facebook, Instagram, LinkedIn or IndiaMART page.",
+        "कोई भी लिंक जहाँ आपका बिज़नेस online दिखता है — वेबसाइट, Facebook, Instagram, LinkedIn या IndiaMART पेज।",
+    ),
+}
+
+
+def field_help(field: str) -> tuple[str, str]:
+    """(help_en, help_hi) for a canonical field — ('', '') when unknown."""
+    return _FIELD_HELP.get(_canonical_field(field), ("", ""))
 
 
 def _business_type_label(key: Any) -> tuple[str, str]:
@@ -216,6 +257,8 @@ def compose_onboarding_questions(
             ),
             suggestions_en=("No website",),
             suggestions_hi=("वेबसाइट नहीं",),
+            help_en=field_help("web_presence")[0],
+            help_hi=field_help("web_presence")[1],
         )
         known.add("web_presence")
     try:
@@ -243,6 +286,7 @@ def compose_onboarding_questions(
                 return ()
             return tuple(str(v).strip()[:20] for v in vals if str(v).strip())[:3]
 
+        _fb_en, _fb_hi = field_help(field)
         gaps.append(
             Question(
                 field=field,
@@ -251,6 +295,9 @@ def compose_onboarding_questions(
                 prompt_hi=g.get("prompt_hi") or f"क्या आप अपना {field} बता सकते हैं?",
                 suggestions_en=_sugg("suggestions_en"),
                 suggestions_hi=_sugg("suggestions_hi"),
+                # VT-701 — LLM help first, canonical-field fallback second.
+                help_en=str(g.get("help_en") or "").strip()[:200] or _fb_en,
+                help_hi=str(g.get("help_hi") or "").strip()[:200] or _fb_hi,
             )
         )
         if len(gaps) >= max_gaps:
@@ -286,10 +333,14 @@ def _llm_compose_gaps(
         "LIKELY answer FIRST (your best inference — e.g. a BI-services firm: '24/7 online', 'No "
         "fixed season'), each suggestion <= 20 characters, shown to the owner as tap buttons. "
         "Ask ONLY about the business itself; NEVER ask for any customer's or third "
-        "party's personal details (CL-390). Return at most 3, ordered most-important-first, as "
+        "party's personal details (CL-390). PLAIN WORDS (VT-701): every question must be "
+        "instantly answerable by a non-technical shop owner — everyday language, no business "
+        "jargon ('What are your working hours?', never 'When do you typically operate?'). "
+        "Return at most 3, ordered most-important-first, as "
         'JSON: a list of objects {"field": "<snake_case>", "prompt_en": "<short question>", '
         '"prompt_hi": "<Hindi question>", "suggestions_en": ["<=3 short suggestions"], '
-        '"suggestions_hi": ["same in Hindi"]}. JSON array only, no prose.'
+        '"suggestions_hi": ["same in Hindi"], "help_en": "<one plain sentence explaining the '
+        'question with a concrete example>", "help_hi": "<same in Hindi>"}. JSON array only, no prose.'
     )
     try:
         resp = Anthropic().messages.create(

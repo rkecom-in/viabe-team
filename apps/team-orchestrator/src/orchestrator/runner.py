@@ -304,12 +304,20 @@ def _journey_represent_instead_of_consent_ask(tenant_id: str, event: Any) -> boo
         recipient = getattr(event, "sender_phone", None)
         if not recipient:
             return False
-        from orchestrator.owner_surface.freeform_acks import send_freeform_ack
+        # VT-701 (live: "What does that mean?" got a robotic re-ask) — the re-present is
+        # HELPFUL: the question's plain-language explanation leads when we have one, and the
+        # question rides journey._send so its suggestion buttons / card formatting come along.
+        # Deterministic (no LLM — this path exists precisely because the journey gate failed).
+        from orchestrator.onboarding.journey import _send as _journey_send
+        from orchestrator.onboarding.question_brain import field_help
 
-        send_freeform_ack(
-            tenant_id, recipient,
-            f"Let's finish setting up first — {prompt}",
-        )
+        help_en = str(q.get("help_en") or "").strip() or field_help(str(q.get("field") or ""))[0]
+        q2 = dict(q)
+        if help_en:
+            q2["prompt_en"] = f"{help_en}\n\n{prompt}"
+        else:
+            q2["prompt_en"] = f"Let's finish setting up first — {prompt}"
+        _journey_send(recipient, q2, "en", tenant_id=tenant_id)
         return True
     except Exception:  # noqa: BLE001 — fail-open to the normal consent flow
         logger.warning("VT-693 journey-represent guard failed (fail-open) tenant=%s", tenant_id)
