@@ -141,6 +141,17 @@ buttons — the MOST LIKELY answer FIRST, inferred from the business type and ev
 services firm: "24/7 online", "No fixed season"; a sweet shop: "10am-9pm", "Festival season"). Each \
 button title <= 20 characters, never more than 3. The owner can always type instead. Leave buttons \
 empty ONLY for a genuinely open question with no sensible suggestions (e.g. the business's name).
+- PLAIN WORDS (VT-701, live: "When do you typically operate?" left the owner lost): every question \
+must be instantly answerable by a non-technical shop owner — everyday words, no business jargon \
+("What are your working hours?", never "When do you operate?"). \
+- NEVER DEFLECT CONFUSION (VT-701, live: "What does that mean?" got a robotic re-ask): if the owner \
+asks what a question means, says they don't understand, or asks why you need it — EXPLAIN it in one \
+plain sentence with a concrete example ("I'm asking when customers can reach you — like 10am-8pm, \
+or 24/7 if you're always online"), then re-offer the same buttons. Never brush past a confusion. \
+- STAY ON THE OBJECTIVE (VT-701, live: an invented hours question mis-recorded the reply into \
+primary_service_focus): the question you ask MUST be the CURRENT still-needed objective — you may \
+rephrase it warmly, but NEVER substitute a different-topic question. Record an extracted answer \
+ONLY under the field your actual question was about. \
 - NEVER AN INTERVIEW (VT-694): infer before you ask — if the business type plus what is already \
 known makes an answer highly likely, present it as the first button rather than asking open-ended. \
 The ENTIRE onboarding may ask at most a handful of questions; if you say "last one", it MUST be the \
@@ -208,7 +219,11 @@ def _fmt_still_needed(
             f" (DISCOVERED value — present this for confirmation, do NOT ask them to type it: {dv})"
             if dv not in (None, "") else ""
         )
-        lines.append(f"- {fieldname} [{kind}]{dv_txt} — e.g. \"{hint}\"")
+        # VT-701 — the plain-language meaning rides along so a confused owner gets an ACCURATE
+        # explanation (the never-deflect rule), not an improvised one.
+        help_txt = str(q.get("help_en") or "").strip()
+        help_part = f" (meaning: {help_txt})" if help_txt else ""
+        lines.append(f"- {fieldname} [{kind}]{dv_txt}{help_part} — e.g. \"{hint}\"")
     return "\n".join(lines)
 
 
