@@ -1261,7 +1261,10 @@ def _compose_queue(tenant_id: UUID | str, business_type: str | None) -> list[dic
         {"field": q.field, "kind": q.kind, "prompt_en": q.prompt_en, "prompt_hi": q.prompt_hi,
          "draft_value": q.draft_value,
          "suggestions_en": list(getattr(q, "suggestions_en", ()) or ()),
-         "suggestions_hi": list(getattr(q, "suggestions_hi", ()) or ())}
+         "suggestions_hi": list(getattr(q, "suggestions_hi", ()) or ()),
+         # VT-701 — the plain-language explanation the confusion paths present.
+         "help_en": getattr(q, "help_en", "") or "",
+         "help_hi": getattr(q, "help_hi", "") or ""}
         for q in decision.remaining
     ]
 
@@ -2807,7 +2810,9 @@ def maybe_handle_journey_reply(
         # the profile-confirm burst (card + Shopify pitch + data-less plan) the live drill surfaced.
         return r
     except Exception:  # noqa: BLE001 — owner-inbound HOT PATH: any failure falls through, never blocks
-        logger.exception("maybe_handle_journey_reply failed tenant=%s — fall through", tenant_id)
+        # VT-701 — grep marker: this fail-open is what hands an ONBOARDING message to the
+        # consent-pitch path (the represent guard). Every firing is a real defect to chase.
+        logger.exception("JOURNEY-GATE-FAIL-OPEN tenant=%s — inbound falls through", tenant_id)
         return None
 
 
