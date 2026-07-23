@@ -121,9 +121,32 @@ def test_is_remaining_needs_ask(body, expected):
 # --- routing ------------------------------------------------------------------------------
 
 
-def test_question_falls_through_to_brain(spies):
+def test_question_falls_through_to_brain(spies, monkeypatch):
+    # ACTIVATED tenant (owner_inputs true): the brain owns questions — the measured-good path.
+    monkeypatch.setattr(
+        "orchestrator.memory.l0_writer._owner_inputs_enabled", lambda t: True
+    )
     assert _run("Hold on — why do you even need all these details about my shop?") is None
     assert spies["walker"] == [] and spies["sends"] == []
+
+
+def test_preactivation_question_delegates_to_journey_brain(spies, monkeypatch):
+    """VT-703 (sim-caught): pre-activation there IS no brain downstream — the question must go
+    to the journey turn-brain (never-deflect), not dead-end into the consent represent guard."""
+    monkeypatch.setattr(
+        "orchestrator.memory.l0_writer._owner_inputs_enabled", lambda t: False
+    )
+    res = _run("What does that mean?")
+    assert res is not None and spies["walker"] == ["What does that mean?"]
+
+
+def test_preactivation_read_failure_keeps_brain_routing(spies, monkeypatch):
+    def _boom(t):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr("orchestrator.memory.l0_writer._owner_inputs_enabled", _boom)
+    assert _run("why do you need my GST number?") is None
+    assert spies["walker"] == []
 
 
 def test_volunteered_details_route_to_walker(spies):
