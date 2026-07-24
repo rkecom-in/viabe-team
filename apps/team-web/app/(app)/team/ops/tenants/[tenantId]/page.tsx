@@ -83,6 +83,13 @@ export default async function TenantDashboardPage({ params }: PageProps) {
           <TenantDiscoveryPanel profile={profile} />
         </>
       )}
+      {ok && profile ? (
+        <p className="text-xs text-muted-foreground">
+          <a className="underline" href={`/team/ops/tenants/${tenantId}/activity-flow`}>
+            activity flow (30 days) →
+          </a>
+        </p>
+      ) : null}
       {ok && profile && operatorJwt ? (
         <TmActivityFeed tenantId={tenantId} operatorJwt={operatorJwt} />
       ) : null}
