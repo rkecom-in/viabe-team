@@ -103,7 +103,8 @@ changed_match '^apps/team-orchestrator/(Dockerfile|pyproject\.toml|src/)' && DOC
 # --- 1. Python: ruff + dep-less smoke (catches importorskip-guard misses)
 if [ "$ORCH_CHANGED" = 1 ]; then
   say "ruff check (orchestrator + ingestion-worker)"
-  uvx ruff check apps/team-orchestrator apps/team-ingestion-worker || { err "ruff"; FAIL=1; }
+  # PINNED (2026-07-24) — matches ci.yml; an unpinned ruff release false-FAILed repo-wide.
+  uvx ruff@0.15.13 check apps/team-orchestrator apps/team-ingestion-worker || { err "ruff"; FAIL=1; }
 
   say "smoke pytest (uv --no-project --isolated --with pytest --with pyyaml) — faithful dep-less, mirrors CI 'test'"
   # VT-337: a plain LOCAL --no-project run resolves heavy deps (anthropic/psycopg) from the
