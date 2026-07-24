@@ -89,7 +89,9 @@ jobs:
       - run: bash scripts/check_no_url_tokens.sh
       # Python lint.
       - uses: astral-sh/setup-uv@v7
-      - run: uvx ruff check apps/team-orchestrator apps/team-ingestion-worker
+      # PINNED (2026-07-24): an unpinned `uvx ruff` broke every merge/deploy repo-wide the
+      # morning a new ruff release added rules (2221 RUF100-class hits). Bump DELIBERATELY.
+      - run: uvx ruff@0.15.13 check apps/team-orchestrator apps/team-ingestion-worker
       # Pillar 1: the deterministic subtree (Pre-Filter Gate + phase machine)
       # must contain no LLM calls.
       - name: No LLM in the deterministic subtree (Pillar 1)

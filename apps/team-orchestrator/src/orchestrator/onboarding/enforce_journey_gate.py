@@ -401,7 +401,24 @@ def maybe_handle_enforce_journey_turn(
         # D — questions (other than the status/remaining asks above) go to the brain: the deterministic
         # walker ignores them (the measured privacy-question regression). DF7(c) routes a DURATION ask
         # here too (its "kitna"-lead was added to the interrogative set).
+        # VT-703 (sim-caught, the prod "What does that mean?" dead-end): a PRE-ACTIVATION tenant
+        # has NO brain downstream — owner_inputs is false, so the None fall-through lands in the
+        # consent gate and the owner's question gets the robotic represent guard instead of an
+        # answer. While the journey is ACTIVE and the tenant is NOT activated, the question is
+        # the JOURNEY turn-brain's to answer (it carries the VT-701 never-deflect/explain rules
+        # and the signup-consent basis covers onboarding processing). Activated tenants keep the
+        # brain routing (the measured-good privacy-question path). Fail-open on the read.
         if _is_interrogative(text):
+            if g is not None and g.get("status") == "active":
+                try:
+                    from orchestrator.memory.l0_writer import _owner_inputs_enabled
+
+                    if not _owner_inputs_enabled(UUID(str(tenant_id))):
+                        return maybe_handle_journey_reply(tenant_id, text, message_sid, recipient)
+                except Exception:  # noqa: BLE001 — fall back to the brain routing on any doubt
+                    logger.warning(
+                        "enforce_journey_gate: owner_inputs read failed — interrogative to brain",
+                    )
             return None
 
         # C — a non-interrogative turn while the journey is active → the walker. R9 item 4: a NON-bare
