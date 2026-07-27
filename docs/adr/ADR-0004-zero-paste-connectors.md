@@ -41,4 +41,4 @@ Sheet connector pivots to Drive Push Notifications (Files.watch) primary + 10-mi
 - VT-212 manual walk (empirical trigger)
 - VT-222 (Drive Push redesign)
 - VT-208 / VT-213 (Shopify conforms by default)
-- docs/clau/sheet-integration-runbook.md
+- docs/runbooks/sheet-integration-runbook.md

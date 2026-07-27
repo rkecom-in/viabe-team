@@ -397,7 +397,7 @@ trial_ending:
 # window, so no template is required). Their copy + send live in
 # orchestrator/owner_surface/freeform_acks.py. refund_processing moved the same way (above).
 
-# --- Batch 2 (VT-108; Fazal SIDs 2026-06-07). Bodies canonical in docs/meta-templates-batch2.md. ---
+# --- Batch 2 (VT-108; Fazal SIDs 2026-06-07). Bodies canonical in docs/team/meta-templates-batch2.md. ---
 support_resolved:
   audience: owner
   agent_selectable: false

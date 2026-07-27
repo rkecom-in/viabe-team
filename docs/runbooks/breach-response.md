@@ -70,7 +70,7 @@ send_template_message(tenant_id, "breach_notification_customer",
     {"business_name": ..., "data_categories": ..., "advised_step": ...}, recipient_phone=<cust>)
 ```
 
-The bodies/variables are canonical in `docs/meta-templates-batch2.md`. Customer-side mass send +
+The bodies/variables are canonical in `docs/team/meta-templates-batch2.md`. Customer-side mass send +
 the CERT-In authority notice remain Fazal/counsel-authorized manual actions (no auto-fan-out).
 
 ### `dsr_deletion_completed` — OPS-INVOKED on a customer-level erasure (VT-359 site-2 ruling)

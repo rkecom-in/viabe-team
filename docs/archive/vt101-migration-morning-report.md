@@ -1,3 +1,5 @@
+> **HISTORICAL (archived 2026-07-25, docs-reorg-2)** — superseded; kept for record.
+
 # VT-101 agent-framework migration — morning report (single source of truth)
 
 **Author:** Claude Code (autonomous, overnight 2026-07-16→17)
