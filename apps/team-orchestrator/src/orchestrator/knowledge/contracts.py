@@ -344,7 +344,11 @@ _LIFECYCLE_TRANSITIONS: dict[CardStatus, frozenset[CardStatus]] = {
         }
     ),
     CardStatus.EMERGENCY_QUARANTINED: frozenset(
-        {CardStatus.CANDIDATE, CardStatus.EXPIRED}
+        {
+            CardStatus.CANDIDATE,
+            CardStatus.SUPERSEDED,
+            CardStatus.EXPIRED,
+        }
     ),
     CardStatus.SUPERSEDED: frozenset(),
     CardStatus.EXPIRED: frozenset(),
