@@ -6,7 +6,7 @@
 > status-changing event, same moment as the to-cowork signal). Cowork audits (Rule #14).
 > Bar lines are Fazal's — never edited without a ruling; Now/Gate/status lines are CC's.
 > Statuses: MET · MET–INCIDENT OPEN · IN PROGRESS · AT RISK · PENDING · HELD/PARKED.
-> Last updated: 2026-07-19 (**PROMOTION GATE GREEN on aee9021 — Tier-1=0, Tier-2 100%, fully-acceptable 30/30, best full pack yet**) · prev: gate iter-2 · dev aee9021 · Fix chain bca4023→green: j10 directory framing header (462fe33) + j06 customer-scope-first opt-out copy (462fe33) + j06 CANCEL-promise removal (b78f301) + VT-687 walker answered-ack & broad-answer-resolves-clarify (aee9021). **PR #526 ready — merge is Fazal's button.** Fazal pinged (Telegram).
+> Last updated: 2026-07-20 (**PROD LIVE — Mumbai boot CLEAN on 255344c**: deploy 36ce054b, DBOS launched, 0 holder/scheduler errors, migrations 0/177/0, boot-conformance passed = all 5 identity cards live on prod) · prev: #526 merged · Boot chain caught 2 real infra gaps first (no main→prod deploy trigger under Wait-for-CI with zero main workflows; missing OPENAI_API_KEY) — both Fazal-fixed. Next: Fazal flag ratification + env fixes (audit list) + prod smoke.
 
 ## O0 · NORTH STAR — Claude Code for Business — IN PROGRESS (the objective all others compose into)
 - Bar (Fazal, ratified 2026-07-01 — Track C first-class): an owner hands the Team-Manager a
