@@ -1,3 +1,5 @@
+> **HISTORICAL (archived 2026-07-25, docs-reorg-2)** — superseded; kept for record.
+
 # Viabe Team — Full Session Handoff (2026-06-11)
 
 **Purpose:** seed a fresh session with the complete state of the Viabe Team delivery effort as of 2026-06-11, end of the 6-gap autonomous product build. Read this top-to-bottom; it replaces the prior conversation's context. After reading, run the reconciliation commands in §15 before trusting any specific HEAD/PR claim (memory is never authoritative — the repo is).

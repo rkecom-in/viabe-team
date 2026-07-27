@@ -48,7 +48,7 @@ If the snapshot's HEAD / IN FLIGHT / NEXT ACTION doesn't match what `git log` sh
 | Role | Owns |
 |---|---|
 | **Fazal (CEO)** | All final calls. Product, pricing, privacy/legal, scope, launch. Authorizes every merge (Pillar 7). Can override anything. |
-| **Cowork (delivery captain + audit-after)** | The tracker, sprint progress, status reconciliation, daily briefs, rostering, routing work to CC. Decides within-sprint operational matters using standing rules. **Audits what CC lands (the layer that was Clau's).** |
+| **Cowork (delivery captain + audit-after)** — the seat is named **Clau** (renamed by Fazal 2026-07-22; signals keep `from: cowork` + `alias: clau`) | The tracker, sprint progress, status reconciliation, daily briefs, rostering, routing work to CC. Decides within-sprint operational matters using standing rules. **Audits what CC lands (the layer that was Clau's).** |
 | **Claude Code (implementer)** | Decision role inside a task — implementation approach, code-level design, refactors, library use, tests, bug fixes. Builds + logs + **self-gates** before landing. |
 
 ---

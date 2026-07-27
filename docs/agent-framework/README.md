@@ -53,7 +53,7 @@ Package root: `apps/team-orchestrator/src/orchestrator/agent_framework/`
 | `reference_plugin.py` | The canonical worked example (a read-only proposer). | `BusinessContextReader` |
 | `README.md` | In-package quick-start (the 5-step guide). | — |
 
-Related (used, not part of the contract): `docs/agent-framework-build-sales-recovery.md` (from-scratch
+Related (used, not part of the contract): `docs/agent-framework/build-sales-recovery.md` (from-scratch
 tutorial, incl. fresh-Mac setup); `tests/agent/test_agent_framework.py` (the framework's own tests).
 
 ---
@@ -103,7 +103,7 @@ is a deliberate reviewed code change (new gated cap ⇒ also add to `GATED_CAPAB
 ## 5. Build a module
 
 Full from-scratch walkthrough (incl. a fresh-Mac toolchain: Homebrew → git/gh → uv → `uv sync`, then the
-Sales Recovery example): **`docs/agent-framework-build-sales-recovery.md`**.
+Sales Recovery example): **`docs/agent-framework/build-sales-recovery.md`**.
 
 The shape (see `reference_plugin.py` for the minimal real one):
 
@@ -247,7 +247,7 @@ arbitrary code*.
 ## 12. For Codex / a new author — the checklist
 
 1. Read this doc + `agent_framework/README.md` + `reference_plugin.py`.
-2. Follow `docs/agent-framework-build-sales-recovery.md` (setup → write → verify).
+2. Follow `docs/agent-framework/build-sales-recovery.md` (setup → write → verify).
 3. Declare only the capabilities you need (§4); gated ⇒ you need the `EXECUTOR` role.
 4. Reach every side effect through the `gate` — never a direct import.
 5. `assert_conforms(YourModule())` + your own fake-injected logic tests must pass.

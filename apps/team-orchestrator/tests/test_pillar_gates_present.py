@@ -1,6 +1,6 @@
 """VT-107 — guard the CI Pillar gates from SILENT removal.
 
-The edge-case coverage manifest (docs/edge-case-coverage-manifest.md) leans on 11 structural
+The edge-case coverage manifest (docs/verification/edge-case-coverage-manifest.md) leans on 11 structural
 `gate-no-*` / `gate-*` jobs in .github/workflows/ci.yml as the enforcement layer for several
 failure-mode categories (Pillar 1 no-LLM-in-deterministic, Pillar 7 no-price-literals, RLS
 no-direct-tenant-db, …). A gate deleted by accident would silently drop that enforcement and the

@@ -3,7 +3,7 @@
 > **📖 Canonical document** (VT-119)
 >
 > Authoritative for: **operational procedures** (production incident response).
-> NOT authoritative for: architectural decisions (→ `docs/adr/`) or current architecture (→ `docs/Viabe_Team_Technical_Reference_v1_0.md`).
+> NOT authoritative for: architectural decisions (→ `docs/adr/`) or current architecture (→ `docs/archive/Viabe_Team_Technical_Reference_v1_0.md`).
 > Source-of-truth hierarchy: **parallel** to the Technical Reference (procedures, not architecture).
 > Update protocol: one runbook per incident class (per `0000-template.md`); each drills ≥ once before the Reports-Jun15 launch.
 > Last reviewed: 2026-06-06 · Next review: pre-launch drill pass.
@@ -26,9 +26,9 @@ Operator-facing runbooks for production incidents. Each file follows the templat
 | [pii-redaction-failure.md](pii-redaction-failure.md) | PII redact helper missing / regression | NOT YET DRILLED |
 | [operator-jwt-compromise.md](operator-jwt-compromise.md) | OPERATOR_JWT_SECRET leaked | NOT YET DRILLED |
 
-## Related clau-internal runbooks
+## Related runbooks (migrated from docs/clau/)
 
-- `docs/clau/admin-endpoints-runbook.md` (VT-224) — admin endpoints reference
-- `docs/clau/sheet-integration-runbook.md` (VT-222) — Sheet connector lifecycle
-- `docs/clau/dev-env-runbook.md` — dev environment Railway/Vercel
-- `docs/clau/region-verify-runbook.md` (VT-169) — Supabase region residency
+- `docs/runbooks/admin-endpoints-runbook.md` (VT-224) — admin endpoints reference
+- `docs/runbooks/sheet-integration-runbook.md` (VT-222) — Sheet connector lifecycle
+- `docs/runbooks/dev-env-runbook.md` — dev environment Railway/Vercel
+- `docs/runbooks/region-verify-runbook.md` (VT-169) — Supabase region residency

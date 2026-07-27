@@ -111,7 +111,7 @@ Every Integration Agent connector MUST be zero-manual-paste after OAuth. ADR-000
 - Shopify (VT-208 / VT-213): OAuth → Admin API auto-subscribes webhook topics
 - Future connectors (Stripe, Razorpay, etc.): same constraint applies at brief time
 
-`setup_push` + `apps_script_template` (VT-207 PR-1 substrate) deprecated; kept for backward compat with pre-VT-222 tenants. Existing Apps-Script-onboarded tenants migrate via opt-in re-OAuth grants per `docs/clau/sheet-integration-runbook.md`.
+`setup_push` + `apps_script_template` (VT-207 PR-1 substrate) deprecated; kept for backward compat with pre-VT-222 tenants. Existing Apps-Script-onboarded tenants migrate via opt-in re-OAuth grants per `docs/runbooks/sheet-integration-runbook.md`.
 
 ## 6. Auth model
 
@@ -126,7 +126,7 @@ Per-tenant data isolation via Supabase RLS (`app_current_tenant()` policy). Oper
 
 Two layers:
 
-- **Railway env** — orchestrator runtime config (DATABASE_URL, ANTHROPIC_API_KEY, GOOGLE_OAUTH_*, TWILIO_*, TEAM_ADMIN_API_TOKEN, TEAM_PHONE_ENCRYPTION_KEY, OPERATOR_JWT_SECRET, FAZAL_TENANT_ID, FAZAL_OWNER_UUID, RESEND_API_KEY, TELEGRAM_BOT_TOKEN, etc.). Set via dashboard. Rotation procedures per-secret in `docs/clau/admin-endpoints-runbook.md` (admin token) and `docs/clau/dev-env-runbook.md` (others).
+- **Railway env** — orchestrator runtime config (DATABASE_URL, ANTHROPIC_API_KEY, GOOGLE_OAUTH_*, TWILIO_*, TEAM_ADMIN_API_TOKEN, TEAM_PHONE_ENCRYPTION_KEY, OPERATOR_JWT_SECRET, FAZAL_TENANT_ID, FAZAL_OWNER_UUID, RESEND_API_KEY, TELEGRAM_BOT_TOKEN, etc.). Set via dashboard. Rotation procedures per-secret in `docs/runbooks/admin-endpoints-runbook.md` (admin token) and `docs/runbooks/dev-env-runbook.md` (others).
 - **`.viabe/secrets/*.env`** — local dev only; subshell-source pattern (`( set -a; source ../../.viabe/secrets/supabase-dev.env; set +a; ./.venv/bin/python ... )`). NEVER `export` into parent shell. NEVER commit to git.
 
 CL-390 cluster: phone encryption key (`TEAM_PHONE_ENCRYPTION_KEY`) stays in orchestrator process only (defense-in-depth). OAuth refresh tokens encrypted at rest via Fernet wrap (shared helper) using the same key.
