@@ -1,0 +1,14 @@
+# Gitleaks config (created 2026-07-27, promotion #541 unblock).
+#
+# The ONLY allowlist is the Clau business-knowledge research corpus: SAVED THIRD-PARTY
+# PUBLIC WEBPAGES (salesforce.com methodology pages, Reddit threads, PIB releases, Google
+# Business Profile docs). Their embedded front-end build tokens / public GCP browser keys
+# trip generic-api-key + gcp-api-key (54 findings, all third-party HTML) — none are Viabe
+# secrets. CAUTION: this path is exempt — never store ANY Viabe-owned file under
+# archives/business-knowledge/.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Clau research corpus — saved third-party public webpages"
+paths = ['''archives/business-knowledge/.*''']
