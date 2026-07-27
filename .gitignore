@@ -70,3 +70,7 @@ pm_dashboard.html
 # Harness/sim run artifacts (VT-702 e2e sim + gate-run bundles) — machine outputs, never committed
 apps/team-orchestrator/canaries/_reports/
 apps/team-orchestrator/canaries/reports/
+
+# Business-knowledge research corpus (Fazal 2026-07-28): ~200MB of saved third-party pages —
+# kept LOCAL-ONLY (broke Vercel CLI uploads, bloats clones). Never re-commit.
+archives/
