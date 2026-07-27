@@ -1,0 +1,1003 @@
+[
+  {
+    "agent_lesson": "The seasoned move is to turn a GST notice into an evidence-table exercise first. Legal interpretation comes after the facts reconcile.",
+    "agent_targets": [
+      "compliance_agent",
+      "finance_agent",
+      "manager_coo"
+    ],
+    "decision_pressure": "The owner wants a fast reply and may treat the issue as a simple explanation problem. The real operating issue is evidence quality: invoice linkage, month-wise reporting, buyer-side treatment, and whether a later circular is being applied to an earlier year.",
+    "domains": [
+      "compliance",
+      "finance",
+      "manager_coo"
+    ],
+    "evidence_needed": [
+      "GST notice copy and section/category of notice",
+      "Original invoices mapped one-to-one to credit notes",
+      "Credit-note copies with GSTIN, tax value, reason, and date",
+      "GSTR-1 credit-note disclosures for each month",
+      "GSTR-3B output-tax adjustment reconciliation",
+      "Buyer debit notes or written acceptance where available",
+      "Recipient ITC reversal confirmation where relevant",
+      "Post-supply discount agreement/correspondence if discount-related"
+    ],
+    "hard_gate_candidate": "If an owner asks the agent to draft a GST notice response, require notice upload and supporting document checklist before producing a final submission.",
+    "id": "bk001-gst-credit-note-notice-evidence-pack",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/001-bk001-gst-credit-note-notice-evidence-pack.md",
+    "local_file": "archives/business-knowledge/executional/forums/caclubindia_gst_notice_credit_notes_2025.html",
+    "mistake_or_risk": "Do not submit a bare narrative. A weak response without original invoices, credit-note copies, GSTR-1 disclosure proof, output-tax reconciliation, and buyer ITC reversal proof can convert a documentation gap into a demand risk.",
+    "recommended_next_action": "Ask for the notice, original invoice list, credit-note register, GSTR-1 months, GSTR-3B adjustment trail, buyer confirmations/debit notes, and discount/return correspondence. Prepare a reconciliation table before drafting the reply.",
+    "red_flags": [
+      "Notice is a show-cause notice rather than a scrutiny clarification",
+      "Credit notes relate to a prior financial year or after statutory time limits",
+      "Buyer has not reversed ITC where required",
+      "Credit notes are being used to mask bad debt instead of return/discount/deficiency"
+    ],
+    "retrieval_triggers": [
+      "GST notice credit note",
+      "output tax liability reduction",
+      "buyer ITC reversal",
+      "post supply discount",
+      "GSTR-1 credit note evidence"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "A business receives a GST notice questioning reduction of output tax liability through credit notes. The department asks whether the credit notes match the correct financial year, comply with CGST credit-note rules, satisfy post-supply discount conditions, and whether recipients reversed ITC where applicable.",
+    "source_type": "forum_operator_voice",
+    "source_url": "https://www.caclubindia.com/forum/supporting-documents-required-for-gst-notice-on-credit-notes-8211-fy-2021-8211-22-613780.asp",
+    "tags": [
+      "gst",
+      "credit_note",
+      "notice",
+      "evidence",
+      "compliance",
+      "manager_coo"
+    ],
+    "title": "GST credit-note notice: build the evidence pack before arguing law",
+    "trust_level": "medium"
+  },
+  {
+    "agent_lesson": "A finance-grade answer separates tax entitlement timing from cashflow pain. The agent should propose collections/vendor controls, not risky return positions.",
+    "agent_targets": [
+      "compliance_agent",
+      "finance_agent",
+      "manager_coo"
+    ],
+    "decision_pressure": "The owner has cashflow stress and wants to reduce cash payment by claiming expected ITC. The compliance risk is that ITC not reflected in GSTR-2B can trigger notices/litigation.",
+    "domains": [
+      "compliance",
+      "finance",
+      "manager_coo"
+    ],
+    "evidence_needed": [
+      "Purchase register with invoice dates and GSTINs",
+      "Current GSTR-2B snapshot",
+      "GSTR-2A only as diagnostic support, not claim basis",
+      "Supplier filing status and written commitment",
+      "Cashflow impact amount"
+    ],
+    "hard_gate_candidate": "Before suggesting GSTR-3B ITC claim amounts, require GSTR-2B reconciliation; flag non-2B ITC as CA-review-only.",
+    "id": "bk002-gstr2b-itc-late-supplier-cashflow",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/002-bk002-gstr2b-itc-late-supplier-cashflow.md",
+    "local_file": "archives/business-knowledge/executional/forums/caclubindia_gstr3b_itc_supplier_late_filing_2025.html",
+    "mistake_or_risk": "Do not advise claiming ITC merely because the supplier promised to file later or because GSTR-2A appears higher. Treat supplier delay as a vendor-control and cashflow issue, not a return-filing shortcut.",
+    "recommended_next_action": "Reconcile purchase register against GSTR-2B, pay the uncovered liability through cash if needed, and move the missing ITC to next-period follow-up. Escalate supplier payment holds or vendor scorecards for repeat offenders.",
+    "red_flags": [
+      "Owner asks to claim non-2B ITC because cash is tight",
+      "Large vendor repeatedly files late",
+      "Material ITC gap could create working-capital stress",
+      "The filing deadline is near and no CA has reviewed the position"
+    ],
+    "retrieval_triggers": [
+      "supplier filed GST late",
+      "GSTR-2B not showing ITC",
+      "can I claim ITC in 3B",
+      "cash payment due to missing ITC"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "A buyer has purchase invoices, but the supplier files late, so the ITC is visible in dynamic GSTR-2A or expected soon but is not available in GSTR-2B for the current 3B filing.",
+    "source_type": "forum_operator_voice",
+    "source_url": "https://www.caclubindia.com/forum/gst-3b-input-tax-credit-612404.asp",
+    "tags": [
+      "gst",
+      "itc",
+      "gstr2b",
+      "cashflow",
+      "supplier_followup",
+      "compliance"
+    ],
+    "title": "GSTR-2B ITC not reflected: cashflow pressure is not permission to overclaim",
+    "trust_level": "medium"
+  },
+  {
+    "agent_lesson": "The Finance agent should be honest about bad news: GST cash leakage may not be recoverable from government just because the debtor defaulted. The COO move is prevention: credit checks, advance terms, milestone billing, and receivables discipline.",
+    "agent_targets": [
+      "finance_agent",
+      "compliance_agent",
+      "manager_coo"
+    ],
+    "decision_pressure": "This is emotionally painful because cash never came in but tax was already paid. The owner may ask for a portal workaround or reversal.",
+    "domains": [
+      "finance",
+      "compliance",
+      "manager_coo"
+    ],
+    "evidence_needed": [
+      "Original invoice and GST payment month",
+      "Proof of supply/delivery",
+      "Customer ledger and aging",
+      "Customer dispute/cancellation correspondence",
+      "Credit-note eligibility reason, if any",
+      "MSME/Udyam registration if available",
+      "Collections attempts, demand notices, and any negotiated waiver"
+    ],
+    "hard_gate_candidate": "Any advice to reverse output GST on non-payment requires CA-review gate and a valid statutory reason.",
+    "id": "bk004-output-gst-paid-customer-default",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/003-bk004-output-gst-paid-customer-default.md",
+    "local_file": "archives/business-knowledge/executional/forums/caclubindia_output_gst_bad_debts_2019.html",
+    "mistake_or_risk": "Do not imply that unpaid customer debt automatically reverses output GST. Unless a valid credit-note/refund route exists for a permitted reason and within applicable limits, the path is collections/accounting, not tax reversal.",
+    "recommended_next_action": "Classify the case as a commercial dispute, return/deficiency, negotiated waiver or discount, or true bad debt. Keep three workstreams separate: receivables recovery through aging review, demand/payment plan and MSME Samadhaan or legal escalation where eligible; accounting write-off; and CA-reviewed GST treatment based on a valid statutory reason rather than non-payment alone.",
+    "red_flags": [
+      "Owner asks to reverse sale only because payment did not arrive",
+      "Amount is material to cashflow",
+      "Customer has vanished or GSTIN cancelled",
+      "Old invoice exceeds credit-note timing limits",
+      "A quality dispute, return, or documented waiver may require different treatment"
+    ],
+    "retrieval_triggers": [
+      "GST paid customer not paid",
+      "output GST bad debt",
+      "reverse sales bill unpaid invoice",
+      "claim GST back debtor default",
+      "bad debt GST credit note",
+      "MSME Samadhaan debtor"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "The business supplied goods/services, paid output GST, but the customer did not pay for more than a year. The owner asks how to get the output GST back.",
+    "source_type": "forum_operator_voice",
+    "source_url": "https://www.caclubindia.com/forum/output-gst-claim-on-bad-debts-514602.asp",
+    "tags": [
+      "gst",
+      "bad_debt",
+      "cashflow",
+      "collections",
+      "receivables"
+    ],
+    "title": "Output GST paid but customer defaulted: tax liability and receivable recovery are separate",
+    "trust_level": "medium"
+  },
+  {
+    "agent_lesson": "The COO should not treat MSME delayed payment as an accounts-only issue. It is a working-capital, supplier-trust, audit-disclosure, and legal-escalation issue.",
+    "agent_targets": [
+      "finance_agent",
+      "compliance_agent",
+      "manager_coo"
+    ],
+    "decision_pressure": "Finance wants clean books; procurement wants longer terms; the COO fears damaging supplier relationships or exposing historical non-compliance.",
+    "domains": [
+      "finance",
+      "compliance",
+      "manager_coo"
+    ],
+    "evidence_needed": [
+      "Vendor Udyam/MSME status",
+      "Invoice date and acceptance/deemed acceptance date",
+      "PO payment terms",
+      "Actual payment date",
+      "Interest computation basis",
+      "Year-end MSME disclosure working"
+    ],
+    "hard_gate_candidate": "For vendors marked MSME, trigger receivables/payables alerts before the statutory danger zone.",
+    "id": "bk005-msme-delayed-payment-interest-and-relationship-pressure",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/004-bk005-msme-delayed-payment-interest-and-relationship-pressure.md",
+    "local_file": "archives/business-knowledge/executional/forums/caclubindia_msme_delayed_payment_interest_2013.html",
+    "mistake_or_risk": "Do not assume a 60-day PO overrides MSME delayed-payment discipline. Also do not ignore interest exposure merely because the vendor has not demanded it.",
+    "recommended_next_action": "Identify MSME vendors, map invoice acceptance dates, calculate aging beyond the applicable window, disclose/provide as advised by CA, and renegotiate payment process. For key vendors, set an escalation workflow before day 30/40 instead of discovering exposure at year-end.",
+    "red_flags": [
+      "Large accumulated unpaid MSME interest exposure",
+      "Critical supplier is MSME and payments are routinely late",
+      "Auditor asks for MSME disclosure",
+      "Vendor threatens MSEFC/Samadhaan filing"
+    ],
+    "retrieval_triggers": [
+      "MSME payment after 45 days",
+      "interest on delayed MSME payment",
+      "MSMED Act supplier payment",
+      "MSEFC risk"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "A company pays MSME creditors after the statutory outer window while purchase orders may show longer commercial credit terms. The question is whether interest should be provided or paid, even if suppliers do not demand it.",
+    "source_type": "forum_operator_voice",
+    "source_url": "https://www.caclubindia.com/forum/urgent-interest-on-msme-266538.asp",
+    "tags": [
+      "msme",
+      "delayed_payment",
+      "working_capital",
+      "interest",
+      "collections"
+    ],
+    "title": "MSME delayed payment: 45-day law collides with buyer relationship pressure",
+    "trust_level": "medium"
+  },
+  {
+    "agent_lesson": "The seasoned response is procedural discipline: never wing a statutory-payment notice. Build an invoice-wise brief, decide whether to contest or settle, and preserve proof of reply.",
+    "agent_targets": [
+      "finance_agent",
+      "compliance_agent",
+      "manager_coo"
+    ],
+    "decision_pressure": "The buyer wants to avoid penalty/interest and may blame downstream non-payment, pandemic, cashflow, or internal process delays.",
+    "domains": [
+      "finance",
+      "compliance",
+      "manager_coo"
+    ],
+    "evidence_needed": [
+      "MSEFC/Samadhaan notice",
+      "Supplier Udyam/MSME certificate",
+      "Invoice-wise ledger",
+      "Goods/service acceptance or dispute proof",
+      "Payment proof and pending amount",
+      "Correspondence showing reason for delay",
+      "Response submission proof"
+    ],
+    "hard_gate_candidate": "If owner mentions MSEFC, MSME Samadhaan, or statutory delayed-payment notice, route to Finance + Compliance and request documents before drafting.",
+    "id": "bk006-msefc-notice-response-playbook",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/005-bk006-msefc-notice-response-playbook.md",
+    "local_file": "archives/business-knowledge/executional/forums/caclubindia_msefc_delayed_payment_notice_2021.html",
+    "mistake_or_risk": "Do not ignore the notice or send an informal reply without documentary evidence. Do not rely only on relationship narratives if invoices, acceptance, and payment delay are clear.",
+    "recommended_next_action": "Prepare a formal response with invoice-wise facts, acceptance/dispute status, payment history, reason for delay, settlement proposal where appropriate, and proof of submission/receipt through the correct channel. Escalate to counsel/CA for drafting if amount is material.",
+    "red_flags": [
+      "Notice deadline is near",
+      "No documented dispute was raised before the complaint",
+      "Multiple MSME vendors have similar aging",
+      "Claim includes significant interest"
+    ],
+    "retrieval_triggers": [
+      "MSEFC notice",
+      "MSME Samadhaan complaint",
+      "delayed payment notice supplier",
+      "reply to MSE council"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "A buyer receives a notice from the MSE council because a supplier filed a delayed-payment complaint through MSME Samadhaan/MSEFC.",
+    "source_type": "forum_operator_voice",
+    "source_url": "https://www.caclubindia.com/experts/notice-for-delayed-payment-of-mse-by-msefc-2857399.asp",
+    "tags": [
+      "msme",
+      "msefc",
+      "samadhaan",
+      "notice",
+      "dispute_response"
+    ],
+    "title": "MSEFC notice: respond with facts, proof, and settlement posture",
+    "trust_level": "medium"
+  },
+  {
+    "agent_lesson": "A strong Marketing agent grows without contaminating trust. The COO should reject conversion tactics that create future complaints, refunds, platform penalties, or regulator exposure.",
+    "agent_targets": [
+      "marketing_agent",
+      "compliance_agent",
+      "manager_coo"
+    ],
+    "decision_pressure": "Short-term conversion metrics may improve, but regulatory and reputation risk rises if users are misled, manipulated, or pushed into actions they did not intend.",
+    "domains": [
+      "marketing",
+      "compliance",
+      "manager_coo"
+    ],
+    "evidence_needed": [
+      "Screenshot or copy of proposed UI/message",
+      "Full price breakdown",
+      "Consent/opt-in flow",
+      "Cancellation/refund flow",
+      "A/B test hypothesis and success metric",
+      "Customer complaint history"
+    ],
+    "hard_gate_candidate": "Run dark-pattern checks before approving campaign copy, checkout changes, subscription flows, or price experiments.",
+    "id": "bk009-dark-patterns-growth-pressure",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/008-bk009-dark-patterns-growth-pressure.md",
+    "local_file": "archives/business-knowledge/compliance/pib_dark_patterns_consultation_2023.html",
+    "mistake_or_risk": "Do not recommend tactics that create false urgency/scarcity, sneak items into the basket, shame users, force unrelated actions, trap subscriptions, obscure important information, bait-and-switch outcomes, hide price components, disguise ads, or nag users during a transaction.",
+    "recommended_next_action": "For every growth experiment, ask: is the choice clear, is the price complete upfront, can the user decline, is cancellation as easy as signup, and would the same copy survive a regulator/customer complaint screenshot?",
+    "red_flags": [
+      "Fake countdown or scarcity claim",
+      "Pre-ticked add-on or hidden charge",
+      "Cancellation requires excessive steps",
+      "Ad is disguised as organic/user content",
+      "Owner says competitors do it so we should too"
+    ],
+    "retrieval_triggers": [
+      "false urgency",
+      "dark pattern",
+      "checkout add-on",
+      "subscription cancellation",
+      "drip pricing",
+      "conversion tactic risky"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "A marketing or ecommerce team wants to improve conversion using urgency banners, checkout add-ons, cancellation friction, confusing buttons, disguised ads, drip pricing, or repeated nudges.",
+    "source_type": "official_guidance",
+    "source_url": "https://www.pib.gov.in/Pressreleaseshare.aspx?PRID=1955344&lang=2&reg=48",
+    "tags": [
+      "dark_patterns",
+      "marketing",
+      "ecommerce",
+      "consumer_protection",
+      "conversion"
+    ],
+    "title": "Dark patterns: conversion pressure cannot override consumer choice",
+    "trust_level": "authoritative"
+  },
+  {
+    "agent_lesson": "The Compliance agent should make privacy concrete: data map, consent trail, access controls, opt-out handling, and breach playbook. The Manager should see privacy as operational reliability.",
+    "agent_targets": [
+      "compliance_agent",
+      "marketing_agent",
+      "manager_coo"
+    ],
+    "decision_pressure": "The team wants to use data for marketing and operations quickly. Privacy obligations can feel abstract, but failures show up as bad consent, unclear notices, breach mishandling, child-data risk, and weak access/deletion handling.",
+    "domains": [
+      "compliance",
+      "marketing",
+      "manager_coo"
+    ],
+    "evidence_needed": [
+      "Data inventory by source",
+      "Consent/notice text and timestamp source",
+      "Marketing opt-in/opt-out log",
+      "Data access list",
+      "Vendor/tool list",
+      "Breach response owner and process",
+      "Deletion/access request workflow"
+    ],
+    "hard_gate_candidate": "Before bulk marketing, require consent/opt-in source and opt-out suppression checks.",
+    "id": "bk010-dpdp-readiness-for-smb-digital-operations",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/009-bk010-dpdp-readiness-for-smb-digital-operations.md",
+    "local_file": "archives/business-knowledge/compliance/pib_draft_dpdp_rules_2025.html",
+    "mistake_or_risk": "Do not treat consent as a one-time checkbox or privacy policy as decoration. Data use, notice, security, breach escalation, consent withdrawal, and individual rights handling need operational ownership.",
+    "recommended_next_action": "Map what personal data is collected, why it is used, where it is stored, who can access it, how consent/notice is captured, how opt-out/deletion is handled, and what happens if data is breached. Keep marketing lists tied to consent source.",
+    "red_flags": [
+      "Customer data copied across personal devices or unmanaged sheets",
+      "Marketing list has no opt-in source",
+      "Owner asks to message all contacts without consent basis",
+      "Child/minor data or sensitive context appears",
+      "Possible data breach or accidental disclosure"
+    ],
+    "retrieval_triggers": [
+      "DPDP",
+      "customer data consent",
+      "WhatsApp marketing opt in",
+      "data breach",
+      "delete customer data",
+      "privacy compliance"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "A small business collects customer phone numbers, order history, addresses, preferences, or marketing opt-ins through WhatsApp, forms, sheets, ecommerce, or POS systems.",
+    "source_type": "official_guidance",
+    "source_url": "https://www.pib.gov.in/Pressreleaseshare.aspx?PRID=2090048&lang=2&reg=48",
+    "tags": [
+      "dpdp",
+      "privacy",
+      "consent",
+      "data_breach",
+      "marketing"
+    ],
+    "title": "DPDP readiness: privacy is an operating system, not a footer policy",
+    "trust_level": "authoritative"
+  },
+  {
+    "agent_lesson": "The Marketing agent should optimize for trusted conversations, not blast count. The Manager should enforce consent, suppression, template quality, and support capacity.",
+    "agent_targets": [
+      "marketing_agent",
+      "sales_agent",
+      "compliance_agent",
+      "manager_coo"
+    ],
+    "decision_pressure": "WhatsApp is high-conversion and owner-facing, so teams may push for broad blasts. But user consent, relevance, policy compliance, template quality, and support escalation determine deliverability and trust.",
+    "domains": [
+      "marketing",
+      "sales",
+      "compliance",
+      "manager_coo"
+    ],
+    "evidence_needed": [
+      "Contact source and opt-in basis",
+      "Template name/category/status",
+      "Campaign purpose and customer segment",
+      "Suppression/opt-out list",
+      "Recent complaint or block signals",
+      "Escalation owner for replies"
+    ],
+    "hard_gate_candidate": "All outbound WhatsApp campaigns must pass opt-in/suppression and template-policy checks before send.",
+    "id": "bk011-whatsapp-business-policy-send-discipline",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/010-bk011-whatsapp-business-policy-send-discipline.md",
+    "local_file": "archives/business-knowledge/marketing/whatsapp_business_messaging_policy.html",
+    "mistake_or_risk": "Do not send broad campaigns to contacts without a clear opt-in/relationship basis, ignore opt-outs, use misleading templates, or pretend automated messaging is human support when escalation is needed.",
+    "recommended_next_action": "Segment by consent/source and business purpose, use approved templates where required, keep message promises specific, respect opt-outs immediately, and route complaints/refund/service issues to a human or owner approval path.",
+    "red_flags": [
+      "Owner uploads scraped or purchased contacts",
+      "Campaign includes regulated/prohibited goods or deceptive claims",
+      "Customer has opted out or complained",
+      "Message makes unverifiable discount/urgency claim",
+      "No one can handle replies/escalations"
+    ],
+    "retrieval_triggers": [
+      "WhatsApp campaign",
+      "bulk message customers",
+      "template approval",
+      "opt out",
+      "winback message",
+      "customer support WhatsApp"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "The business wants to send WhatsApp campaigns, reminders, winbacks, or support messages to customers.",
+    "source_type": "platform_policy",
+    "source_url": "https://whatsappbusiness.com/policy/",
+    "tags": [
+      "whatsapp",
+      "marketing",
+      "consent",
+      "templates",
+      "customer_support"
+    ],
+    "title": "WhatsApp business messaging: consent, relevance, and escalation beat blast volume",
+    "trust_level": "high"
+  },
+  {
+    "agent_lesson": "Incentives are operational code for humans and agents. The COO must model their adversarial behavior before deployment.",
+    "agent_targets": [
+      "manager_coo",
+      "finance_agent",
+      "compliance_agent"
+    ],
+    "decision_pressure": "Targets focus attention and improve performance, but people and agents optimize what is measured—even by transferring risk or cost elsewhere.",
+    "domains": [
+      "manager_coo",
+      "finance",
+      "compliance"
+    ],
+    "evidence_needed": [
+      "Intended outcome and causal link from metric",
+      "Gaming and shortcut scenarios",
+      "Risks transferred to other functions or future periods",
+      "Counter-metrics and hard boundaries",
+      "Independent assurance owner",
+      "Behavior and exception monitoring"
+    ],
+    "hard_gate_candidate": "New high-powered targets require gaming analysis, counter-metrics, boundaries, and independent assurance.",
+    "id": "bk063-incentives-risk-and-metric-gaming",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/060-bk063-incentives-risk-and-metric-gaming.md",
+    "local_file": "archives/business-knowledge/manager/decision-making/oecd_risk_management_corporate_governance.pdf",
+    "mistake_or_risk": "Do not approve a target without asking how a rational actor could hit it while harming margin, quality, compliance, cash, trust, or future performance.",
+    "recommended_next_action": "Define the intended business outcome; enumerate gaming paths and externalized risks; pair the target with counter-metrics and non-negotiable boundaries; separate performance ownership from independent assurance; monitor behavior distribution and exceptions, not only the headline KPI.",
+    "red_flags": [
+      "Volume target has no quality or margin floor",
+      "Cost target shifts work or risk off-book",
+      "Collectors or sellers can misrepresent to earn incentive",
+      "Control owner is rewarded by the activity being controlled",
+      "Metric improves while customer complaints or exceptions rise"
+    ],
+    "retrieval_triggers": [
+      "sales incentive",
+      "KPI gaming",
+      "bonus target",
+      "Goodhart",
+      "risk taking incentive"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "The business introduces a sales target, response SLA, collection target, cost reduction, growth bonus, utilization goal, or agent KPI.",
+    "source_type": "oecd_governance_research",
+    "source_url": "https://www.oecd.org/en/publications/risk-management-and-corporate-governance_9789264208636-en.html",
+    "tags": [
+      "incentives",
+      "metric_gaming",
+      "risk_governance",
+      "controls",
+      "compensation"
+    ],
+    "title": "Incentive governance: test how targets can be gamed and which risks they externalize",
+    "trust_level": "high"
+  },
+  {
+    "agent_lesson": "Good selling is not maximum persuasion; it is helping the right customer select the right trade-off, then measuring the relationship that follows.",
+    "agent_targets": [
+      "marketing_agent",
+      "sales_agent",
+      "compliance_agent",
+      "manager_coo"
+    ],
+    "decision_pressure": "Teams fear that honest comparison will reduce conversion, so they optimize acquisition while poor-fit customers underuse, complain, cancel, or suffer avoidable harm.",
+    "domains": [
+      "marketing",
+      "sales",
+      "compliance",
+      "manager_coo"
+    ],
+    "evidence_needed": [
+      "Material benefits, limits, fees, and customer-fit criteria",
+      "Disclosure prominence and comprehension",
+      "Choice distribution and acquisition",
+      "Usage, retention, complaints, and harm",
+      "Results by prior category experience",
+      "Promotion interaction and compliance review"
+    ],
+    "hard_gate_candidate": "Multi-option offers require material-tradeoff disclosure, comprehension checks, downstream fit metrics, and Compliance review.",
+    "id": "bk091-tradeoff-transparency-for-customer-fit",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/087-bk091-tradeoff-transparency-for-customer-fit.md",
+    "local_file": "archives/business-knowledge/research/marketing/hbs_tradeoff_transparency.pdf",
+    "mistake_or_risk": "Do not claim transparency always lifts acquisition: the 393,036-prospect bank experiment found no significant acquisition effect, but changed choices and improved later engagement and retention among account openers; promotion weakened some benefits.",
+    "recommended_next_action": "Identify customer jobs and material trade-offs; present a balanced comparison at the decision point; test comprehension and choice quality; track acquisition separately from product fit, usage, cancellation, complaints, late payment/harm, and promotion interaction; let Compliance validate completeness and prominence.",
+    "red_flags": [
+      "Only advantages are compared",
+      "Disclosure exists in fine print but not the choice interface",
+      "Conversion is measured without downstream fit",
+      "Promotion steers buyers away from suitable options",
+      "Transparency is used to excuse a fundamentally harmful offer"
+    ],
+    "retrieval_triggers": [
+      "show product disadvantages",
+      "customer fit",
+      "reduce cancellations",
+      "transparent sales",
+      "compare plans honestly"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "Several products or plans suit different customers, and acquisition messaging can simplify the choice by emphasizing benefits while obscuring meaningful trade-offs.",
+    "source_type": "large_scale_randomized_field_experiment",
+    "source_url": "https://www.hbs.edu/ris/Publication%20Files/20-013_Jan_2021_revision_5e19ba8f-9ced-4fdc-b69f-fc3e19fdbd23.pdf",
+    "tags": [
+      "tradeoff_transparency",
+      "customer_fit",
+      "retention",
+      "offer_design",
+      "disclosure"
+    ],
+    "title": "Offer design: disclose meaningful trade-offs to improve customer fit, usage, and retention",
+    "trust_level": "high"
+  },
+  {
+    "agent_lesson": "Authentic reputation is a compounding asset. Marketing grows verified proof; Compliance prevents deceptive collection; the Manager rejects shortcuts that poison trust.",
+    "agent_targets": [
+      "marketing_agent",
+      "compliance_agent",
+      "manager_coo"
+    ],
+    "decision_pressure": "Fake-review tactics can appear cheap and competitors may seem to use them, while detection, platform removal, consumer deception, and lasting reputation damage arrive later.",
+    "domains": [
+      "marketing",
+      "compliance",
+      "manager_coo"
+    ],
+    "evidence_needed": [
+      "Verified transaction or service relationship",
+      "Review solicitation wording and timing",
+      "Platform policy and applicable consumer law",
+      "Rating/time/text/device/vendor anomaly pattern",
+      "Access logs and third-party instructions",
+      "Underlying service and complaint evidence"
+    ],
+    "hard_gate_candidate": "Review-generation programmes require verified-customer eligibility, neutral solicitation, platform/legal review, vendor controls, and anomaly monitoring.",
+    "id": "bk093-review-authenticity-and-manipulation-risk",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/089-bk093-review-authenticity-and-manipulation-risk.md",
+    "local_file": "archives/business-knowledge/research/marketing/nber_promotional_reviews_w18340.pdf",
+    "mistake_or_risk": "Do not infer that every unusual review is fake. The study found patterns consistent with manipulation by comparing open and transaction-verified hotel platforms and incentives; it did not directly observe each review's author.",
+    "recommended_next_action": "Request reviews neutrally after verified transactions; prohibit staff/vendor fabrication and competitor attacks; preserve consent and platform rules; monitor bursts, duplication, extreme-rating patterns, unverifiable transactions, and vendor access; investigate before action; fix root-cause service problems.",
+    "red_flags": [
+      "Vendor guarantees a rating or review volume",
+      "Employees review their own business",
+      "Negative competitor reviews originate near campaign activity",
+      "Incentives are conditional on positive sentiment",
+      "Anomaly is declared fraud without investigation"
+    ],
+    "retrieval_triggers": [
+      "get more reviews",
+      "buy Google reviews",
+      "fake competitor reviews",
+      "review manipulation",
+      "online reputation strategy"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "Online reviews materially affect discovery and trust, creating pressure to manufacture positive proof or attack competitors.",
+    "source_type": "peer_reviewed_empirical_platform_comparison",
+    "source_url": "https://www.nber.org/papers/w18340",
+    "tags": [
+      "online_reviews",
+      "reputation",
+      "fraud",
+      "platform_policy",
+      "verification"
+    ],
+    "title": "Review strategy: build verified customer proof and detect incentive-driven manipulation",
+    "trust_level": "high"
+  },
+  {
+    "agent_lesson": "Marketing may test discovery, but Compliance protects informed choice and the Manager rejects revenue mechanisms that convert transparency into customer harm.",
+    "agent_targets": [
+      "marketing_agent",
+      "compliance_agent",
+      "manager_coo"
+    ],
+    "decision_pressure": "Short-term revenue creates pressure to ship the treatment before measuring whether customers understood the choice or later returned, complained, churned, or lost trust.",
+    "domains": [
+      "marketing",
+      "compliance",
+      "manager_coo"
+    ],
+    "evidence_needed": [
+      "Exact element removed, delayed, or deprioritized",
+      "Materiality to customer choice",
+      "Findability and comprehension by segment",
+      "Conversion, contribution, returns, and cancellation",
+      "Complaints, support contacts, and repeat behaviour",
+      "Current consumer-law and platform review"
+    ],
+    "hard_gate_candidate": "Tests that reduce price, term, option, or cancellation visibility require comprehension, downstream-harm metrics, and Compliance approval.",
+    "id": "bk097-search-friction-transparency-guardrail",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/093-bk097-search-friction-transparency-guardrail.md",
+    "local_file": "archives/business-knowledge/research/hbs/19-080_aae30b91-4631-422c-b843-b55e7db9e3ae.pdf",
+    "mistake_or_risk": "Do not deliberately hide material prices, terms, eligibility, recurring charges, cancellation routes, or safer alternatives. A profitable friction can be a dark pattern or a deferred service and reputation cost.",
+    "recommended_next_action": "Classify the affected information; test task completion and comprehension with representative users; segment new and experienced customers; measure contribution alongside findability, choice quality, returns, cancellation, complaints, support load, and repeat behaviour; obtain current consumer-law review.",
+    "red_flags": [
+      "Team celebrates price lift without comprehension data",
+      "Cancellation or cheaper options require excessive steps",
+      "Vulnerable or inexperienced users are disproportionately affected",
+      "Material information exists only in fine print",
+      "A/B test horizon ends before returns or churn appear"
+    ],
+    "retrieval_triggers": [
+      "hide discounts conversion",
+      "dark pattern test",
+      "search friction ecommerce",
+      "make cheaper plan less visible",
+      "conversion versus transparency"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "An interface test makes discounts, lower-priced options, cancellation, or comparison less visible and appears to improve conversion or average selling price.",
+    "source_type": "retailer_field_experiments",
+    "source_url": "https://www.hbs.edu/ris/download.aspx?name=19-080.pdf",
+    "tags": [
+      "digital_merchandising",
+      "search_friction",
+      "consumer_transparency",
+      "dark_patterns",
+      "retention"
+    ],
+    "title": "Digital merchandising: treat profitable search friction as a transparency risk",
+    "trust_level": "high"
+  },
+  {
+    "agent_lesson": "Compliance owns the requirement map and evidence; technical specialists implement controls; Finance quantifies exposure; the Manager prioritizes continuity and accountable ownership.",
+    "agent_targets": [
+      "compliance_agent",
+      "manager_coo",
+      "finance_agent"
+    ],
+    "decision_pressure": "Limited capacity encourages either postponement or buying a complex tool before inventory, access, patching, backup, logging, vendor, and response basics are controlled.",
+    "domains": [
+      "compliance",
+      "manager_coo",
+      "finance"
+    ],
+    "evidence_needed": [
+      "Critical-service, asset, data, and dependency inventory",
+      "Named owner and risk-ranked remediation plan",
+      "MFA, patch, endpoint, email, and access evidence",
+      "Quarterly access review and immediate offboarding test",
+      "Backup isolation, restore result, and recovery targets",
+      "Current CERT-In, sector, contractual, and privacy requirements"
+    ],
+    "hard_gate_candidate": "Critical services require an asset owner, MFA/least privilege, supported patching, tested isolated backups, logging, vendor controls, and current legal/sector verification.",
+    "id": "bk105-india-msme-cyber-minimum-control-stack",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/101-bk105-india-msme-cyber-minimum-control-stack.md",
+    "local_file": "archives/business-knowledge/research/compliance/certin_15_msme_cyber_controls.pdf",
+    "mistake_or_risk": "Do not treat a checklist or certification claim as proof of resilience. Verify current CERT-In Directions, sector requirements, log retention/location, incident reporting, and applicable DPDP obligations before deterministic action.",
+    "recommended_next_action": "Map critical business services and assets; name an owner; close the highest-consequence gaps across licensed protection, MFA, secure configuration/patching, least privilege and offboarding, email/domain controls, logs, vendor due diligence, staff training, encrypted offline/offsite backups with restore tests, and annual vulnerability assessment.",
+    "red_flags": [
+      "Shared admin accounts or unlicensed/pirated software",
+      "Departed users retain access",
+      "Backup exists but restoration is untested",
+      "Vendor access has no owner, expiry, or monitoring",
+      "Compliance claim relies only on a tool dashboard"
+    ],
+    "retrieval_triggers": [
+      "cybersecurity checklist MSME India",
+      "CERT-In controls",
+      "small business ransomware",
+      "MSME cyber baseline",
+      "NIST small business"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "An Indian SMB relies on email, cloud tools, endpoints, vendors, customer data, payments, and backups but security work is an unowned collection of software purchases.",
+    "source_type": "official_indian_cyber_guidance_and_standard",
+    "source_url": "https://www.cert-in.org.in/PDF/Elemental_Cyber_Defense_Controls_for_MSME.pdf",
+    "tags": [
+      "cybersecurity",
+      "india",
+      "msme",
+      "cert_in",
+      "business_continuity"
+    ],
+    "title": "India MSME cyber baseline: prioritize the minimum control stack around critical services",
+    "trust_level": "high"
+  },
+  {
+    "agent_lesson": "Compliance determines mutable duties with qualified support; technical responders contain and recover; Finance reconciles loss; the Manager coordinates facts, priorities, and decisions.",
+    "agent_targets": [
+      "compliance_agent",
+      "manager_coo",
+      "finance_agent"
+    ],
+    "decision_pressure": "Teams rush to delete evidence, restore from uncertain backups, communicate unverified facts, or delay escalation until the exact cause and legal classification are known.",
+    "domains": [
+      "compliance",
+      "manager_coo",
+      "finance"
+    ],
+    "evidence_needed": [
+      "Detection time, source, affected identities/assets, and current containment",
+      "Preserved logs, messages, payment and access evidence",
+      "Critical service, data subject, customer, and counterparty impact",
+      "Current reporting/notification deadlines and recipients",
+      "Clean restore point and recovery verification",
+      "Financial reconciliation, lessons, and control-owner actions"
+    ],
+    "hard_gate_candidate": "Cyber incidents require immediate named command, out-of-band communication, evidence preservation, current duty verification, clean recovery validation, and financial reconciliation.",
+    "id": "bk106-cyber-incident-response-and-recovery",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/102-bk106-cyber-incident-response-and-recovery.md",
+    "local_file": "archives/business-knowledge/research/compliance/certin_15_msme_cyber_controls.pdf",
+    "mistake_or_risk": "Do not improvise reporting deadlines or assume every incident has identical obligations. Current CERT-In Directions, sector rules, contracts, law-enforcement needs, insurer terms, and privacy duties must be checked against the facts.",
+    "recommended_next_action": "Activate a named incident lead and out-of-band channel; preserve logs/evidence; contain compromised identities/devices without destroying forensic value; assess affected services/data/transactions; verify reporting and notification duties immediately; restore from trusted backups in priority order; reconcile payments/data; document decisions and corrective controls.",
+    "red_flags": [
+      "Compromised email is used to coordinate response",
+      "Systems are wiped before evidence is preserved",
+      "Backups reconnect before compromise is understood",
+      "Customer assurance is issued before facts are verified",
+      "Reporting is postponed until root cause is certain"
+    ],
+    "retrieval_triggers": [
+      "company hacked what now",
+      "CERT-In incident report",
+      "ransomware response India",
+      "data breach MSME",
+      "restore after cyber attack"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "The business detects account takeover, ransomware, data exposure, suspicious payment instructions, service disruption, or vendor compromise.",
+    "source_type": "official_indian_incident_guidance_and_standard",
+    "source_url": "https://www.cert-in.org.in/PDF/Elemental_Cyber_Defense_Controls_for_MSME.pdf",
+    "tags": [
+      "incident_response",
+      "cert_in",
+      "evidence",
+      "recovery",
+      "cyber_reporting"
+    ],
+    "title": "Cyber incident: contain, preserve evidence, report, recover, and reconcile business impact",
+    "trust_level": "high"
+  },
+  {
+    "agent_lesson": "Finance controls beneficiary and payment changes; Sales verifies customer identity and credit; Compliance owns incident escalation; the Manager supports controls even under executive urgency.",
+    "agent_targets": [
+      "finance_agent",
+      "compliance_agent",
+      "sales_agent",
+      "manager_coo"
+    ],
+    "decision_pressure": "The message looks authentic and urgency discourages independent verification; replying or calling details inside the same message keeps the attacker inside the control loop.",
+    "domains": [
+      "finance",
+      "compliance",
+      "sales",
+      "manager_coo"
+    ],
+    "evidence_needed": [
+      "Original message headers/domain and change request",
+      "Previously verified contact and independent callback record",
+      "Master-data change and maker-checker approvals",
+      "Beneficiary age, test payment, limit, and cooling period",
+      "PO/customer identity and credit verification",
+      "Bank recall, incident, legal, insurer, and regulator escalation path"
+    ],
+    "hard_gate_candidate": "Bank, beneficiary, refund, PO, and material credit changes require independent known-channel verification, dual approval, and logged evidence.",
+    "id": "bk107-bank-detail-change-and-invoice-fraud",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/103-bk107-bank-detail-change-and-invoice-fraud.md",
+    "local_file": "archives/business-knowledge/research/compliance/ic3_vendor_invoice_fraud_2023.html",
+    "mistake_or_risk": "Do not rely on display name, thread history, attached letterhead, caller ID, invoice, or the requesting channel. IC3 cases are US incident intelligence, not Indian prevalence estimates.",
+    "recommended_next_action": "Freeze the change; compare exact domain and master data; independently call a previously verified number; require maker-checker approval; apply a cooling period and low test limit for changed beneficiaries; verify new customer POs and credit through the organization's main contact; rehearse rapid bank recall, evidence preservation, and India-specific reporting escalation.",
+    "red_flags": [
+      "Secrecy or urgency from a senior-looking sender",
+      "Slightly altered domain or reply-to address",
+      "Bank change immediately before a large payment",
+      "Verification uses a number supplied in the same request",
+      "New customer seeks large Net-30/60 goods before independent verification"
+    ],
+    "retrieval_triggers": [
+      "vendor changed bank account",
+      "CEO urgent payment email",
+      "invoice redirection fraud",
+      "fake purchase order",
+      "business email compromise"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "A familiar vendor, customer, executive, employee, lawyer, or new account sends urgent bank-detail, beneficiary, purchase-order, credit-term, refund, or payment instructions.",
+    "source_type": "official_incident_scenarios_and_reporting",
+    "source_url": "https://www.ic3.gov/PSA/2023/PSA230324",
+    "tags": [
+      "business_email_compromise",
+      "invoice_fraud",
+      "beneficiary_change",
+      "dual_approval",
+      "vendor_fraud"
+    ],
+    "title": "Payment fraud: verify beneficiary and credit changes outside the requesting channel",
+    "trust_level": "high"
+  },
+  {
+    "agent_lesson": "Compliance owns specialist legal escalation and programme design; commercial agents recognize and stop risky conversations; the Manager reinforces independent conduct and record discipline.",
+    "agent_targets": [
+      "compliance_agent",
+      "sales_agent",
+      "marketing_agent",
+      "manager_coo"
+    ],
+    "decision_pressure": "Commercially useful discussion can drift into current/future price, customers, territories, output, bid intentions, sensitive costs, boycotts, or coordinated conduct before anyone recognizes the risk.",
+    "domains": [
+      "compliance",
+      "sales",
+      "marketing",
+      "manager_coo"
+    ],
+    "evidence_needed": [
+      "Participants, purpose, agenda, and legal/business rationale",
+      "Information requested, source, sensitivity, and aggregation",
+      "Meeting minutes and any objection/exit record",
+      "Independent bid and pricing decision evidence",
+      "Current agreements and commercial restrictions register",
+      "Current CCI/legal advice for the actual facts"
+    ],
+    "hard_gate_candidate": "Competitor, tender, association, and sensitive-data interactions require approved purpose, topic limits, records, an exit protocol, and current legal escalation.",
+    "id": "bk108-india-competition-contact-and-bid-protocol",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/104-bk108-india-competition-contact-and-bid-protocol.md",
+    "local_file": "archives/business-knowledge/research/compliance/cci_competition_advocacy_2026.pdf",
+    "mistake_or_risk": "Do not make legal conclusions from a card. Indian competition analysis is fact-specific and mutable; vertical restrictions, dominance, joint work, public information, and legitimate associations can require qualified current advice.",
+    "recommended_next_action": "Define prohibited/sensitive topics and an exit/escalation script; preapprove agenda and attendees for competitor/association meetings; keep accurate minutes; never share bid intentions or competitively sensitive non-public data without approved legal structure; maintain an agreement register; review pricing, distribution, exclusivity, tying, and tender practices with current counsel.",
+    "red_flags": [
+      "Competitor asks what price or customer the business will pursue",
+      "Trade association circulates future pricing or output intentions",
+      "Bidders discuss who should win or abstain",
+      "Sensitive discussion is moved off-record",
+      "Commercial agreement has no owner or competition review"
+    ],
+    "retrieval_triggers": [
+      "competitor asked our price",
+      "bid coordination",
+      "trade association meeting",
+      "CCI compliance program",
+      "exclusive distribution competition law India"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "Sales, Marketing, Procurement, or leadership meets competitors through tenders, associations, distributors, joint initiatives, benchmarking, hiring, or informal industry conversations.",
+    "source_type": "official_indian_regulator_guidance",
+    "source_url": "https://www.cci.gov.in/images/publications_booklet/en/competition-advocacy-booklet-2026-english1779277830.pdf",
+    "tags": [
+      "competition_law",
+      "india",
+      "bid_rigging",
+      "trade_association",
+      "pricing"
+    ],
+    "title": "Competition compliance: control competitor contacts, bids, pricing information, and association meetings",
+    "trust_level": "high"
+  },
+  {
+    "agent_lesson": "Finance and Compliance own verification; the Manager protects their independence from teams rewarded for growth.",
+    "agent_targets": [
+      "finance_agent",
+      "compliance_agent",
+      "manager_coo"
+    ],
+    "decision_pressure": "Valuation and fundraising deadlines can make unaudited management reporting feel like an acceptable bridge.",
+    "domains": [
+      "finance",
+      "compliance",
+      "manager_coo"
+    ],
+    "evidence_needed": [
+      "Customer-level ledger and policy",
+      "Contracts, delivery and collections",
+      "Bank, GST and statutory reconciliation",
+      "Related parties and manual journals",
+      "Independent investigation and remediation"
+    ],
+    "hard_gate_candidate": "Financing and acquisition decisions require reconciled revenue, cash and tax evidence plus independent sign-off on material adjustments.",
+    "id": "bk112-gomechanic-independent-financial-truth",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/108-bk112-gomechanic-independent-financial-truth.md",
+    "local_file": "archives/business-knowledge/research/HISTORICAL_BUSINESS_CASES_INDEX.md",
+    "mistake_or_risk": "Do not diagnose fraud from a variance or use reporting for legal conclusions. The transferable failure is weak separation between growth ownership, financial truth and independent assurance.",
+    "recommended_next_action": "Define recognition and cut-off; reconcile contracts, invoices, delivery, collections, bank and tax records; give Finance independent authority; investigate unexplained gaps and correct numbers before financing decisions.",
+    "red_flags": [
+      "Fundraising numbers bypass Finance",
+      "Revenue grows without collections or tax evidence",
+      "Management and statutory reports do not reconcile",
+      "Pressure to recognise incomplete work"
+    ],
+    "retrieval_triggers": [
+      "inflated revenue",
+      "fundraising due diligence",
+      "management accounts unreliable",
+      "GoMechanic",
+      "financial reporting investigation"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "During fundraising, GoMechanic investors said founders misstated facts including revenue and appointed an investigator; a founder acknowledged errors, followed by major layoffs and a distressed acquisition.",
+    "source_type": "founder_admission_investor_statement_and_reported_investigation",
+    "source_url": "https://theprint.in/india/investors-of-indias-gomechanic-seek-audit-into-inflated-financials/1322954/",
+    "tags": [
+      "financial_reporting",
+      "revenue_quality",
+      "due_diligence",
+      "gomechanic",
+      "india",
+      "governance"
+    ],
+    "title": "GoMechanic: growth does not excuse numbers that cannot survive verification",
+    "trust_level": "high"
+  },
+  {
+    "agent_lesson": "Sales owns customer value, Compliance owns assurance, Finance checks reversals, and the Manager treats dispersed warnings as system evidence.",
+    "agent_targets": [
+      "sales_agent",
+      "compliance_agent",
+      "finance_agent",
+      "manager_coo"
+    ],
+    "decision_pressure": "Leaders can call misconduct isolated because the headline metric is strong and cases are dispersed across complaints, refunds, terminations and locations.",
+    "domains": [
+      "sales",
+      "compliance",
+      "finance",
+      "manager_coo"
+    ],
+    "evidence_needed": [
+      "Customer consent and beneficial use",
+      "Complaints, reversals and refunds",
+      "Conduct cases by manager and pressure",
+      "Gaming analysis and counter-metrics",
+      "Escalation and leader response"
+    ],
+    "hard_gate_candidate": "Incentivised customer actions require consent proof, outcome checks, pattern monitoring and independent escalation.",
+    "id": "bk122-wells-fargo-warning-patterns",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/118-bk122-wells-fargo-warning-patterns.md",
+    "local_file": "archives/business-knowledge/research/business_cases/compliance/cfpb_wells_fargo_2016_enforcement.html",
+    "mistake_or_risk": "An ambitious target is not proof of misconduct, and firing frontline staff is not system remediation. The mechanism combines incentive design, warning aggregation, consent proof and leadership response.",
+    "recommended_next_action": "Verify customer consent and beneficial use; aggregate complaints, reversals, refunds and conduct cases by leader/channel; test gaming paths; give Compliance escalation access; hold leaders accountable for pattern response.",
+    "red_flags": [
+      "Sales and complaints rise together",
+      "Many people are fired for one behaviour",
+      "Controls report through Sales",
+      "Consent is inferred from employee action"
+    ],
+    "retrieval_triggers": [
+      "unauthorized accounts",
+      "sales target misconduct",
+      "complaints warning signal",
+      "Wells Fargo scandal",
+      "customer consent controls"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "Wells Fargo used aggressive cross-sell goals while employees opened unauthorised accounts. Enforcement and board findings showed complaints, terminations and escalation failures before full consequences were accepted.",
+    "source_type": "official_enforcement_and_independent_board_findings",
+    "source_url": "https://www.consumerfinance.gov/archive/newsroom/consumer-financial-protection-bureau-fines-wells-fargo-100-million-widespread-illegal-practice-secretly-opening-unauthorized-accounts/",
+    "tags": [
+      "sales_incentives",
+      "consent",
+      "complaints",
+      "wells_fargo",
+      "conduct",
+      "governance"
+    ],
+    "title": "Wells Fargo: complaints and repeated terminations are system-level control evidence",
+    "trust_level": "authoritative"
+  }
+]

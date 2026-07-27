@@ -1,0 +1,3049 @@
+[
+  {
+    "agent_lesson": "The Finance agent should spot when a cashflow problem is actually a receivables-financing problem. For B2B sellers, buyer quality can unlock cheaper capital than the seller could get alone.",
+    "agent_targets": [
+      "finance_agent",
+      "sales_agent",
+      "manager_coo"
+    ],
+    "decision_pressure": "The owner may chase expensive informal credit or over-discount sales. TReDS can convert approved receivables into working capital if buyer/onboarding conditions fit.",
+    "domains": [
+      "finance",
+      "sales",
+      "manager_coo"
+    ],
+    "evidence_needed": [
+      "Udyam/MSME status",
+      "Buyer identity and buyer onboarding status",
+      "Invoice and delivery/service proof",
+      "Buyer acceptance of invoice/factoring unit",
+      "Expected due date and discount cost comparison",
+      "Current working-capital need"
+    ],
+    "hard_gate_candidate": "When receivables aging crosses threshold for MSME B2B sellers, suggest TReDS eligibility check before high-cost borrowing.",
+    "id": "bk007-treds-receivables-discounting-fit",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/006-bk007-treds-receivables-discounting-fit.md",
+    "local_file": "archives/business-knowledge/finance/rbi_treds_faq.html",
+    "mistake_or_risk": "Do not treat TReDS as generic lending. It is receivables discounting with seller, buyer, and financier participation, invoice/factoring-unit acceptance, financier bidding, and settlement flow.",
+    "recommended_next_action": "Check MSME status, buyer eligibility/willingness, invoice acceptance, platform onboarding, and whether the receivable is clean and undisputed. Use TReDS as a cashflow lever especially for strong buyers with slow payment cycles.",
+    "red_flags": [
+      "Buyer disputes delivery/service quality",
+      "Invoice is not accepted by buyer",
+      "Seller is not MSME",
+      "Owner wants to use TReDS for weak/private receivables without buyer acceptance"
+    ],
+    "retrieval_triggers": [
+      "invoice discounting",
+      "TReDS",
+      "corporate buyer not paying yet",
+      "MSME receivables finance",
+      "working capital stuck in invoices"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "An MSME seller has invoices due from corporates, government departments, PSUs, or other buyers, but needs cash before the buyer pays.",
+    "source_type": "official_guidance",
+    "source_url": "https://www.rbi.org.in/scripts/FAQView.aspx/FAQView.aspx/FAQView.aspx?Id=132",
+    "tags": [
+      "treds",
+      "receivables",
+      "working_capital",
+      "msme",
+      "invoice_discounting"
+    ],
+    "title": "TReDS fit: use invoice discounting when buyer quality is stronger than seller cashflow",
+    "trust_level": "authoritative"
+  },
+  {
+    "agent_lesson": "The Marketing agent should optimize for trusted conversations, not blast count. The Manager should enforce consent, suppression, template quality, and support capacity.",
+    "agent_targets": [
+      "marketing_agent",
+      "sales_agent",
+      "compliance_agent",
+      "manager_coo"
+    ],
+    "decision_pressure": "WhatsApp is high-conversion and owner-facing, so teams may push for broad blasts. But user consent, relevance, policy compliance, template quality, and support escalation determine deliverability and trust.",
+    "domains": [
+      "marketing",
+      "sales",
+      "compliance",
+      "manager_coo"
+    ],
+    "evidence_needed": [
+      "Contact source and opt-in basis",
+      "Template name/category/status",
+      "Campaign purpose and customer segment",
+      "Suppression/opt-out list",
+      "Recent complaint or block signals",
+      "Escalation owner for replies"
+    ],
+    "hard_gate_candidate": "All outbound WhatsApp campaigns must pass opt-in/suppression and template-policy checks before send.",
+    "id": "bk011-whatsapp-business-policy-send-discipline",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/010-bk011-whatsapp-business-policy-send-discipline.md",
+    "local_file": "archives/business-knowledge/marketing/whatsapp_business_messaging_policy.html",
+    "mistake_or_risk": "Do not send broad campaigns to contacts without a clear opt-in/relationship basis, ignore opt-outs, use misleading templates, or pretend automated messaging is human support when escalation is needed.",
+    "recommended_next_action": "Segment by consent/source and business purpose, use approved templates where required, keep message promises specific, respect opt-outs immediately, and route complaints/refund/service issues to a human or owner approval path.",
+    "red_flags": [
+      "Owner uploads scraped or purchased contacts",
+      "Campaign includes regulated/prohibited goods or deceptive claims",
+      "Customer has opted out or complained",
+      "Message makes unverifiable discount/urgency claim",
+      "No one can handle replies/escalations"
+    ],
+    "retrieval_triggers": [
+      "WhatsApp campaign",
+      "bulk message customers",
+      "template approval",
+      "opt out",
+      "winback message",
+      "customer support WhatsApp"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "The business wants to send WhatsApp campaigns, reminders, winbacks, or support messages to customers.",
+    "source_type": "platform_policy",
+    "source_url": "https://whatsappbusiness.com/policy/",
+    "tags": [
+      "whatsapp",
+      "marketing",
+      "consent",
+      "templates",
+      "customer_support"
+    ],
+    "title": "WhatsApp business messaging: consent, relevance, and escalation beat blast volume",
+    "trust_level": "high"
+  },
+  {
+    "agent_lesson": "The Marketing agent should win local discovery through completeness and trust, not representation hacks. The COO should treat GBP as an operating asset.",
+    "agent_targets": [
+      "marketing_agent",
+      "sales_agent",
+      "manager_coo"
+    ],
+    "decision_pressure": "Local visibility matters, but inaccurate profile representation can cause suspension, customer confusion, duplicate-profile problems, and weak trust signals.",
+    "domains": [
+      "marketing",
+      "sales",
+      "manager_coo"
+    ],
+    "evidence_needed": [
+      "Real-world business name/signage",
+      "Address or service-area operating model",
+      "Primary phone/website",
+      "Business category and service list",
+      "Hours and holiday hours",
+      "Review response SOP",
+      "Duplicate profile check"
+    ],
+    "hard_gate_candidate": "Before GBP optimization, check for representation-rule violations and duplicate listing risk.",
+    "id": "bk012-google-business-profile-representation-discipline",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/011-bk012-google-business-profile-representation-discipline.md",
+    "local_file": "archives/business-knowledge/marketing/google_business_profile_guidelines.html",
+    "mistake_or_risk": "Do not keyword-stuff the business name, create duplicate profiles, misrepresent address/service area, use categories as tag spam, or add promotional claims where representation rules require real-world accuracy.",
+    "recommended_next_action": "Align profile name, address/service area, phone, hours, category, website, and photos with the real-world business. Then improve discovery through reviews, posts, photos, category fit, service/menu/product detail, and response discipline.",
+    "red_flags": [
+      "Owner wants to add city/service keywords to business name",
+      "Multiple listings for same location/business",
+      "Virtual office or fake address risk",
+      "Profile suspended or verification failed",
+      "Reviews mention wrong hours/location/service"
+    ],
+    "retrieval_triggers": [
+      "Google Business Profile",
+      "local SEO",
+      "business name keywords",
+      "Google Maps listing",
+      "duplicate profile",
+      "reviews local business"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "A local business wants better discovery on Google Search/Maps and may be tempted to stuff keywords, duplicate listings, misstate service areas, or add promotional text into identity fields.",
+    "source_type": "platform_policy",
+    "source_url": "https://support.google.com/business/answer/3038177?hl=en",
+    "tags": [
+      "google_business_profile",
+      "local_marketing",
+      "reviews",
+      "representation",
+      "seo"
+    ],
+    "title": "Google Business Profile: local growth starts with accurate representation",
+    "trust_level": "high"
+  },
+  {
+    "agent_lesson": "A seasoned Sales agent starts with a controlled pipeline experiment: named prospects, warm referrals, specific ask, and measured follow-up. Paid attention comes after signal.",
+    "agent_targets": [
+      "sales_agent",
+      "marketing_agent",
+      "manager_coo"
+    ],
+    "decision_pressure": "The owner wants revenue quickly, has limited budget, and may not yet know which channel works. The Sales agent must force a named pipeline before spend.",
+    "domains": [
+      "sales",
+      "marketing",
+      "manager_coo"
+    ],
+    "evidence_needed": [
+      "Named prospect list with source/reason",
+      "Offer and first-pitch script",
+      "Referral ask script",
+      "Follow-up cadence",
+      "Lead source and response tracker",
+      "Owner's existing network/customer conversations"
+    ],
+    "hard_gate_candidate": "Before recommending ad spend for a new business, require target segment, prospect list, offer, and tracking plan.",
+    "id": "bk013-first-customers-prospect-list-referral-loop",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/012-bk013-first-customers-prospect-list-referral-loop.md",
+    "local_file": "archives/business-knowledge/sales/executional/sba_8_ways_find_first_customers.html",
+    "mistake_or_risk": "Do not treat 'marketing' as posting into the void. Early sales needs names, sources, referral asks, warm introductions, and a measurable follow-up cadence.",
+    "recommended_next_action": "Create a first-100 prospect list from previous conversations, local contacts, social connections, past enquiries, nearby businesses, and likely buyers. Ask every warm contact for one referral, run direct outreach, and track response/source before paid spend.",
+    "red_flags": [
+      "Owner wants ads without defining target buyer",
+      "No list of actual people/businesses to contact",
+      "No follow-up cadence after first message",
+      "Discounting before learning buyer objections"
+    ],
+    "retrieval_triggers": [
+      "find first customers",
+      "new business no customers",
+      "who should I contact first",
+      "low budget sales",
+      "referral strategy"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "A new or small business needs its first customers and is tempted to jump straight into ads, discounts, or broad social posting without a concrete prospect list.",
+    "source_type": "official_guidance",
+    "source_url": "https://www.sba.gov/blog/8-ways-find-your-first-customers",
+    "tags": [
+      "first_customers",
+      "prospecting",
+      "referrals",
+      "sales",
+      "low_budget"
+    ],
+    "title": "First customers: build a named prospect list before buying attention",
+    "trust_level": "high"
+  },
+  {
+    "agent_lesson": "The COO move is to treat marketing as an operating system: acquisition, conversion, payment, fulfilment, support, and measurement must be tied together.",
+    "agent_targets": [
+      "sales_agent",
+      "marketing_agent",
+      "finance_agent",
+      "manager_coo"
+    ],
+    "decision_pressure": "The owner may think marketing is only channel/copy. The Manager must connect marketing promises to payment, delivery, returns, staff behavior, and after-sale experience.",
+    "domains": [
+      "sales",
+      "marketing",
+      "manager_coo",
+      "finance"
+    ],
+    "evidence_needed": [
+      "Target segment",
+      "Offer and advantage",
+      "Sales path from discovery to payment",
+      "Channel budget",
+      "Revenue attribution method",
+      "Payment options and costs",
+      "Delivery/return/support SOP",
+      "Review cadence"
+    ],
+    "hard_gate_candidate": "Before approving large campaign spend, require budget, expected revenue, measurement plan, and fulfilment/support readiness.",
+    "id": "bk014-marketing-plan-roi-and-operations-loop",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/013-bk014-marketing-plan-roi-and-operations-loop.md",
+    "local_file": "archives/business-knowledge/sales/executional/sba_marketing_and_sales.html",
+    "mistake_or_risk": "Do not optimise campaigns in isolation. If operations cannot deliver what marketing promises, growth creates refunds, complaints, bad reviews, and repeat-purchase loss.",
+    "recommended_next_action": "Build a one-page plan: target customer, advantage, sales path, annual goal, channel actions, budget, measurement method, payment friction, and post-sale support risks. Review ROI and operational bottlenecks on a fixed cadence.",
+    "red_flags": [
+      "Campaign promises faster delivery than operations can support",
+      "No ROI measurement for offline/word-of-mouth spend",
+      "Payment method is costly or inconvenient for customers",
+      "Support load after campaign is unassigned"
+    ],
+    "retrieval_triggers": [
+      "make marketing plan",
+      "marketing ROI",
+      "sales plan",
+      "operations affects marketing",
+      "campaign budget"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "A business wants more customers but has not connected target market, competitive advantage, sales method, goals, action plan, budget, payment method, and post-sale support into one operating plan.",
+    "source_type": "official_guidance",
+    "source_url": "https://www.sba.gov/business-guide/manage-your-business/marketing-sales",
+    "tags": [
+      "marketing_plan",
+      "roi",
+      "operations",
+      "sales_process",
+      "customer_experience"
+    ],
+    "title": "Marketing plan: sales, operations, and ROI must be reviewed together",
+    "trust_level": "high"
+  },
+  {
+    "agent_lesson": "A seasoned agent does not ask 'which platform should we use?' first. It asks: who has the pain, where do they search, what do they compare against, and why will they switch?",
+    "agent_targets": [
+      "sales_agent",
+      "marketing_agent",
+      "manager_coo"
+    ],
+    "decision_pressure": "Quick action feels productive, but wrong-channel growth burns time and cash. The Sales/Marketing agents must gather just enough market proof before prescribing tactics.",
+    "domains": [
+      "sales",
+      "marketing",
+      "manager_coo"
+    ],
+    "evidence_needed": [
+      "Target buyer profile",
+      "Competitor list and strengths/weaknesses",
+      "Current alternatives and price points",
+      "Customer interviews or enquiry logs",
+      "Demand/location indicators",
+      "Observed objections",
+      "Channel test results"
+    ],
+    "hard_gate_candidate": "For new-channel recommendations, require target buyer, competitor alternatives, and a measurable channel-test hypothesis.",
+    "id": "bk015-market-research-competitive-analysis-before-channel-choice",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/014-bk015-market-research-competitive-analysis-before-channel-choice.md",
+    "local_file": "archives/business-knowledge/sales/executional/sba_market_research_competitive_analysis.html",
+    "mistake_or_risk": "Do not recommend Instagram, WhatsApp, exhibitions, marketplaces, or outbound sales as a default. Channel choice should follow buyer behavior, competitive gaps, and where the business can win.",
+    "recommended_next_action": "Answer demand, market size, economic indicators, location, saturation, and pricing. Then run direct customer research: objections, buying trigger, alternatives, and buying experience gaps. Convert that into positioning and channel choice.",
+    "red_flags": [
+      "Owner copied competitor channel without knowing economics",
+      "No clarity on who buys and why",
+      "Price is set only from cost-plus instinct",
+      "Market is saturated and differentiation is vague"
+    ],
+    "retrieval_triggers": [
+      "which marketing channel",
+      "market research",
+      "competitive analysis",
+      "target customer",
+      "pricing competitors"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "The owner wants to choose sales channels or pricing without first checking demand, market size, buyer location, saturation, alternatives, and competitor strengths.",
+    "source_type": "official_guidance",
+    "source_url": "https://www.sba.gov/business-guide/plan-your-business/market-research-competitive-analysis?toc-variant-a=undefined",
+    "tags": [
+      "market_research",
+      "competitive_analysis",
+      "positioning",
+      "pricing",
+      "sales"
+    ],
+    "title": "Market research: decide channel after demand, competition, and customer proof",
+    "trust_level": "high"
+  },
+  {
+    "agent_lesson": "Local sales growth is often operational discipline disguised as marketing: accurate presence, proof, reviews, and community touchpoints.",
+    "agent_targets": [
+      "sales_agent",
+      "marketing_agent",
+      "manager_coo"
+    ],
+    "decision_pressure": "The owner may chase broad digital ads while nearby ready-to-buy customers cannot find accurate hours, location, photos, reviews, or a clear reason to visit/call.",
+    "domains": [
+      "sales",
+      "marketing",
+      "manager_coo"
+    ],
+    "evidence_needed": [
+      "Google Business Profile status",
+      "NAP consistency across listings",
+      "Review count/rating/recent responses",
+      "Photo freshness",
+      "Local partnership/event list",
+      "Walk-in/call tracking method",
+      "Service radius and nearby customer clusters",
+      "Ticket contribution, repeat interval, and paid CAC ceiling"
+    ],
+    "hard_gate_candidate": "For local businesses, run a local-presence audit before recommending paid acquisition.",
+    "id": "bk016-local-marketing-flywheel-listings-reviews-community",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/015-bk016-local-marketing-flywheel-listings-reviews-community.md",
+    "local_file": "archives/business-knowledge/sales/executional/sba_10_local_marketing_strategies.html",
+    "mistake_or_risk": "Do not start with broad paid campaigns if the local presence is broken. Missing/incorrect listings, weak reviews, poor photos, and no community presence leak high-intent demand.",
+    "recommended_next_action": "Audit local listings, hours, phone, service radius, photos, reviews, local offers, community partnerships, local events, and nearby social targeting. Build a weekly operating rhythm: ask for reviews, post updates, respond to reviews, refresh photos, and track calls/walk-ins. Before paid reach, calculate ticket-level contribution, repeat interval, customer-capture method, geographic radius, and CAC ceiling.",
+    "red_flags": [
+      "Business hours or phone number are wrong online",
+      "Competitors have stronger recent review velocity",
+      "Owner wants city-wide ads before fixing local trust assets",
+      "No process to ask happy customers for reviews",
+      "A thin-margin one-time purchase cannot support projected acquisition cost"
+    ],
+    "retrieval_triggers": [
+      "local marketing",
+      "walk in customers",
+      "Google reviews",
+      "nearby customers",
+      "offline marketing",
+      "community promotion"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "A local business depends on customers within a service radius but is underinvesting in basic local discovery and trust assets.",
+    "source_type": "official_guidance",
+    "source_url": "https://www.sba.gov/blog/10-local-marketing-strategies-work",
+    "tags": [
+      "local_marketing",
+      "reviews",
+      "google_business_profile",
+      "community",
+      "offline"
+    ],
+    "title": "Local marketing flywheel: listings, reviews, community, and nearby reach",
+    "trust_level": "high"
+  },
+  {
+    "agent_lesson": "Offline sales can be a moat when systematised. A trade fair is not a stall; it is a concentrated buyer-acquisition sprint.",
+    "agent_targets": [
+      "sales_agent",
+      "marketing_agent",
+      "finance_agent",
+      "manager_coo"
+    ],
+    "decision_pressure": "Owners may treat exhibitions as branding expenses. The Sales agent should turn them into buyer pipeline systems with pre-event targeting, sample strategy, lead capture, quote follow-up, and reimbursement documentation.",
+    "domains": [
+      "sales",
+      "marketing",
+      "finance",
+      "manager_coo"
+    ],
+    "evidence_needed": [
+      "Udyam Registration Certificate",
+      "Event approval/eligibility",
+      "Target buyer list",
+      "Catalog, rate card, samples",
+      "Lead capture sheet/QR form",
+      "Space rent/travel/publicity/freight receipts",
+      "Post-event enquiry and order tracker"
+    ],
+    "hard_gate_candidate": "Before recommending an exhibition, require event objective, target buyer list, lead-capture plan, and claim-document checklist.",
+    "id": "bk017-msme-pms-trade-fairs-buyer-seller-meets",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/016-bk017-msme-pms-trade-fairs-buyer-seller-meets.md",
+    "local_file": "archives/business-knowledge/sales/executional/msme_procurement_marketing_support_scheme.html",
+    "mistake_or_risk": "Do not recommend trade-fair participation without ROI plan, eligible scheme check, required documents, stall economics, and post-event follow-up.",
+    "recommended_next_action": "Check Udyam eligibility and event fit; define buyer personas; prepare catalog/pricing/sample/QR lead form; schedule pre-event meetings; capture leads by quality; follow up within 48 hours; preserve invoices/receipts/photos/participation proof for subsidy/claim where applicable.",
+    "red_flags": [
+      "No target buyer list before event",
+      "Owner only wants footfall, not lead quality",
+      "No reimbursement document discipline",
+      "Product packaging/catalog is not ready",
+      "Follow-up owner is not assigned"
+    ],
+    "retrieval_triggers": [
+      "trade fair for MSME",
+      "buyer seller meet",
+      "offline B2B sales",
+      "MSME marketing subsidy",
+      "exhibition lead follow up"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "An MSE with Udyam registration wants market access beyond local referrals and online posts. Government PMS support can subsidize trade fairs, exhibitions, vendor development programs, e-commerce adoption, bar code adoption, workshops, and retail-outlet development in defined cases.",
+    "source_type": "official_guidance",
+    "source_url": "https://www.msme.gov.in/offerings/schemes-and-services/details/marketing-promotion-schemes-1-QzMzETMtQWa",
+    "tags": [
+      "msme",
+      "trade_fair",
+      "buyer_seller_meet",
+      "offline_sales",
+      "subsidy"
+    ],
+    "title": "MSME sales expansion: use trade fairs and buyer-seller meets as structured pipeline, not vanity stalls",
+    "trust_level": "authoritative"
+  },
+  {
+    "agent_lesson": "A Sales agent should convert B2B ambition into account-based selling: right role, right occasion, proof, sample discipline, and follow-up math.",
+    "agent_targets": [
+      "sales_agent",
+      "marketing_agent",
+      "manager_coo"
+    ],
+    "decision_pressure": "The owner may send generic cold messages to company inboxes. B2B gifting needs role mapping, seasonality, sample economics, proof, and multi-touch follow-up.",
+    "domains": [
+      "sales",
+      "marketing",
+      "manager_coo"
+    ],
+    "evidence_needed": [
+      "Target company/account list",
+      "Decision-maker role map",
+      "Corporate catalog and price tiers",
+      "MOQ/customization options",
+      "Sample cost and approval process",
+      "Delivery SLA and packaging proof",
+      "GST invoice/payment terms",
+      "Outreach and follow-up tracker"
+    ],
+    "hard_gate_candidate": "Before B2B outreach, require account list, buyer role, pitch angle, catalog, sample policy, and payment-term stance.",
+    "id": "bk018-corporate-gifting-b2b-outbound-pipeline",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/017-bk018-corporate-gifting-b2b-outbound-pipeline.md",
+    "local_file": "archives/business-knowledge/executional/SOURCE_INDEX.md",
+    "mistake_or_risk": "Do not pitch 'corporates' as one blob. Decision-makers vary: HR, admin, procurement, founder office, event teams, office managers, agencies, and department heads.",
+    "recommended_next_action": "Define gifting occasions and order bands; build account list; map likely buyers; prepare a corporate catalog with MOQ, customization, delivery SLA, GST invoice, and sample policy; use LinkedIn/email/calls/referrals/agencies; track touch count, sample-to-order conversion, and seasonal buying windows.",
+    "red_flags": [
+      "Pitch has no occasion/use-case",
+      "No clarity on MOQ, customization, GST invoice, or delivery timeline",
+      "Samples are sent without qualification",
+      "Owner cannot handle credit terms or delayed corporate payment"
+    ],
+    "retrieval_triggers": [
+      "corporate gifting",
+      "B2B clients",
+      "pitch to corporates",
+      "send sample before call",
+      "LinkedIn cold email B2B"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "A premium product brand has a few corporate gifting orders from referrals/inbound and wants to proactively build B2B pipeline.",
+    "source_type": "forum_operator_voice",
+    "source_url": "https://fi.reddit.com/r/smallbusinessindia/comments/1ujeky8/how_do_you_guys_pitch_to_corporates_and_land_b2b/",
+    "tags": [
+      "b2b_sales",
+      "corporate_gifting",
+      "outbound",
+      "samples",
+      "pipeline"
+    ],
+    "title": "Corporate gifting B2B: decision-maker mapping beats generic pitching",
+    "trust_level": "medium"
+  },
+  {
+    "agent_lesson": "The Manager must protect unit economics. Sometimes the right sales tactic is local depth before national reach.",
+    "agent_targets": [
+      "sales_agent",
+      "finance_agent",
+      "manager_coo"
+    ],
+    "decision_pressure": "The owner sees demand outside the city and wants to ship pan-India, but every order may lose money unless packaging, courier, price, and channel are redesigned.",
+    "domains": [
+      "sales",
+      "finance",
+      "manager_coo"
+    ],
+    "evidence_needed": [
+      "Product gross margin",
+      "Packed dimensions and actual weight",
+      "Courier quotes by city/zone",
+      "Damage rate and packaging cost",
+      "Local delivery cost",
+      "Outstation willingness-to-pay",
+      "Repeat/bulk order potential"
+    ],
+    "hard_gate_candidate": "For physical products, require contribution-margin check including packaging, shipping, damage, and payment costs before recommending pan-India expansion.",
+    "id": "bk019-bulky-product-shipping-unit-economics-local-first",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/018-bk019-bulky-product-shipping-unit-economics-local-first.md",
+    "local_file": "archives/business-knowledge/executional/SOURCE_INDEX.md",
+    "mistake_or_risk": "Do not advise geographic scaling only because enquiries exist. If shipping cost exceeds contribution margin, growth amplifies losses.",
+    "recommended_next_action": "Measure packed dimensions and volumetric weight; test multiple couriers/transports; negotiate regular-shipping rates; redesign packaging; separate local and outstation pricing; build local channels first through exhibitions, gifting shops, event planners, decorators, and social proof.",
+    "red_flags": [
+      "Shipping cost is hidden inside product price and erases margin",
+      "Owner accepts outstation orders without zone pricing",
+      "High damage risk product has no packaging SOP",
+      "No local channel has been saturated yet"
+    ],
+    "retrieval_triggers": [
+      "shipping too expensive",
+      "volumetric weight",
+      "pan India delivery margin",
+      "local business shipping",
+      "unit economics ecommerce"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "A handmade/lightweight product looks cheap to ship by weight but is bulky, so volumetric weight makes outstation delivery expensive and destroys margin.",
+    "source_type": "forum_operator_voice",
+    "source_url": "https://dd.reddit.com/r/smallbusinessindia/comments/1qzz5tf/started_a_forever_flowers_business_advice_needed/",
+    "tags": [
+      "shipping",
+      "unit_economics",
+      "local_sales",
+      "pricing",
+      "fulfilment"
+    ],
+    "title": "Bulky low-AOV products: solve shipping economics before scaling geography",
+    "trust_level": "medium"
+  },
+  {
+    "agent_lesson": "A sharp Sales/Marketing agent uses public communities to hear market language before spending money. The moat is better questions, not louder ads.",
+    "agent_targets": [
+      "sales_agent",
+      "marketing_agent",
+      "manager_coo"
+    ],
+    "decision_pressure": "It is faster to write ads from the seller's perspective. But communities reveal how buyers describe pain, alternatives, doubts, and decision triggers.",
+    "domains": [
+      "sales",
+      "marketing",
+      "manager_coo"
+    ],
+    "evidence_needed": [
+      "Target subreddit/community list",
+      "Repeated buyer questions",
+      "Competitor mentions",
+      "Objection themes",
+      "Exact customer language snippets",
+      "Content/ad hypothesis list",
+      "Community rules"
+    ],
+    "hard_gate_candidate": "Before community-based promotion, require a research-first pass and community-rule check.",
+    "id": "bk020-community-listening-for-demand-discovery",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/019-bk020-community-listening-for-demand-discovery.md",
+    "local_file": "archives/business-knowledge/sales/executional/reddit_business_how_to_find_customers.html",
+    "mistake_or_risk": "Do not enter communities only to promote. Treat them as research and trust-building environments. Spammy posting damages reputation and can get removed.",
+    "recommended_next_action": "Search communities for problem phrases, competitor names, buying questions, complaint patterns, and review language. Build a swipe file of buyer words, then convert it into FAQs, content, landing-page copy, outreach hooks, and targeted ad hypotheses. Engage organically only where genuinely useful.",
+    "red_flags": [
+      "Owner wants to post promotional links immediately",
+      "Community rules ban self-promotion",
+      "Research is based on one anecdote",
+      "Ad copy uses seller jargon instead of buyer language"
+    ],
+    "retrieval_triggers": [
+      "where to find customers online",
+      "Reddit marketing",
+      "customer research",
+      "buyer objections",
+      "ad copy ideas"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "The business wants campaign ideas but has not mined public customer conversations for buying questions, objections, comparisons, and vocabulary.",
+    "source_type": "platform_guidance",
+    "source_url": "https://www.business.reddit.com/learning-hub/articles/how-to-find-customers-on-reddit",
+    "tags": [
+      "community_listening",
+      "reddit",
+      "demand_research",
+      "ads",
+      "copywriting"
+    ],
+    "title": "Community listening: find demand language before writing ads",
+    "trust_level": "high"
+  },
+  {
+    "agent_lesson": "The Sales Agent should be a tactic composer, not a tactic repeater. It should choose from named methodologies and route-to-market motions, then innovate by recombining buyer slice, trigger, proof, offer, channel, risk control, and follow-up.",
+    "agent_targets": [
+      "sales_agent",
+      "marketing_agent",
+      "finance_agent",
+      "manager_coo"
+    ],
+    "decision_pressure": "The Sales Agent may be tempted to suggest fashionable tactics such as ads, LinkedIn outreach, influencer marketing, or discounts. The seasoned move is to select the sales motion from constraints and buyer behavior.",
+    "domains": [
+      "sales",
+      "marketing",
+      "finance",
+      "manager_coo"
+    ],
+    "evidence_needed": [
+      "Buyer type and decision-maker",
+      "Ticket size and gross margin",
+      "Sales cycle and urgency",
+      "Current lead sources and conversion rates",
+      "Trust assets available: reviews, samples, proof, certifications",
+      "Fulfilment and support capacity",
+      "Consent/channel constraints",
+      "Payment terms and working-capital risk"
+    ],
+    "hard_gate_candidate": "Before recommending any sales tactic, require buyer type, margin, trust asset, operating capacity, and measurement method.",
+    "id": "bk021-sales-method-selector-and-innovation-matrix",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/020-bk021-sales-method-selector-and-innovation-matrix.md",
+    "local_file": "archives/business-knowledge/sales/methods/SALES_METHODS_TAXONOMY.md",
+    "mistake_or_risk": "Do not recommend a sales tactic because it is popular. A tactic that works for enterprise SaaS may fail for local retail; a marketplace tactic may destroy margin; a trade-fair tactic without follow-up becomes vanity; a WhatsApp blast without consent becomes trust damage.",
+    "recommended_next_action": "Classify the sale first: low-ticket local, high-ticket service, B2B SMB, corporate/enterprise, marketplace/ecommerce, new category, or cashflow-constrained. Then combine one acquisition motion, one trust asset, one offer, one channel, one risk control, and one follow-up cadence.",
+    "red_flags": [
+      "Owner wants ad spend without a target buyer or measurement plan",
+      "The tactic increases orders but destroys contribution margin",
+      "Sales method requires follow-up capacity the business does not have",
+      "Compliance/privacy/platform-policy risks are ignored",
+      "The buyer is a committee but the pipeline is single-threaded"
+    ],
+    "retrieval_triggers": [
+      "increase sales",
+      "sales tactic",
+      "which sales method",
+      "how to get customers",
+      "B2B sales strategy",
+      "local sales strategy",
+      "new sales idea"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "The owner asks how to increase sales, but the business context is incomplete: product type, buyer type, ticket size, margin, trust gap, urgency, channel readiness, and fulfilment capacity are not yet mapped.",
+    "source_type": "local_synthesis",
+    "source_url": "archives/business-knowledge/sales/methods/SALES_METHODS_TAXONOMY.md",
+    "tags": [
+      "sales_methods",
+      "sales_strategy",
+      "method_selection",
+      "innovation",
+      "manager_coo"
+    ],
+    "title": "Sales method selector: choose the motion from buyer, ticket, trust, and margin",
+    "trust_level": "high"
+  },
+  {
+    "agent_lesson": "The first 10 customers teach the business what it is really selling. Sales should be narrow, founder-led, and diagnostic before it becomes scalable.",
+    "agent_targets": [
+      "sales_agent",
+      "marketing_agent",
+      "manager_coo"
+    ],
+    "decision_pressure": "The easy answer is to buy lead lists or increase outreach volume. The better first move is specificity: exact buyer, exact pain, exact trigger, and real named prospects.",
+    "domains": [
+      "sales",
+      "marketing",
+      "manager_coo"
+    ],
+    "evidence_needed": [
+      "Narrow ICP definition",
+      "Named Dream-10 account/person list",
+      "Pain hypothesis and why-now trigger",
+      "Founder credibility or unfair advantage",
+      "Outreach message and response data",
+      "Community/association/event where buyers already gather"
+    ],
+    "hard_gate_candidate": "Before suggesting volume outbound, require ICP, Dream-10 list, pain hypothesis, and learning-call script.",
+    "id": "bk024-first-ten-customers-founder-led-dream-list",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/021-bk024-first-ten-customers-founder-led-dream-list.md",
+    "local_file": "archives/business-knowledge/sales/discussions/hn_first_10_customers_2026.html",
+    "mistake_or_risk": "Do not treat first-10 acquisition as a volume game. If 20 likely buyers will not even talk about the problem, the market/ICP/pain may be wrong.",
+    "recommended_next_action": "Build a Dream-10 list of named accounts/people, map their pains and communities, run founder-led learning outreach, and ask for conversations before pitching. Use replies and silence to refine ICP and offer language.",
+    "red_flags": [
+      "The target buyer is described as everyone",
+      "Founder wants to outsource before doing discovery",
+      "Outreach message is product-led rather than buyer-problem-led",
+      "No response even to learning conversations"
+    ],
+    "retrieval_triggers": [
+      "first 10 customers",
+      "no audience",
+      "cold email no response",
+      "founder sales",
+      "ICP discovery"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "A founder has a product but no audience, weak response from email/LinkedIn, and asks how to get the first 10 customers.",
+    "source_type": "discussion_operator_voice",
+    "source_url": "https://news.ycombinator.com/item?id=44544542",
+    "tags": [
+      "first_customers",
+      "icp",
+      "founder_sales",
+      "customer_discovery",
+      "outbound"
+    ],
+    "title": "First 10 customers: use founder-led ICP discovery and a Dream-10 list",
+    "trust_level": "medium"
+  },
+  {
+    "agent_lesson": "For high-trust sales, proof is often built before the contract. The COO move is to bound the proof so it creates learning and pipeline, not leakage.",
+    "agent_targets": [
+      "sales_agent",
+      "marketing_agent",
+      "finance_agent",
+      "manager_coo"
+    ],
+    "decision_pressure": "The seller needs proof and learning, but unpaid custom work can consume weeks and train buyers to expect free service.",
+    "domains": [
+      "sales",
+      "marketing",
+      "finance",
+      "manager_coo"
+    ],
+    "evidence_needed": [
+      "Buyer problem severity and current cost",
+      "Data/access needed for diagnostic",
+      "Defined deliverable and time cap",
+      "Decision-maker participation",
+      "Paid-pilot trigger and price",
+      "Proof that learning from the diagnostic improves product/positioning"
+    ],
+    "hard_gate_candidate": "Before recommending a free pilot/diagnostic, require scope, time cap, success metric, data-safety check, and paid next step.",
+    "id": "bk025-high-trust-b2b-free-diagnostic-to-paid-pilot",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/022-bk025-high-trust-b2b-free-diagnostic-to-paid-pilot.md",
+    "local_file": "archives/business-knowledge/sales/discussions/hn_first_10_customers_2026.html",
+    "mistake_or_risk": "Do not offer unlimited free consulting. Without a scope, success metric, paid-conversion trigger, and decision date, the tactic becomes free labor instead of sales.",
+    "recommended_next_action": "Offer a bounded diagnostic, audit, sample analysis, or custom demo using the prospect's real context. Define deliverable, timeline, mutual commitments, success metric, paid-pilot price, and conversion decision before starting.",
+    "red_flags": [
+      "Prospect will not include a decision-maker",
+      "Diagnostic scope keeps expanding",
+      "No paid next step is agreed",
+      "The work exposes confidential data without safeguards"
+    ],
+    "retrieval_triggers": [
+      "free consulting to get customers",
+      "custom demo",
+      "B2B pilot",
+      "proof of concept",
+      "high trust sales"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "A new B2B product solves an expensive or unfamiliar problem, but buyers do not yet trust the company or understand the outcome.",
+    "source_type": "discussion_operator_voice",
+    "source_url": "https://news.ycombinator.com/item?id=44544542",
+    "tags": [
+      "b2b_sales",
+      "pilot",
+      "proof_of_concept",
+      "consultative_sales",
+      "trust"
+    ],
+    "title": "High-trust B2B: free diagnostic work can unlock proof, but needs a boundary",
+    "trust_level": "medium"
+  },
+  {
+    "agent_lesson": "Channels are stage-specific. The Sales Agent should ask: is this a learning channel, a repeatable channel, or a compounding channel?",
+    "agent_targets": [
+      "sales_agent",
+      "marketing_agent",
+      "finance_agent",
+      "manager_coo"
+    ],
+    "decision_pressure": "The early channel worked, so the owner assumes it should continue. But low annual value cannot carry heavy human sales time forever, while high-ticket deals may require it.",
+    "domains": [
+      "sales",
+      "marketing",
+      "finance",
+      "manager_coo"
+    ],
+    "evidence_needed": [
+      "Annual contract value or annual gross profit per customer",
+      "Founder/sales hours per closed customer",
+      "Conversion rate by channel",
+      "Churn and repeat/renewal rate",
+      "Whether current channel has enough reachable prospects",
+      "Self-serve/onboarding readiness"
+    ],
+    "hard_gate_candidate": "Before recommending continued outbound/manual selling, require ACV, gross profit, sales hours, and payback.",
+    "id": "bk026-stage-and-acv-decide-channel-migration",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/023-bk026-stage-and-acv-decide-channel-migration.md",
+    "local_file": "archives/business-knowledge/sales/discussions/hn_first_100_users_2024.html",
+    "mistake_or_risk": "Do not judge a channel only by early wins. Evaluate CAC, sales time, payback, ACV, churn, and whether the channel is exhaustible.",
+    "recommended_next_action": "Separate validation channels from scale channels. Use network/outbound/manual onboarding to learn and close early; then migrate low-ACV products toward SEO, referrals, product-led loops, content, marketplace, or community compounding. Keep high-ACV/complex products in consultative or account-based motions.",
+    "red_flags": [
+      "Low-ticket product depends on long founder calls",
+      "Personal network is nearly exhausted",
+      "Outbound appears cheap because founder time is not costed",
+      "Scale plan ignores onboarding/support capacity"
+    ],
+    "retrieval_triggers": [
+      "first 100 users",
+      "low ACV sales",
+      "cold email not scalable",
+      "SEO word of mouth",
+      "sales channel migration"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "A product gets early customers through personal network, manual help, or cold outreach. The owner then asks how to keep scaling the same way.",
+    "source_type": "discussion_operator_voice",
+    "source_url": "https://news.ycombinator.com/item?id=41862332",
+    "tags": [
+      "channel_strategy",
+      "acv",
+      "low_ticket",
+      "seo",
+      "word_of_mouth",
+      "sales_efficiency"
+    ],
+    "title": "Channel migration: the sales motion must change with stage and annual contract value",
+    "trust_level": "medium"
+  },
+  {
+    "agent_lesson": "Community distribution is earned distribution. The moat is fluency in the community's pain, language, norms, and proof expectations.",
+    "agent_targets": [
+      "sales_agent",
+      "marketing_agent",
+      "manager_coo"
+    ],
+    "decision_pressure": "The owner wants to post a launch link. The community may punish obvious promotion, but can reward real tutorials, problem-solving, and insider usefulness.",
+    "domains": [
+      "sales",
+      "marketing",
+      "manager_coo"
+    ],
+    "evidence_needed": [
+      "Specific community and rules",
+      "Evidence that target buyers are active there",
+      "Common problems/language from posts",
+      "Useful tutorial/demo/content idea",
+      "Disclosure plan if promotion is involved",
+      "Capture mechanism: waitlist, DM, landing page, coupon, WhatsApp"
+    ],
+    "hard_gate_candidate": "Before recommending a Reddit/forum launch, require community-rule check, native-value angle, disclosure decision, and no-astroturfing constraint.",
+    "id": "bk027-niche-community-launch-works-when-you-belong",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/024-bk027-niche-community-launch-works-when-you-belong.md",
+    "local_file": "archives/business-knowledge/sales/discussions/hn_first_100_users_2024.html",
+    "mistake_or_risk": "Do not enter a community as a drive-by advertiser. Link drops, fake enthusiasm, and non-native copy destroy trust and may get the account banned.",
+    "recommended_next_action": "Map community norms, become useful before pitching, publish educational/problem-solving content, show the product naturally inside the workflow, and capture demand with a respectful next step.",
+    "red_flags": [
+      "Community rules prohibit promotion",
+      "The account has no prior contribution",
+      "Post is framed around the product instead of the user problem",
+      "The owner asks for fake reviews/upvotes/comments"
+    ],
+    "retrieval_triggers": [
+      "Reddit launch",
+      "community marketing",
+      "niche product marketing",
+      "forums for sales",
+      "how to post without self promotion"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "A niche product has a concentrated buyer community on Reddit, forums, Facebook groups, Discord, YouTube, or local associations.",
+    "source_type": "discussion_operator_voice",
+    "source_url": "https://news.ycombinator.com/item?id=41862332",
+    "tags": [
+      "community_marketing",
+      "reddit",
+      "forums",
+      "niche_launch",
+      "content"
+    ],
+    "title": "Niche community launch: Reddit/forums work when the seller is already useful there",
+    "trust_level": "medium"
+  },
+  {
+    "agent_lesson": "Sampling is not a giveaway; it is a trust-building conversion step. It works best when the sample is cheap to fulfil and visibly demonstrates value.",
+    "agent_targets": [
+      "sales_agent",
+      "marketing_agent",
+      "manager_coo"
+    ],
+    "decision_pressure": "The owner wants leads fast and has an audience or group where prospects can visibly respond. Engagement can create more reach, but fulfilment and lead quality can break the loop.",
+    "domains": [
+      "sales",
+      "marketing",
+      "manager_coo"
+    ],
+    "evidence_needed": [
+      "Sample fulfilment time per lead",
+      "Audience/community where target buyers are present",
+      "Qualification criteria",
+      "Follow-up offer and price",
+      "Capacity cap",
+      "Tracking code/source tag"
+    ],
+    "hard_gate_candidate": "Before recommending a free-sample/comment-loop campaign, require capacity cap, qualification rule, fulfilment time, and paid follow-up.",
+    "id": "bk028-comment-sample-loop-for-service-demand",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/025-bk028-comment-sample-loop-for-service-demand.md",
+    "local_file": "archives/business-knowledge/sales/discussions/hn_first_100_users_2024.html",
+    "mistake_or_risk": "Do not offer samples without capacity, qualification, or follow-up. A viral lead post can create operational chaos and many low-intent requests.",
+    "recommended_next_action": "Use a specific post or offline prompt: 'comment/message for a free sample/audit'. Cap the number, qualify by fit, fulfil quickly, then follow up with a paid offer, testimonial ask, and referral prompt.",
+    "red_flags": [
+      "Sample takes too long or costs too much",
+      "No paid next step exists",
+      "The audience is broad and unqualified",
+      "The owner cannot respond within the promised window"
+    ],
+    "retrieval_triggers": [
+      "free sample campaign",
+      "Facebook post leads",
+      "comment below for sample",
+      "service business leads",
+      "lead generation tactic"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "A service or product can be demonstrated quickly with a free sample, mini-audit, estimate, design, trial, or personalized preview.",
+    "source_type": "discussion_operator_voice",
+    "source_url": "https://news.ycombinator.com/item?id=41862332",
+    "tags": [
+      "lead_generation",
+      "sampling",
+      "social_post",
+      "viral_loop",
+      "service_business"
+    ],
+    "title": "Comment-to-sample loops can create fast demand when fulfilment is simple and visible",
+    "trust_level": "medium"
+  },
+  {
+    "agent_lesson": "Great campaigns are not just clever creatives. They are full conversion systems that match buyer moment, proof, channel, and economics.",
+    "agent_targets": [
+      "marketing_agent",
+      "sales_agent",
+      "finance_agent",
+      "manager_coo"
+    ],
+    "decision_pressure": "The Marketing Agent may jump to creative ideas. The COO-grade answer is to design the operating system of the campaign before the ad/post/message.",
+    "domains": [
+      "marketing",
+      "sales",
+      "finance",
+      "manager_coo"
+    ],
+    "evidence_needed": [
+      "Business objective: awareness, leads, walk-ins, orders, repeat, referrals",
+      "Target buyer and trigger",
+      "Offer and next step",
+      "Trust proof: reviews, samples, case study, guarantee, certification, demo",
+      "Channel and creative format",
+      "Tracking: UTM, coupon, QR, phone, WhatsApp tag, CRM source",
+      "Budget, CAC ceiling, and payback period"
+    ],
+    "hard_gate_candidate": "Before producing campaign copy, require objective, buyer, offer, proof, channel, follow-up, and KPI.",
+    "id": "bk029-campaign-success-operating-system",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/026-bk029-campaign-success-operating-system.md",
+    "local_file": "archives/business-knowledge/marketing/discussions/reddit_business_digital_marketing.html",
+    "mistake_or_risk": "Do not define success as reach, likes, or impressions unless the business goal is awareness and that choice is explicit. For sales campaigns, measurement must connect to leads, orders, margin, or repeat behavior.",
+    "recommended_next_action": "Create a one-page campaign brief: target buyer and situation, insight, promise, offer, proof, channel, creative format, landing/capture path, follow-up cadence, KPI, budget, CAC/payback target, and learning question.",
+    "red_flags": [
+      "Campaign idea has no capture/follow-up mechanism",
+      "KPI is vanity-only for a revenue campaign",
+      "Offer is unclear or too hard to redeem",
+      "Creative promise is not backed by proof"
+    ],
+    "retrieval_triggers": [
+      "marketing campaign idea",
+      "campaign success",
+      "marketing KPI",
+      "campaign brief",
+      "brand campaign"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "The owner asks for a marketing campaign idea, but has not specified audience, trigger, offer, trust proof, channel, follow-up, or measurement.",
+    "source_type": "platform_guidance_plus_local_synthesis",
+    "source_url": "https://www.business.reddit.com/smb/grow-business-with-digital-marketing",
+    "tags": [
+      "campaign_strategy",
+      "marketing_measurement",
+      "offer",
+      "creative",
+      "kpi"
+    ],
+    "title": "Campaign success: combine buyer insight, offer, proof, channel fit, follow-up, and measurement",
+    "trust_level": "high"
+  },
+  {
+    "agent_lesson": "The mature SMB move is not digital versus physical. It is physical trust plus digital memory, follow-up, and measurement.",
+    "agent_targets": [
+      "marketing_agent",
+      "sales_agent",
+      "manager_coo"
+    ],
+    "decision_pressure": "Digital feels modern and measurable; physical feels trusted but harder to track. The wrong answer is to choose one by ideology instead of buyer behavior.",
+    "domains": [
+      "marketing",
+      "sales",
+      "manager_coo"
+    ],
+    "evidence_needed": [
+      "Buyer geography and purchase context",
+      "Trust assets available offline and online",
+      "Footfall/event/partner touchpoints",
+      "QR/WhatsApp/landing-page capture path",
+      "Review/referral/repeat-purchase workflow",
+      "Source tracking method"
+    ],
+    "hard_gate_candidate": "Before recommending offline spend, require capture path and follow-up owner; before recommending digital spend, require trust/proof assets.",
+    "id": "bk030-digital-physical-hybrid-marketing-loop",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/027-bk030-digital-physical-hybrid-marketing-loop.md",
+    "local_file": "archives/business-knowledge/sales/discussions/DISCUSSION_SIGNAL_INDEX.md",
+    "mistake_or_risk": "Do not run offline activity without a capture path, and do not run digital ads when the buyer's trust is built through physical proof, local presence, or personal relationship.",
+    "recommended_next_action": "Design a hybrid loop: offline proof or presence creates trust; QR/WhatsApp/coupon/review request captures the relationship; digital follow-up compounds through reminders, referrals, retargeting, and repeat orders.",
+    "red_flags": [
+      "Flyers/events/signage have no source code or contact capture",
+      "Ads target people who need in-person trust first",
+      "No one owns follow-up after offline interaction",
+      "Offline campaign cannot be tied to orders/leads even roughly"
+    ],
+    "retrieval_triggers": [
+      "digital vs physical marketing",
+      "offline marketing",
+      "flyers to WhatsApp",
+      "local event marketing",
+      "hybrid marketing"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "A business serves local or relationship-heavy customers and is unsure whether to invest in digital marketing, physical marketing, events, signage, WhatsApp, or local partnerships.",
+    "source_type": "local_synthesis",
+    "source_url": "archives/business-knowledge/sales/discussions/DISCUSSION_SIGNAL_INDEX.md",
+    "tags": [
+      "physical_marketing",
+      "digital_marketing",
+      "offline_to_online",
+      "local_marketing",
+      "hybrid_campaign"
+    ],
+    "title": "Digital vs physical marketing: use physical trust and digital compounding together",
+    "trust_level": "high"
+  },
+  {
+    "agent_lesson": "Partnership is a trust and distribution tactic, not a logo-collection exercise. It works when the partner already owns attention and the business makes them look good.",
+    "agent_targets": [
+      "sales_agent",
+      "marketing_agent",
+      "manager_coo"
+    ],
+    "decision_pressure": "The owner can keep building a direct pipeline or recruit partners who already have trust, but partners need a reason to care and a clear role.",
+    "domains": [
+      "sales",
+      "marketing",
+      "manager_coo"
+    ],
+    "evidence_needed": [
+      "Buyer decision journey and trusted advisors",
+      "Partner category list",
+      "Mutual incentive or revenue share",
+      "Non-competing/complementary positioning",
+      "Enablement assets and demo",
+      "Handoff/follow-up workflow"
+    ],
+    "hard_gate_candidate": "Before recommending partnerships, require partner-buyer map, mutual win, USP, enablement asset, and handoff workflow.",
+    "id": "bk031-partner-network-co-selling-borrows-trust",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/028-bk031-partner-network-co-selling-borrows-trust.md",
+    "local_file": "archives/business-knowledge/sales/discussions/hn_first_100_users_2024.html",
+    "mistake_or_risk": "Do not ask partners to promote a vague product. Without a tight USP, enablement, commercial model, and customer handoff, partnerships become polite conversations.",
+    "recommended_next_action": "Map 10 partner types that already influence the buyer, define the mutual win, create a one-page enablement kit, run co-selling pilots, and keep direct involvement in early customer discovery.",
+    "red_flags": [
+      "Partner sells a directly competitive offer",
+      "USP is not crisp enough for a partner to repeat",
+      "No commercial incentive exists",
+      "Customer ownership and support expectations are unclear"
+    ],
+    "retrieval_triggers": [
+      "partner channel",
+      "co selling",
+      "B2B distribution",
+      "integrator partners",
+      "borrow trust"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "A B2B product has clear value but direct access to buyers is slow. Adjacent service providers, integrators, consultants, associations, or suppliers already serve those buyers.",
+    "source_type": "discussion_operator_voice",
+    "source_url": "https://news.ycombinator.com/item?id=41862332",
+    "tags": [
+      "partnerships",
+      "channel_sales",
+      "co_selling",
+      "b2b_sales",
+      "distribution"
+    ],
+    "title": "Partner networks borrow trust when direct selling is slow",
+    "trust_level": "medium"
+  },
+  {
+    "agent_lesson": "A great SMB brand is a reliable mental shortcut: when this need arises, the customer remembers the business and trusts the promise.",
+    "agent_targets": [
+      "marketing_agent",
+      "sales_agent",
+      "manager_coo"
+    ],
+    "decision_pressure": "A visible campaign can create attention, but brand value comes from repeated memory and trust. The Manager has to connect promise, proof, delivery, and customer experience.",
+    "domains": [
+      "marketing",
+      "sales",
+      "manager_coo"
+    ],
+    "evidence_needed": [
+      "Target buyer and buying trigger",
+      "Brand promise in one sentence",
+      "Proof: reviews, outcomes, case studies, demos, certifications, founder story",
+      "Distinctive memory assets: name, phrase, visual cue, mascot, ritual, packaging, offer",
+      "Customer-experience behaviors that prove the promise",
+      "Campaign calendar and consistency plan"
+    ],
+    "hard_gate_candidate": "Before recommending a brand campaign, require promise, proof, memory asset, and delivery behavior.",
+    "id": "bk032-brand-building-memory-proof-and-promise",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/029-bk032-brand-building-memory-proof-and-promise.md",
+    "local_file": "archives/business-knowledge/marketing/discussions/reddit_business_viral_marketing.html",
+    "mistake_or_risk": "Do not define brand as creative assets alone. A campaign that gets attention but creates a promise the business cannot deliver damages trust.",
+    "recommended_next_action": "Define the brand promise, the buyer's category cue, proof assets, memory assets, tone, customer-experience standards, and repeatable content/event themes. Build campaigns around proof of the promise.",
+    "red_flags": [
+      "Brand promise is generic",
+      "Creative claims exceed operational reality",
+      "No distinctive memory cue exists",
+      "Campaign is optimized for virality but not trust or sales"
+    ],
+    "retrieval_triggers": [
+      "brand building",
+      "viral marketing",
+      "brand campaign",
+      "build trust",
+      "marketing campaign successful"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "The owner asks how to build a brand, often thinking first about logo, colors, reels, or viral campaigns.",
+    "source_type": "platform_guidance_plus_local_synthesis",
+    "source_url": "https://www.business.reddit.com/learning-hub/articles/viral-marketing",
+    "tags": [
+      "brand_building",
+      "trust",
+      "campaign_strategy",
+      "memory_assets",
+      "positioning"
+    ],
+    "title": "Brand building: create memory around a promise, then prove it repeatedly",
+    "trust_level": "high"
+  },
+  {
+    "agent_lesson": "The strongest market signal is behavior with cost: money, time, data access, introduction, or signed commitment. The agent should look for that before recommending scale.",
+    "agent_targets": [
+      "sales_agent",
+      "marketing_agent",
+      "finance_agent",
+      "manager_coo"
+    ],
+    "decision_pressure": "Building feels productive and marketing spend feels like progress. The safer COO move is to test real commitment: deposits, LOIs, pilot agreements, waitlist with action, or paid discovery.",
+    "domains": [
+      "sales",
+      "marketing",
+      "finance",
+      "manager_coo"
+    ],
+    "evidence_needed": [
+      "Buyer pain and urgency",
+      "Price or deposit threshold",
+      "Commitment mechanism",
+      "Delivery feasibility and risk",
+      "Refund/terms clarity",
+      "Number of qualified commitments needed for go/no-go"
+    ],
+    "hard_gate_candidate": "Before recommending a new build or campaign scale-up, require a defined commitment test and success threshold.",
+    "id": "bk033-presell-commitments-before-build-or-scale",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/030-bk033-presell-commitments-before-build-or-scale.md",
+    "local_file": "archives/business-knowledge/sales/discussions/hn_first_10_customers_2026.html",
+    "mistake_or_risk": "Do not confuse compliments, survey interest, or social likes with buying intent. Also avoid overselling future capability in a way that creates reputational or delivery risk.",
+    "recommended_next_action": "Design a commitment test appropriate to the offer: refundable deposit, paid pilot, booked consultation, pre-order, signed LOI, waitlist plus qualification call, or partner-introduction target. Use the result to decide build, reposition, or stop.",
+    "red_flags": [
+      "Only verbal enthusiasm exists",
+      "Founder promises features or timelines they cannot deliver",
+      "No refund/terms clarity",
+      "Commitments come from non-target buyers"
+    ],
+    "retrieval_triggers": [
+      "presell",
+      "validate demand",
+      "people say interested but do not buy",
+      "before building",
+      "paid pilot"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "A founder or SMB wants to build a new product/service line or spend on promotion before proving that the intended buyer will commit.",
+    "source_type": "discussion_operator_voice",
+    "source_url": "https://news.ycombinator.com/item?id=44544542",
+    "tags": [
+      "presell",
+      "validation",
+      "demand_testing",
+      "pilot",
+      "product_market_fit"
+    ],
+    "title": "Pre-sell and commitment tests: demand proof should precede build or scale",
+    "trust_level": "medium"
+  },
+  {
+    "agent_lesson": "The Manager governs whether a deal benefits the business; Sales or Finance owns negotiation depth. BATNA prevents activity, ego, and urgency from becoming value destruction.",
+    "agent_targets": [
+      "manager_coo",
+      "sales_agent",
+      "finance_agent"
+    ],
+    "decision_pressure": "The visible deal becomes the entire frame; sunk effort, urgency, relationship pressure, or headline value causes concessions below the value of available alternatives.",
+    "domains": [
+      "manager_coo",
+      "sales",
+      "finance"
+    ],
+    "evidence_needed": [
+      "Credible BATNA and steps to execute it",
+      "Reservation point",
+      "Total value and cost over the relationship",
+      "Switching, delay, implementation, and exit costs",
+      "Dependency/concentration and compliance risks",
+      "Concession authority and walk-away conditions"
+    ],
+    "hard_gate_candidate": "Material agreements require BATNA, reservation point, total-economics, dependency, and walk-away review before signature.",
+    "id": "bk062-batna-reservation-and-walkaway",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/059-bk062-batna-reservation-and-walkaway.md",
+    "local_file": "archives/business-knowledge/manager/decision-making/harvard_pon_batna.html",
+    "mistake_or_risk": "Do not accept a deal because it is better than the counterparty's opening offer. It must beat the business's credible alternative after switching, delay, implementation, risk, and dependency costs.",
+    "recommended_next_action": "Ask the relevant specialist to develop and improve BATNA; calculate reservation point and total economics; map implementation burden, concentration, information, compliance, and exit risk; pre-authorize concession limits; walk away if the final deal is worse than the adjusted alternative.",
+    "red_flags": [
+      "No credible alternative has been developed",
+      "Deadline is controlled only by the counterparty",
+      "Headline price excludes implementation or exit cost",
+      "Deal creates single-party dependency",
+      "Negotiator can concede without a limit"
+    ],
+    "retrieval_triggers": [
+      "BATNA",
+      "walk away from deal",
+      "vendor negotiation",
+      "customer contract",
+      "reservation point"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "The business is negotiating a customer, vendor, partner, landlord, lender, hire, platform, or acquisition agreement.",
+    "source_type": "negotiation_research",
+    "source_url": "https://www.pon.harvard.edu/daily/batna/translate-your-batna-to-the-current-deal/",
+    "tags": [
+      "negotiation",
+      "batna",
+      "walkaway",
+      "deal_economics",
+      "dependency"
+    ],
+    "title": "Negotiation governance: quantify BATNA, reservation point, dependencies, and walk-away before concessions",
+    "trust_level": "high"
+  },
+  {
+    "agent_lesson": "Specialists own their craft, but the Manager ensures their operating systems join into profitable customer outcomes.",
+    "agent_targets": [
+      "sales_agent",
+      "marketing_agent",
+      "finance_agent",
+      "manager_coo"
+    ],
+    "decision_pressure": "Each function can improve its own metric while leads leak, sellers pursue low-fit work, discounts vary, and renewal/service opportunities remain invisible.",
+    "domains": [
+      "sales",
+      "marketing",
+      "finance",
+      "manager_coo"
+    ],
+    "evidence_needed": [
+      "Shared ICP and segment priorities",
+      "Lead-to-revenue and service/renewal journey",
+      "Handoff definitions and ownership",
+      "Price realization and contribution margin",
+      "Installed-base or post-sale usage signals",
+      "Lost-opportunity reasons by function and segment"
+    ],
+    "hard_gate_candidate": "Commercial reviews require one shared funnel, customer economics, leakage reasons, and cross-functional action owners.",
+    "id": "bk073-integrated-commercial-excellence-system",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/069-bk073-integrated-commercial-excellence-system.md",
+    "local_file": "archives/business-knowledge/research/consulting/bcg_commercial_excellence.html",
+    "mistake_or_risk": "Do not optimize campaign volume, sales activity, price approval, or service utilization separately from profitable customer value. BCG's measured results are industrial-context evidence, not a universal uplift promise.",
+    "recommended_next_action": "Define common segments and opportunity priorities; connect lead, account, quote, order, usage/service, renewal, margin, and loss-reason data; establish shared handoff SLAs; review funnel leakage and customer economics cross-functionally.",
+    "red_flags": [
+      "Marketing optimizes MQLs without revenue quality",
+      "Sales cannot see service or product-usage signals",
+      "Finance sees discounts only after commitment",
+      "Functions use conflicting customer definitions",
+      "Management copies industrial benchmarks as SMB targets"
+    ],
+    "retrieval_triggers": [
+      "sales marketing alignment",
+      "commercial excellence",
+      "lead leakage",
+      "service upsell",
+      "shared revenue funnel"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "Marketing produces leads, Sales pursues accounts, Finance controls discounts, and Service sees installed-customer needs—but each function uses different priorities and data.",
+    "source_type": "consulting_industry_survey",
+    "source_url": "https://www.bcg.com/publications/2024/commercial-excellence-in-machinery-and-automation",
+    "tags": [
+      "commercial_excellence",
+      "sales_marketing_alignment",
+      "pricing",
+      "service",
+      "customer_data"
+    ],
+    "title": "Commercial excellence: run Marketing, Sales, Pricing, and Service as one opportunity system",
+    "trust_level": "high"
+  },
+  {
+    "agent_lesson": "Sales protects deal quality and Finance protects economics; both need fast, evidence-based exception governance.",
+    "agent_targets": [
+      "sales_agent",
+      "finance_agent"
+    ],
+    "decision_pressure": "Closing the deal feels immediate while margin leakage appears later in aggregates, making exceptions easy to justify and hard to reverse.",
+    "domains": [
+      "sales",
+      "finance"
+    ],
+    "evidence_needed": [
+      "List, target, floor, and realized price",
+      "Contribution margin and cost-to-serve",
+      "Discount reason, approver, and deal stage",
+      "Win/loss and competitor evidence",
+      "Rep/customer/product exception distribution",
+      "Post-change realization trend"
+    ],
+    "hard_gate_candidate": "Below-corridor prices require reason, economics, approval, and later realization review.",
+    "id": "bk074-pricing-realization-governance",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/070-bk074-pricing-realization-governance.md",
+    "local_file": "archives/business-knowledge/research/consulting/bcg_commercial_excellence.html",
+    "mistake_or_risk": "Do not judge pricing by list-price change or approval compliance alone. Excessive central control can also slow legitimate competitive responses.",
+    "recommended_next_action": "Create segment/product price corridors; require reason-coded exceptions with deal context; expose conversion probability and stage before approval; track realized price, margin, win rate, and exception concentration promptly; coach outliers and revise corridors from evidence.",
+    "red_flags": [
+      "Discount is used to compensate for weak qualification",
+      "Exception reason is free text or missing",
+      "Top-line growth hides margin decline",
+      "Approval is slow but adds no decision insight",
+      "One customer or rep receives persistent unexplained concessions"
+    ],
+    "retrieval_triggers": [
+      "discount approval",
+      "price realization",
+      "sales margin leakage",
+      "pricing corridor",
+      "discount outlier"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "Sales has broad discount discretion or new prices have been announced, but actual realized prices vary by rep, customer, product, and urgency.",
+    "source_type": "consulting_industry_survey",
+    "source_url": "https://www.bcg.com/publications/2024/commercial-excellence-in-machinery-and-automation",
+    "tags": [
+      "pricing",
+      "discounts",
+      "price_realization",
+      "approval",
+      "margin"
+    ],
+    "title": "Pricing discipline: govern realized price and exception patterns, not just the list price",
+    "trust_level": "high"
+  },
+  {
+    "agent_lesson": "Marketing designs discoverability and continuity; Sales uses accumulated context to advance the buying decision rather than restart discovery.",
+    "agent_targets": [
+      "sales_agent",
+      "marketing_agent"
+    ],
+    "decision_pressure": "Teams launch more channels, but fragmented ownership and inconsistent information create duplicate outreach, lost context, and supplier switching.",
+    "domains": [
+      "sales",
+      "marketing"
+    ],
+    "evidence_needed": [
+      "ICP channel usage by buying stage",
+      "Buyer questions and context captured at each touchpoint",
+      "Cross-channel content and offer consistency",
+      "Handoff ownership and response time",
+      "Conversion, abandonment, and switching reasons",
+      "Channel cost and customer lifetime value"
+    ],
+    "hard_gate_candidate": "New B2B channels require a context-handoff contract, consistent claims, and journey-level success measures.",
+    "id": "bk075-b2b-omnichannel-continuity",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/071-bk075-b2b-omnichannel-continuity.md",
+    "local_file": "archives/business-knowledge/research/CONSULTING_ACADEMIC_RESEARCH_INDEX.md",
+    "mistake_or_risk": "Do not confuse channel count with omnichannel capability. Do not copy global-enterprise channel investments before proving where the SMB's buyers actually switch or stall.",
+    "recommended_next_action": "Map the buyer's real journey; choose the few relevant channels; maintain one account/context record; make price, proof, availability, and claims consistent; define human-to-digital handoffs; measure journey conversion, time, abandonment, and retention by segment.",
+    "red_flags": [
+      "Buyer must repeat requirements",
+      "Website and seller quote conflict",
+      "Channel attribution fights replace journey analysis",
+      "Personalization uses weak or non-consensual data",
+      "Every new channel is treated as mandatory"
+    ],
+    "retrieval_triggers": [
+      "B2B omnichannel",
+      "buyer switches channels",
+      "digital and field sales",
+      "customer repeats information",
+      "channel journey"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "A B2B buyer researches online, speaks to a seller, requests a demo remotely, visits a marketplace, and expects the next interaction to continue rather than restart the journey.",
+    "source_type": "consulting_global_buyer_survey",
+    "source_url": "https://www.mckinsey.com/capabilities/growth-marketing-and-sales/our-insights/the-multiplier-effect-how-b2b-winners-grow",
+    "tags": [
+      "b2b",
+      "omnichannel",
+      "buyer_journey",
+      "personalization",
+      "channel_handoff"
+    ],
+    "title": "B2B omnichannel: preserve buyer context across human, remote, website, marketplace, and ecommerce touchpoints",
+    "trust_level": "high"
+  },
+  {
+    "agent_lesson": "The Manager governs strategic distance and staged exposure; Sales and Marketing test demand, channel access, and repeatability.",
+    "agent_targets": [
+      "manager_coo",
+      "sales_agent",
+      "marketing_agent"
+    ],
+    "decision_pressure": "A large theoretical market can hide the loss of customer knowledge, channel access, delivery capability, brand permission, and economic advantage.",
+    "domains": [
+      "manager_coo",
+      "sales",
+      "marketing"
+    ],
+    "evidence_needed": [
+      "Core customer problem and advantage",
+      "Capabilities reused versus newly required",
+      "Adjacency-distance assessment",
+      "Customer willingness-to-pay evidence",
+      "Delivery and channel feasibility",
+      "Pilot economics, retention, and scale gate"
+    ],
+    "hard_gate_candidate": "Adjacency investments require capability-distance, bounded-test, and scale/stop evidence.",
+    "id": "bk076-core-adjacency-repeatable-growth",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/072-bk076-core-adjacency-repeatable-growth.md",
+    "local_file": "archives/business-knowledge/research/consulting/bain_strategy_beliefs.html",
+    "mistake_or_risk": "Do not approve adjacency from TAM alone or treat Bain's synthesis as a universal causal rule. Staying too close to a declining core can also be dangerous.",
+    "recommended_next_action": "Define the proven core and its repeatable capabilities; score the adjacency's distance in customer, need, product, channel, geography, operations, and economics; run a bounded commercial test; stage resources against adoption, margin, retention, and repeatability.",
+    "red_flags": [
+      "Only market size supports the move",
+      "New customer, product, channel, and geography change together",
+      "Core is weakened before adjacency proves itself",
+      "Pilot success depends on founder heroics",
+      "No exit or learning threshold exists"
+    ],
+    "retrieval_triggers": [
+      "new market expansion",
+      "adjacent product",
+      "grow beyond core",
+      "repeatable model",
+      "TAM opportunity"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "The business wants a new product, customer segment, geography, or channel to accelerate growth beyond its current core.",
+    "source_type": "consulting_strategy_synthesis",
+    "source_url": "https://media.bain.com/bain-beliefs-in-strategy/",
+    "tags": [
+      "growth",
+      "core_business",
+      "adjacency",
+      "repeatable_model",
+      "expansion"
+    ],
+    "title": "Growth adjacency: expand one step from a proven core using repeatable capabilities and staged evidence",
+    "trust_level": "medium"
+  },
+  {
+    "agent_lesson": "Marketing owns learning from the customer system, Sales helps recover relationships, and the Manager ensures recurring causes change operations.",
+    "agent_targets": [
+      "marketing_agent",
+      "sales_agent",
+      "manager_coo"
+    ],
+    "decision_pressure": "The company can celebrate or debate the score while the affected customer receives no response and the underlying process remains unchanged.",
+    "domains": [
+      "marketing",
+      "sales",
+      "manager_coo"
+    ],
+    "evidence_needed": [
+      "Recent customer feedback and journey context",
+      "Severity and recovery priority",
+      "Frontline owner and customer contact outcome",
+      "Root-cause category and recurrence",
+      "Structural action owner",
+      "Cost, retention, and recurrence result"
+    ],
+    "hard_gate_candidate": "Severe and repeated feedback requires owner, contact decision, root cause, structural action, and outcome tracking.",
+    "id": "bk077-customer-feedback-closed-loop",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/073-bk077-customer-feedback-closed-loop.md",
+    "local_file": "archives/business-knowledge/research/consulting/bain_closing_customer_feedback_loop.pdf",
+    "mistake_or_risk": "Do not make the score the objective, pressure customers for a higher rating, or treat recovery as a substitute for structural prevention.",
+    "recommended_next_action": "Route feedback quickly to the responsible frontline owner; contact selected customers to listen, recover, and clarify cause; code root causes; escalate systemic themes; assign product/process changes; record action, cost, customer outcome, and recurrence.",
+    "red_flags": [
+      "Employee asks customer to change a score",
+      "Feedback arrives too late to recover",
+      "Same root cause is repeatedly handled one customer at a time",
+      "Recovery spend ignores customer economics or fairness",
+      "NPS moves while complaints or churn worsen"
+    ],
+    "retrieval_triggers": [
+      "customer feedback loop",
+      "NPS detractor",
+      "service recovery",
+      "customer complaint root cause",
+      "retention feedback"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "Recent customer feedback or an NPS response reveals dissatisfaction, praise, friction, or a recurring failure.",
+    "source_type": "consulting_operator_cases",
+    "source_url": "https://media.bain.com/Images/LOYALTY_INSIGHTS_Closing_the_loop.pdf",
+    "tags": [
+      "customer_feedback",
+      "retention",
+      "service_recovery",
+      "root_cause",
+      "nps"
+    ],
+    "title": "Customer feedback: close the loop from individual recovery to structural correction",
+    "trust_level": "medium"
+  },
+  {
+    "agent_lesson": "Tacit sales knowledge spreads through structured case conversation and testing, not merely documentation or team bonuses.",
+    "agent_targets": [
+      "sales_agent"
+    ],
+    "decision_pressure": "Management may add team incentives or generic training while sellers lack a safe, structured way to discuss how they handle live situations.",
+    "domains": [
+      "sales"
+    ],
+    "evidence_needed": [
+      "Performance variation by comparable seller/context",
+      "Specific technique and situation discussed",
+      "Partner matching and session cadence",
+      "Behaviour adoption after exchange",
+      "Revenue, conversion, or cycle outcome",
+      "Conditions where the technique failed"
+    ],
+    "hard_gate_candidate": "Sales teams with material performance dispersion should test structured peer learning before buying broad generic training.",
+    "id": "bk078-structured-sales-peer-learning",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/074-bk078-structured-sales-peer-learning.md",
+    "local_file": "archives/business-knowledge/research/academic/nber_workplace_knowledge_flows_w26660.pdf",
+    "mistake_or_risk": "Do not assume incentives automatically transfer knowledge or copy a top seller's style without testing context. The field experiment supports the mechanism in one company, not a guaranteed lift everywhere.",
+    "recommended_next_action": "Pair sellers for brief recurring sessions around one live scenario; ask what signal was noticed, what wording/action was used, why, and what happened; rotate access to strong performers; convert validated patterns into testable plays and measure post-session behaviour and results.",
+    "red_flags": [
+      "Session becomes motivational talk",
+      "High performer cannot explain context or mechanism",
+      "Confidential customer data is shared improperly",
+      "Only output incentives are added",
+      "No behaviour or outcome change is measured"
+    ],
+    "retrieval_triggers": [
+      "sales peer coaching",
+      "top seller techniques",
+      "sales knowledge sharing",
+      "improve rep performance",
+      "sales training"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "Sales performance varies widely and high performers possess useful tacit techniques that are not captured in CRM fields or formal training.",
+    "source_type": "peer_reviewed_field_experiment",
+    "source_url": "https://www.nber.org/papers/w26660",
+    "tags": [
+      "sales_coaching",
+      "peer_learning",
+      "knowledge_transfer",
+      "field_experiment",
+      "playbook"
+    ],
+    "title": "Sales coaching: use short structured peer exchanges to transfer proven techniques",
+    "trust_level": "high"
+  },
+  {
+    "agent_lesson": "Specialists design the experiment; the Manager ensures downside is bounded and that the result can support the business decision claimed.",
+    "agent_targets": [
+      "marketing_agent",
+      "sales_agent",
+      "manager_coo"
+    ],
+    "decision_pressure": "Teams either wait for a fixed sample while harm accumulates or repeatedly peek at ordinary significance tests and stop when the result looks favourable.",
+    "domains": [
+      "marketing",
+      "sales",
+      "manager_coo"
+    ],
+    "evidence_needed": [
+      "Pre-registered hypothesis and causal decision",
+      "Primary metric and minimum useful effect",
+      "Guardrail and harm thresholds",
+      "Maximum customer/revenue exposure",
+      "Randomization and sample plan",
+      "Valid fixed-horizon or sequential stopping rule"
+    ],
+    "hard_gate_candidate": "Customer-facing experiments require predeclared harm limits, exposure caps, and a statistically valid stop rule.",
+    "id": "bk080-risk-bounded-online-experiment",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/076-bk080-risk-bounded-online-experiment.md",
+    "local_file": "archives/business-knowledge/research/CONSULTING_ACADEMIC_RESEARCH_INDEX.md",
+    "mistake_or_risk": "Do not run a test without exposure and harm limits. Repeatedly checking a fixed-horizon p-value invalidates the claimed error rate; business urgency does not repair the statistics.",
+    "recommended_next_action": "Write hypothesis, primary metric, guardrail/harm metrics, maximum exposure, minimum detectable effect, segment exclusions, and decision rule before launch; use a valid sequential method if early stopping is needed; preserve assignment and analyze both benefit and harm.",
+    "red_flags": [
+      "Test is stopped when p-value first crosses a threshold",
+      "Only conversion is measured",
+      "Vulnerable or regulated segments are included without review",
+      "Sample ratio or assignment integrity is not checked",
+      "Novelty or carryover effects are ignored"
+    ],
+    "retrieval_triggers": [
+      "A/B test stop early",
+      "experiment guardrails",
+      "peeking p value",
+      "campaign experiment",
+      "conversion test harm"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "A campaign, offer, funnel, message, product, or pricing experiment may improve conversion but can also harm customers, revenue, trust, or compliance while it runs.",
+    "source_type": "academic_working_paper",
+    "source_url": "https://papers.ssrn.com/sol3/papers.cfm?abstract_id=4472576",
+    "tags": [
+      "ab_testing",
+      "experimentation",
+      "guardrails",
+      "sequential_testing",
+      "stop_condition"
+    ],
+    "title": "Online experiments: predefine harm limits and use valid sequential stopping rather than unsafe peeking",
+    "trust_level": "high"
+  },
+  {
+    "agent_lesson": "Suboptimal-looking talent allocation may reflect a real commercial constraint. A COO surfaces the constraint, protects the account, and removes the structural dependency over time.",
+    "agent_targets": [
+      "manager_coo",
+      "sales_agent"
+    ],
+    "decision_pressure": "A few powerful customers impose minimum performance constraints, making defensive talent allocation rational even when it reduces total system productivity.",
+    "domains": [
+      "manager_coo",
+      "sales"
+    ],
+    "evidence_needed": [
+      "Manager and team performance estimates",
+      "Customer-specific minimum service or output constraints",
+      "Revenue, margin, and relationship concentration",
+      "Current rescue assignments and duration",
+      "Counterfactual allocation and productivity range",
+      "Backup, capability-building, and diversification plan"
+    ],
+    "hard_gate_candidate": "Critical-manager allocation reviews require customer concentration, contribution at risk, opportunity cost, and a dependency-reduction plan.",
+    "id": "bk084-manager-allocation-under-customer-constraints",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/080-bk084-manager-allocation-under-customer-constraints.md",
+    "local_file": "archives/business-knowledge/research/management/nber_manager_worker_matching_w27006.pdf",
+    "mistake_or_risk": "Do not optimize theoretical matching while breaching a key account obligation. Also do not let customer concentration permanently hide weak processes, fragile staffing, or the opportunity cost of rescue allocation.",
+    "recommended_next_action": "Map manager capability, team capability, customer constraints, and contribution at risk; quantify rescue allocation and opportunity cost; protect contractual minimums; build backups and weaker-team capability; reduce concentration; then test alternative matching without risking delivery.",
+    "red_flags": [
+      "Top managers are permanent firefighters",
+      "Customer concentration is absent from staffing decisions",
+      "Weak teams receive rescue but no capability plan",
+      "Account value is measured only as revenue",
+      "Reallocation is attempted without delivery safeguards"
+    ],
+    "retrieval_triggers": [
+      "best manager on worst team",
+      "key account staffing",
+      "customer concentration operations",
+      "manager allocation",
+      "constant firefighting"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "The strongest managers repeatedly rescue weak teams or customer-critical work, while other units lose development and productivity opportunities.",
+    "source_type": "administrative_data_and_structural_analysis",
+    "source_url": "https://www.nber.org/papers/w27006",
+    "tags": [
+      "manager_allocation",
+      "customer_concentration",
+      "productivity",
+      "capacity",
+      "key_accounts"
+    ],
+    "title": "Manager allocation: expose the productivity cost of protecting concentrated customer relationships",
+    "trust_level": "high"
+  },
+  {
+    "agent_lesson": "Quota frequency changes seller time horizons and product choice. Sales owns behavior design; Finance validates realized contribution, not just attainment.",
+    "agent_targets": [
+      "sales_agent",
+      "finance_agent",
+      "manager_coo"
+    ],
+    "decision_pressure": "A more frequent quota can increase unit sales and visible effort, but it may change timing, product mix, returns, margin, and the behavior of high versus low performers.",
+    "domains": [
+      "sales",
+      "finance",
+      "manager_coo"
+    ],
+    "evidence_needed": [
+      "Baseline performance distribution",
+      "Deal cycle and quota period fit",
+      "Unit, revenue, margin, returns, and product mix",
+      "Effort and give-up timing within the period",
+      "High- and low-performer treatment effects",
+      "Pull-forward and post-period effects"
+    ],
+    "hard_gate_candidate": "Quota-frequency changes require performer-level analysis plus margin, mix, returns, and post-period counter-metrics.",
+    "id": "bk086-quota-frequency-by-performer-and-product",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/082-bk086-quota-frequency-by-performer-and-product.md",
+    "local_file": "archives/business-knowledge/research/sales/harvard_quota_frequency_sales.pdf",
+    "mistake_or_risk": "Do not optimize quota attainment or units alone. In one Swedish retailer experiment, daily quotas helped low performers but induced high performers to give up earlier and shifted selling toward low-ticket items, hurting profits.",
+    "recommended_next_action": "Segment sellers by comparable baseline performance; model quota frequency against deal cycle and product mix; pilot with a control; measure revenue, contribution margin, returns, high-ticket mix, timing, customer outcome, and post-period pull-forward; retain different cadences where justified.",
+    "red_flags": [
+      "Quota lift is reported without profit",
+      "All performers receive the same cadence by default",
+      "Low-ticket activity crowds out strategic sales",
+      "Returns or cancellations rise after the period",
+      "A short pilot rewards demand pull-forward as growth"
+    ],
+    "retrieval_triggers": [
+      "daily sales quota",
+      "salespeople give up",
+      "quota frequency",
+      "high performer incentive",
+      "sales target hurts profit"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "Sales leaders are considering daily, weekly, or monthly quotas to prevent sellers from giving up when a period target looks unreachable.",
+    "source_type": "peer_reviewed_sales_field_experiment",
+    "source_url": "https://pubsonline.informs.org/doi/10.1287/mnsc.2020.3648",
+    "tags": [
+      "sales_quota",
+      "sales_compensation",
+      "performer_segments",
+      "product_mix",
+      "profit"
+    ],
+    "title": "Sales quotas: tune frequency by performer behavior and product economics, not volume alone",
+    "trust_level": "high"
+  },
+  {
+    "agent_lesson": "Conditional incentives and reciprocity are different behavioral contracts. Use each honestly, test heterogeneity, and account for future performance.",
+    "agent_targets": [
+      "sales_agent",
+      "finance_agent",
+      "manager_coo"
+    ],
+    "decision_pressure": "A short-term response can make any reward appear successful even when performance falls later, repeated gifts lose meaning, or only some seller types respond.",
+    "domains": [
+      "sales",
+      "finance",
+      "manager_coo"
+    ],
+    "evidence_needed": [
+      "Compensation mechanism and employee expectation",
+      "Comparable baseline seller performance",
+      "Current-period revenue and contribution",
+      "Future-period performance and pull-forward",
+      "Repeated-exposure response",
+      "Trust, fairness, and gaming signals"
+    ],
+    "hard_gate_candidate": "Sales-compensation pilots require future-period, margin, gaming, and performer-segment analysis before scale.",
+    "id": "bk087-conditional-versus-reciprocal-sales-rewards",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/083-bk087-conditional-versus-reciprocal-sales-rewards.md",
+    "local_file": "archives/business-knowledge/research/sales/harvard_incentives_reciprocity_sales.pdf",
+    "mistake_or_risk": "Do not relabel an expected payment as a gift or assume penalty framing adds power. The Asian consumer-durables field experiment found quota bonuses improved performance but could lower future performance; delayed reciprocal rewards worked selectively and weakened with repetition.",
+    "recommended_next_action": "Define whether the mechanism is conditional pay or an infrequent genuine recognition reward; segment by baseline performance; randomize or stagger a pilot; track current and future sales, margin, gaming, trust, and repeated-exposure decay; stop mechanisms whose temporary lift borrows from the future.",
+    "red_flags": [
+      "Ordinary variable pay is marketed as generosity",
+      "Penalty framing is adopted without incremental evidence",
+      "Future-period decline is ignored",
+      "Reward is repeated until it becomes entitlement",
+      "Average effect hides seller heterogeneity"
+    ],
+    "retrieval_triggers": [
+      "sales bonus or gift",
+      "punitive bonus",
+      "employee reciprocity",
+      "sales incentive future decline",
+      "reward top salespeople"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "A sales team is choosing between quota bonuses, penalty-framed bonuses, and unconditional rewards intended to create reciprocity.",
+    "source_type": "peer_reviewed_sales_field_experiment",
+    "source_url": "https://dash.harvard.edu/bitstreams/7312037e-73ce-6bd4-e053-0100007fdf3b/download",
+    "tags": [
+      "sales_compensation",
+      "bonus",
+      "reciprocity",
+      "heterogeneity",
+      "future_performance"
+    ],
+    "title": "Sales rewards: distinguish conditional incentives from genuine delayed reciprocity",
+    "trust_level": "high"
+  },
+  {
+    "agent_lesson": "Paid reach often complements credible organic proof rather than substituting for it. Marketing tests incrementality; Sales checks lead quality; Finance validates contribution.",
+    "agent_targets": [
+      "marketing_agent",
+      "sales_agent",
+      "finance_agent"
+    ],
+    "decision_pressure": "Platforms report clicks and intention signals quickly, encouraging uniform spend before the business has proof, reviews, conversion capacity, or a causal holdout.",
+    "domains": [
+      "marketing",
+      "sales",
+      "finance"
+    ],
+    "evidence_needed": [
+      "Organic traffic, rating, review count, and listing completeness",
+      "Customer segment and purchase-intent baseline",
+      "Randomized or credible holdout design",
+      "Qualified leads, orders, contribution, and repeat behavior",
+      "Average order value, returns, fulfilment cost, and CAC ceiling",
+      "Capacity and customer-experience effects",
+      "Incremental return by business/segment attribute"
+    ],
+    "hard_gate_candidate": "Scaled ad spend requires a readiness audit, incremental measurement, contribution economics, and capacity/customer-experience guardrails.",
+    "id": "bk089-paid-digital-ads-amplify-readiness",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/085-bk089-paid-digital-ads-amplify-readiness.md",
+    "local_file": "archives/business-knowledge/research/marketing/nber_digital_advertising_w30925.pdf",
+    "mistake_or_risk": "Do not promise the Yelp restaurant experiment's 7–19% purchase-intention lift or 5% review lift elsewhere. Effects varied: independent, higher-rated, more-reviewed, and organically visited firms gained more.",
+    "recommended_next_action": "Audit listing accuracy, rating/review proof, offer, landing conversion, average order value, contribution after shipping/returns/discounts, repeat purchase, fulfilment capacity, and CAC ceiling; use randomized geo/audience/time holdouts where feasible; start with high-readiness segments; measure incremental qualified demand, orders, contribution, reviews, repeat behavior, and saturation.",
+    "red_flags": [
+      "Clicks are treated as revenue",
+      "Ads launch before listing and conversion hygiene",
+      "Platform-attributed sales have no holdout",
+      "Poor reviews or capacity constraints are ignored",
+      "Average ROAS hides segment losses",
+      "Creative promise exceeds product or fulfilment proof"
+    ],
+    "retrieval_triggers": [
+      "should small business run ads",
+      "digital advertising ROI",
+      "Yelp ads",
+      "paid ads no sales",
+      "organic proof before ads"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "A small business is deciding whether paid platform advertising will create incremental demand or merely buy visibility for an unready listing and weak offer.",
+    "source_type": "large_scale_randomized_field_experiment",
+    "source_url": "https://www.nber.org/papers/w30925",
+    "tags": [
+      "digital_advertising",
+      "small_business",
+      "organic_traffic",
+      "reviews",
+      "incrementality"
+    ],
+    "title": "Digital advertising: test paid reach against organic proof and business readiness",
+    "trust_level": "high"
+  },
+  {
+    "agent_lesson": "For many local SMBs, accurate discovery and response infrastructure is the first digital marketing capability, not an administrative afterthought.",
+    "agent_targets": [
+      "marketing_agent",
+      "sales_agent"
+    ],
+    "decision_pressure": "Campaigns feel strategic, while claiming a free listing, fixing hours, and building evidence looks basic and can expose weak ratings.",
+    "domains": [
+      "marketing",
+      "sales"
+    ],
+    "evidence_needed": [
+      "ICP discovery platforms and queries",
+      "Listing ownership, accuracy, and duplication status",
+      "Contact/booking route and response owner",
+      "Authentic rating, review, and complaint pattern",
+      "Discovery, contact, conversion, and revenue baseline",
+      "Platform policy and privacy requirements"
+    ],
+    "hard_gate_candidate": "Local paid campaigns require verified listings, authentic proof, working response paths, and conversion tracking.",
+    "id": "bk090-local-listing-minimum-marketing-infrastructure",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/086-bk090-local-listing-minimum-marketing-infrastructure.md",
+    "local_file": "archives/business-knowledge/research/marketing/nber_online_listings_w30810.pdf",
+    "mistake_or_risk": "Do not guarantee the restaurant study's estimated 5% revenue increase or infer that every platform fits every business. Businesses that stayed offline also tended to have lower ratings, so presence and reputation must be managed together.",
+    "recommended_next_action": "Identify where the ICP searches; claim and verify the listing; standardize name, category, address, phone, hours, offer, photos, and proof; route enquiries; request authentic reviews after real service; respond to issues; track discovery-to-contact-to-revenue before adding paid reach.",
+    "red_flags": [
+      "Ads point to an inaccurate or unclaimed listing",
+      "Reviews are purchased or fabricated",
+      "Phone/messages have no response owner",
+      "Only ranking is tracked",
+      "Offline reputation problems are hidden rather than fixed"
+    ],
+    "retrieval_triggers": [
+      "business not on Google",
+      "local business listing",
+      "online presence SMB",
+      "local marketing basics",
+      "claim business profile"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "A local business is absent, duplicated, inaccurate, or unmanaged on major discovery platforms while considering paid media and advanced digital tactics.",
+    "source_type": "natural_experiment_and_administrative_data",
+    "source_url": "https://www.nber.org/papers/w30810",
+    "tags": [
+      "local_marketing",
+      "online_listing",
+      "small_business",
+      "discoverability",
+      "reputation"
+    ],
+    "title": "Local discovery: establish a verified online listing before sophisticated acquisition campaigns",
+    "trust_level": "high"
+  },
+  {
+    "agent_lesson": "Good selling is not maximum persuasion; it is helping the right customer select the right trade-off, then measuring the relationship that follows.",
+    "agent_targets": [
+      "marketing_agent",
+      "sales_agent",
+      "compliance_agent",
+      "manager_coo"
+    ],
+    "decision_pressure": "Teams fear that honest comparison will reduce conversion, so they optimize acquisition while poor-fit customers underuse, complain, cancel, or suffer avoidable harm.",
+    "domains": [
+      "marketing",
+      "sales",
+      "compliance",
+      "manager_coo"
+    ],
+    "evidence_needed": [
+      "Material benefits, limits, fees, and customer-fit criteria",
+      "Disclosure prominence and comprehension",
+      "Choice distribution and acquisition",
+      "Usage, retention, complaints, and harm",
+      "Results by prior category experience",
+      "Promotion interaction and compliance review"
+    ],
+    "hard_gate_candidate": "Multi-option offers require material-tradeoff disclosure, comprehension checks, downstream fit metrics, and Compliance review.",
+    "id": "bk091-tradeoff-transparency-for-customer-fit",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/087-bk091-tradeoff-transparency-for-customer-fit.md",
+    "local_file": "archives/business-knowledge/research/marketing/hbs_tradeoff_transparency.pdf",
+    "mistake_or_risk": "Do not claim transparency always lifts acquisition: the 393,036-prospect bank experiment found no significant acquisition effect, but changed choices and improved later engagement and retention among account openers; promotion weakened some benefits.",
+    "recommended_next_action": "Identify customer jobs and material trade-offs; present a balanced comparison at the decision point; test comprehension and choice quality; track acquisition separately from product fit, usage, cancellation, complaints, late payment/harm, and promotion interaction; let Compliance validate completeness and prominence.",
+    "red_flags": [
+      "Only advantages are compared",
+      "Disclosure exists in fine print but not the choice interface",
+      "Conversion is measured without downstream fit",
+      "Promotion steers buyers away from suitable options",
+      "Transparency is used to excuse a fundamentally harmful offer"
+    ],
+    "retrieval_triggers": [
+      "show product disadvantages",
+      "customer fit",
+      "reduce cancellations",
+      "transparent sales",
+      "compare plans honestly"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "Several products or plans suit different customers, and acquisition messaging can simplify the choice by emphasizing benefits while obscuring meaningful trade-offs.",
+    "source_type": "large_scale_randomized_field_experiment",
+    "source_url": "https://www.hbs.edu/ris/Publication%20Files/20-013_Jan_2021_revision_5e19ba8f-9ced-4fdc-b69f-fc3e19fdbd23.pdf",
+    "tags": [
+      "tradeoff_transparency",
+      "customer_fit",
+      "retention",
+      "offer_design",
+      "disclosure"
+    ],
+    "title": "Offer design: disclose meaningful trade-offs to improve customer fit, usage, and retention",
+    "trust_level": "high"
+  },
+  {
+    "agent_lesson": "Operational transparency can be credible marketing when it reveals genuine value creation; it is an operating-design intervention, not content decoration.",
+    "agent_targets": [
+      "marketing_agent",
+      "sales_agent",
+      "manager_coo"
+    ],
+    "decision_pressure": "Marketing can make unsupported claims, or operations can expose everything without considering privacy, safety, distraction, or whether the visible process is actually healthy.",
+    "domains": [
+      "marketing",
+      "sales",
+      "manager_coo"
+    ],
+    "evidence_needed": [
+      "Customer uncertainty the visibility should resolve",
+      "Real process step and value mechanism",
+      "Privacy, safety, and employee-consent controls",
+      "Perceived and objective quality",
+      "Cycle time and employee response",
+      "Complaint and adverse-behavior monitoring"
+    ],
+    "hard_gate_candidate": "Operational-transparency campaigns require truthful process proof, privacy/safety review, employee impact checks, and objective quality metrics.",
+    "id": "bk092-operational-transparency-as-service-proof",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/088-bk092-operational-transparency-as-service-proof.md",
+    "local_file": "archives/business-knowledge/research/marketing/hbs_operational_transparency.pdf",
+    "mistake_or_risk": "Do not generalize the food-service studies' 22.2% perceived-quality and 19.2% throughput results to every setting. Visibility can backfire when work is unsafe, private, confusing, staged, or burdens employees.",
+    "recommended_next_action": "Select a safe, truthful process moment that demonstrates relevant effort or progress; protect customer/employee privacy; pilot one-way or mutual visibility; measure perceived value, objective quality, speed, employee effort/satisfaction, and complaints; remove theatrical steps with no customer value.",
+    "red_flags": [
+      "Backstage is staged for appearance",
+      "Sensitive customer or employee information is exposed",
+      "Visibility adds work without value",
+      "Perception rises while objective quality falls",
+      "Employees feel surveilled rather than connected to impact"
+    ],
+    "retrieval_triggers": [
+      "show behind the scenes",
+      "service trust",
+      "prove service quality",
+      "operational transparency",
+      "customers cannot see effort"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "Customers cannot see the work behind a service and undervalue effort, while employees are disconnected from the beneficiary of their work.",
+    "source_type": "multi_study_field_and_laboratory_experiments",
+    "source_url": "https://www.hbs.edu/ris/Publication%20Files/14-115_aee7737a-a405-46f1-85e9-67882dd95435.pdf",
+    "tags": [
+      "operational_transparency",
+      "service_marketing",
+      "trust",
+      "employee_motivation",
+      "process_proof"
+    ],
+    "title": "Service marketing: reveal selected real work to make effort credible and connect employees to customer impact",
+    "trust_level": "high"
+  },
+  {
+    "agent_lesson": "Marketing designs the mechanism, Sales validates referred-customer quality, and Finance validates incremental contribution. Reward the scarce action rather than the most visible participant.",
+    "agent_targets": [
+      "marketing_agent",
+      "sales_agent",
+      "finance_agent"
+    ],
+    "decision_pressure": "The default is to raise the referrer's reward because the sender is visible, even when recipient effort—not sender willingness—is the binding constraint.",
+    "domains": [
+      "marketing",
+      "sales",
+      "finance"
+    ],
+    "evidence_needed": [
+      "Sender willingness and referral completion by variant",
+      "Recipient view, activation, and purchase by variant",
+      "Incentive and fulfilment cost",
+      "Incremental contribution and retention",
+      "Duplicate, self-referral, and low-quality patterns",
+      "Consent, tax, platform, and communication-policy review"
+    ],
+    "hard_gate_candidate": "Scaled referral incentives require verified activation, fraud controls, contribution economics, retention, and communication-policy review.",
+    "id": "bk094-recipient-benefiting-referral-incentives",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/090-bk094-recipient-benefiting-referral-incentives.md",
+    "local_file": "archives/business-knowledge/research/hbs/GershonCryderJohn - Why Prosocial Incentives Work_3a65737a-0749-4008-86f6-70aa9945db97.pdf",
+    "mistake_or_risk": "Do not optimize referral messages sent or copy the study's consumer effect sizes. Incentives can attract low-fit customers, create gaming, weaken trust, or violate consent, tax, anti-spam, and platform rules.",
+    "recommended_next_action": "Map the sender and recipient actions separately; test no reward, sender reward, recipient reward, shared reward, and a prosocial non-cash variant where appropriate; keep total value comparable; measure verified activation, contribution, fraud, repeat use, and sender reputation.",
+    "red_flags": [
+      "Referral volume rises while activation falls",
+      "Reward value differs across test cells",
+      "Existing organic referrals are paid without an incrementality test",
+      "Customers can self-refer or create duplicate accounts",
+      "Sales pressure damages the referrer's relationship"
+    ],
+    "retrieval_triggers": [
+      "referral program not working",
+      "refer a friend incentive",
+      "reward customer or friend",
+      "word of mouth growth",
+      "referral fraud"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "A referral programme produces links or introductions, but too few referred prospects take the costly next step, such as registering, attending, buying, or activating.",
+    "source_type": "multi_study_field_and_controlled_experiments",
+    "source_url": "https://www.hbs.edu/ris/download.aspx?name=GershonCryderJohn+-+Why+Prosocial+Incentives+Work.pdf",
+    "tags": [
+      "referrals",
+      "incentives",
+      "word_of_mouth",
+      "acquisition",
+      "unit_economics"
+    ],
+    "title": "Customer referrals: reward the action bottleneck, not automatically the referrer",
+    "trust_level": "high"
+  },
+  {
+    "agent_lesson": "Sales and Marketing frame willingness-to-pay hypotheses; Finance sets economic guardrails; the Manager approves the learning budget and fairness envelope, not individual prices.",
+    "agent_targets": [
+      "sales_agent",
+      "marketing_agent",
+      "finance_agent",
+      "manager_coo"
+    ],
+    "decision_pressure": "Teams either avoid learning to protect this month's revenue or change prices opportunistically without a design that can separate price response from product and time effects.",
+    "domains": [
+      "sales",
+      "marketing",
+      "finance",
+      "manager_coo"
+    ],
+    "evidence_needed": [
+      "Price decision and comparable product attributes",
+      "Baseline demand, margin, capacity, and seasonality",
+      "Randomization or credible comparison design",
+      "Maximum revenue/margin learning budget",
+      "Customer fairness, contract, and legal constraints",
+      "Demand response uncertainty and transfer test"
+    ],
+    "hard_gate_candidate": "Adaptive pricing requires an approved learning budget, price and margin bounds, fairness review, causal design, and explicit transfer limits.",
+    "id": "bk095-bounded-learn-then-earn-pricing",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/091-bk095-bounded-learn-then-earn-pricing.md",
+    "local_file": "archives/business-knowledge/research/hbs/Demand Learning and Pricing for Varying Assortments_d1e6413b-cfb4-4a7a-94d7-0d8534287f20.pdf",
+    "mistake_or_risk": "Do not expose vulnerable customers to arbitrary discrimination, breach quoted or regulated prices, or allow an algorithm to explore without price, margin, volume, reputation, and cash limits.",
+    "recommended_next_action": "Define the decision and reusable product attributes; estimate downside scenarios; preapprove a small exploration budget, price band, margin floor, customer-fairness rule, sample requirement, and stop conditions; randomize where feasible; then use the learning only in comparable contexts and continue monitoring.",
+    "red_flags": [
+      "Price changes coincide with promotion or assortment changes without controls",
+      "No maximum downside or stopping rule",
+      "Revenue is optimized while contribution or capacity is ignored",
+      "Different customers discover unexplained unfair prices",
+      "One experiment is applied to a materially different segment"
+    ],
+    "retrieval_triggers": [
+      "how to test price",
+      "pricing experiment",
+      "unknown demand curve",
+      "dynamic pricing SMB",
+      "learn then earn"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "The business lacks reliable price-response evidence because products, inventory, segments, or seasons change and historical prices barely vary.",
+    "source_type": "field_experiment_and_pricing_algorithm",
+    "source_url": "https://www.hbs.edu/ris/download.aspx?name=Demand+Learning+and+Pricing+for+Varying+Assortments.pdf",
+    "tags": [
+      "pricing",
+      "experimentation",
+      "demand_learning",
+      "margin",
+      "governance"
+    ],
+    "title": "Pricing experiments: buy demand learning with a bounded loss budget",
+    "trust_level": "high"
+  },
+  {
+    "agent_lesson": "Marketing owns causal targeting design, Finance owns incremental contribution, and Sales checks channel effects. A response model is not an incrementality model.",
+    "agent_targets": [
+      "marketing_agent",
+      "finance_agent",
+      "sales_agent"
+    ],
+    "decision_pressure": "Response propensity is easier to predict than causal lift, so high-propensity customers receive margin giveaways even when the promotion did not change their behaviour.",
+    "domains": [
+      "marketing",
+      "finance",
+      "sales"
+    ],
+    "evidence_needed": [
+      "Randomized experiment registry and stable definitions",
+      "Treatment exposure and control integrity",
+      "Incremental orders, contribution, and retention",
+      "Offer/customer/channel similarity to history",
+      "Out-of-sample and new-campaign holdout performance",
+      "Privacy, fairness, and exclusion rules"
+    ],
+    "hard_gate_candidate": "Model-targeted promotions require randomized historical evidence, stable definitions, a live holdout, contribution economics, and drift monitoring.",
+    "id": "bk096-promotion-incrementality-experiment-library",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/092-bk096-promotion-incrementality-experiment-library.md",
+    "local_file": "archives/business-knowledge/research/hbs/24-076_c3424b9b-adbb-4aa9-897f-c29ba27687aa.pdf",
+    "mistake_or_risk": "Do not deploy an incrementality model when experiment definitions, outcomes, eligibility, or randomization are inconsistent. Historical patterns can fail after a new channel, product, segment, or offer concept.",
+    "recommended_next_action": "Create an experiment registry with treatment, control, eligibility, exposure, cost, outcome window, and contribution; train only on comparable randomized history; reserve a holdout for the new campaign; compare model targeting with simple policies; monitor uplift, margin, retention, complaints, and drift.",
+    "red_flags": [
+      "Only redeemers or attributed buyers are analyzed",
+      "No untreated control exists",
+      "Discount cost is excluded from uplift",
+      "Outcome windows changed across experiments",
+      "A materially new offer is launched without a fresh holdout"
+    ],
+    "retrieval_triggers": [
+      "promotion incrementality",
+      "discount customers who would buy",
+      "uplift model",
+      "coupon targeting",
+      "causal marketing"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "The business has run many randomized offers and wants to decide which customers should receive a new promotion without discounting customers who would buy anyway.",
+    "source_type": "large_multi_experiment_machine_learning_study",
+    "source_url": "https://www.hbs.edu/ris/download.aspx?name=24-076.pdf",
+    "tags": [
+      "promotions",
+      "incrementality",
+      "experimentation",
+      "targeting",
+      "machine_learning"
+    ],
+    "title": "Promotion targeting: learn incrementality from a consistent experiment library",
+    "trust_level": "high"
+  },
+  {
+    "agent_lesson": "The Manager owns continuity choices; Finance quantifies cash and concentration exposure; Sales translates feasible recovery into customer commitments.",
+    "agent_targets": [
+      "manager_coo",
+      "finance_agent",
+      "sales_agent"
+    ],
+    "decision_pressure": "Teams apply one rule—always diversify or always protect incumbents—even though substitutability, input complexity, qualification time, quality, and network position differ.",
+    "domains": [
+      "manager_coo",
+      "finance",
+      "sales"
+    ],
+    "evidence_needed": [
+      "Product/customer impact of each critical input",
+      "Supplier, geography, and route concentration",
+      "Substitutability and qualification lead time",
+      "Inventory cover and recovery-time objective",
+      "Supplier financial/operational/network indicators",
+      "Fallback economics and customer communication plan"
+    ],
+    "hard_gate_candidate": "Critical inputs require dependency mapping, tested alternatives or an explicit exception, recovery targets, and customer-impact scenarios.",
+    "id": "bk100-india-supply-chain-dependency-resilience",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/096-bk100-india-supply-chain-dependency-resilience.md",
+    "local_file": "archives/business-knowledge/research/operations/nber_india_supply_chain_resilience_w30689.pdf",
+    "mistake_or_risk": "Do not infer that every concentrated relationship is fragile. Indian transaction evidence found difficult-to-replace complex links could be more persistent, while exposed firms also formed new links with larger, better-connected suppliers.",
+    "recommended_next_action": "Map tier-one dependencies by revenue/service impact, input complexity, concentration, geography, switching and qualification time, inventory cover, contractual rights, and supplier network strength; prequalify alternatives where feasible; preserve scarce relationship-specific knowledge; run disruption scenarios.",
+    "red_flags": [
+      "Single-source exposure is invisible below the direct supplier",
+      "Backup supplier has never passed a real qualification order",
+      "Cheapest supplier is chosen without recovery analysis",
+      "Complex relationship knowledge is discarded during a temporary shock",
+      "Sales promises dates without supply scenario evidence"
+    ],
+    "retrieval_triggers": [
+      "supplier disruption India",
+      "single supplier risk",
+      "dual sourcing",
+      "supply chain resilience",
+      "supplier lockdown"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "A critical supplier, geography, logistics route, or input faces disruption and the business must decide whether to preserve the relationship, switch, dual-source, or redesign the offer.",
+    "source_type": "event_study_firm_transaction_network",
+    "source_url": "https://www.nber.org/papers/w30689",
+    "tags": [
+      "supply_chain",
+      "india",
+      "resilience",
+      "supplier_risk",
+      "business_continuity"
+    ],
+    "title": "Supply resilience: distinguish irreplaceable relationships from replaceable capacity",
+    "trust_level": "high"
+  },
+  {
+    "agent_lesson": "Sales diagnoses the account mechanism, Finance compares service-fix and discount economics, and the Manager resolves cross-functional ownership.",
+    "agent_targets": [
+      "sales_agent",
+      "finance_agent",
+      "manager_coo"
+    ],
+    "decision_pressure": "Sales reaches for discounts and incentives because service failures, partial fills, substitutions, claims, and recovery delays are recorded in operations rather than the account plan.",
+    "domains": [
+      "sales",
+      "finance",
+      "manager_coo"
+    ],
+    "evidence_needed": [
+      "Requested and fulfilled quantity/date by account and SKU",
+      "Fill rate, stockouts, substitutions, and recovery time",
+      "Retailer sell-through and inventory position",
+      "Order trend before and after service changes",
+      "Price, promotion, assortment, and season controls",
+      "Contribution impact of service fix versus discount"
+    ],
+    "hard_gate_candidate": "Material channel discounts require account-level service reliability, sell-through, order trend, and contribution evidence.",
+    "id": "bk101-supplier-service-reliability-channel-demand",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/097-bk101-supplier-service-reliability-channel-demand.md",
+    "local_file": "archives/business-knowledge/research/hbs/11-034_95f981a4-388b-40f3-9751-fb654b05162e.pdf",
+    "mistake_or_risk": "Do not copy the apparel study's estimated service-demand relationship as a universal elasticity or assume correlation proves every order decline was caused by fill rate.",
+    "recommended_next_action": "Join account orders with requested versus supplied quantity/date, stockouts, substitutions, claims, recovery time, sell-through, and margin; identify reliability-sensitive accounts/SKUs; repair root causes with Operations before funding a price concession; test whether restored service changes future orders.",
+    "red_flags": [
+      "Discount is offered before service history is reviewed",
+      "Aggregate fill rate hides priority-account failures",
+      "Revenue credit ignores partial or late fulfilment",
+      "Seller cannot see claims and stockouts",
+      "Pilot result is presented as guaranteed causal uplift"
+    ],
+    "retrieval_triggers": [
+      "distributor orders declining",
+      "retailer not reordering",
+      "fill rate sales impact",
+      "channel service level",
+      "discount or improve delivery"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "Retailers, distributors, or resellers reduce orders even though list price, sell-through opportunity, and seller activity appear competitive.",
+    "source_type": "longitudinal_supplier_retailer_data_and_pilot",
+    "source_url": "https://www.hbs.edu/ris/download.aspx?name=11-034.pdf",
+    "tags": [
+      "channel_sales",
+      "fill_rate",
+      "supplier_service",
+      "retailer_demand",
+      "reliability"
+    ],
+    "title": "Channel sales: treat fill rate and service reliability as demand-generation variables",
+    "trust_level": "medium"
+  },
+  {
+    "agent_lesson": "Finance controls the liquidity model, Sales manages customer-credit consequences, and the Manager arbitrates continuity and relationship trade-offs.",
+    "agent_targets": [
+      "finance_agent",
+      "sales_agent",
+      "manager_coo"
+    ],
+    "decision_pressure": "The business may stretch every supplier and freeze every customer account uniformly, transmitting distress to partners and damaging high-value relationships.",
+    "domains": [
+      "finance",
+      "sales",
+      "manager_coo"
+    ],
+    "evidence_needed": [
+      "13-week cash forecast with stress cases",
+      "Receivables ageing, disputes, and probability/timing of collection",
+      "Payables by criticality, terms, and supplier dependency",
+      "Customer contribution, credit risk, and relationship value",
+      "Financing facilities, covenants, and statutory priorities",
+      "Counterparty communication and approval log"
+    ],
+    "hard_gate_candidate": "Liquidity-crisis actions require a 13-week forecast, counterparty segmentation, protected obligations, named approvals, and daily variance review.",
+    "id": "bk102-trade-credit-liquidity-shock",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/098-bk102-trade-credit-liquidity-shock.md",
+    "local_file": "archives/business-knowledge/research/finance/nber_trade_credit_liquidity_w22286.pdf",
+    "mistake_or_risk": "Do not treat supplier credit or faster customer collection as free cash. Changes can trigger supply holds, lost discounts, customer churn, bad debt, tax/accounting effects, and reputational damage.",
+    "recommended_next_action": "Build a 13-week cash and counterparty map; segment receivables and payables by collectability, criticality, concentration, terms, disputes, and relationship value; protect payroll/statutory and continuity-critical payments; negotiate rather than surprise; price new credit deliberately; monitor covenant and insolvency indicators.",
+    "red_flags": [
+      "All suppliers are delayed by the same number of days",
+      "Sales extends credit without cash-cost approval",
+      "Collections threaten disputed or strategic accounts blindly",
+      "Statutory dues or payroll are omitted from the crisis view",
+      "A temporary gap is funded by structurally unprofitable sales"
+    ],
+    "retrieval_triggers": [
+      "cash crunch",
+      "delay supplier payment",
+      "tighten customer credit",
+      "trade credit liquidity",
+      "13 week cash flow"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "A fraud, delayed receivable, bank interruption, or demand shock abruptly reduces cash and threatens payroll, suppliers, and customer fulfilment.",
+    "source_type": "quasi_experimental_liquidity_shock",
+    "source_url": "https://www.nber.org/papers/w22286",
+    "tags": [
+      "trade_credit",
+      "working_capital",
+      "liquidity",
+      "collections",
+      "supplier_relationships"
+    ],
+    "title": "Liquidity shock: manage supplier and customer credit as one connected system",
+    "trust_level": "high"
+  },
+  {
+    "agent_lesson": "Finance designs controls and reconciliation, Sales protects the customer interaction, and the Manager owns continuity thresholds and provider concentration.",
+    "agent_targets": [
+      "finance_agent",
+      "manager_coo",
+      "sales_agent"
+    ],
+    "decision_pressure": "Staff improvise by sharing personal accounts, screenshots, handwritten credit, or duplicate payment links, creating fraud, privacy, tax, and reconciliation failures after service returns.",
+    "domains": [
+      "finance",
+      "manager_coo",
+      "sales"
+    ],
+    "evidence_needed": [
+      "Payment-to-settlement dependency map",
+      "Independence and tested capacity of fallback methods",
+      "Fraud, cash-safety, privacy, and regulatory controls",
+      "Offline limits and staff decision rights",
+      "Unique transaction log and customer receipt path",
+      "Restoration, duplicate, refund, and settlement reconciliation test"
+    ],
+    "hard_gate_candidate": "Revenue-critical payment flows require an independently tested fallback, offline limits, customer evidence, and post-restoration reconciliation.",
+    "id": "bk104-payment-outage-fallback-and-reconciliation",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/100-bk104-payment-outage-fallback-and-reconciliation.md",
+    "local_file": "archives/business-knowledge/research/finance/nber_payment_resilience_w35115.pdf",
+    "mistake_or_risk": "Do not prescribe cash universally or transfer the multi-country study's behaviour directly to India. Fallbacks must fit law, safety, customer needs, fraud controls, and the business's actual payment rails.",
+    "recommended_next_action": "Map payment and settlement dependencies; configure a genuinely independent alternate bank/acquirer/rail and a controlled offline or cash procedure where appropriate; publish staff thresholds and customer messages; record fallback transactions uniquely; rehearse outage, restoration, duplicate/refund, and settlement reconciliation.",
+    "red_flags": [
+      "Fallback uses the same bank/network/provider dependency",
+      "Staff accept screenshots as final payment proof",
+      "Personal accounts are used for business collections",
+      "Offline sales have no limit or identity/evidence rule",
+      "No owner reconciles duplicates after recovery"
+    ],
+    "retrieval_triggers": [
+      "UPI down business",
+      "payment gateway outage",
+      "offline payment fallback",
+      "cash backup",
+      "duplicate payment reconciliation"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "The primary payment rail, bank, acquirer, device, network, or settlement provider becomes unavailable during trading.",
+    "source_type": "payment_outage_event_studies_surveys_and_rct",
+    "source_url": "https://www.nber.org/papers/w35115",
+    "tags": [
+      "payments",
+      "business_continuity",
+      "outage",
+      "reconciliation",
+      "customer_experience"
+    ],
+    "title": "Payment resilience: preserve alternate acceptance paths and rehearse reconciliation",
+    "trust_level": "high"
+  },
+  {
+    "agent_lesson": "Finance controls beneficiary and payment changes; Sales verifies customer identity and credit; Compliance owns incident escalation; the Manager supports controls even under executive urgency.",
+    "agent_targets": [
+      "finance_agent",
+      "compliance_agent",
+      "sales_agent",
+      "manager_coo"
+    ],
+    "decision_pressure": "The message looks authentic and urgency discourages independent verification; replying or calling details inside the same message keeps the attacker inside the control loop.",
+    "domains": [
+      "finance",
+      "compliance",
+      "sales",
+      "manager_coo"
+    ],
+    "evidence_needed": [
+      "Original message headers/domain and change request",
+      "Previously verified contact and independent callback record",
+      "Master-data change and maker-checker approvals",
+      "Beneficiary age, test payment, limit, and cooling period",
+      "PO/customer identity and credit verification",
+      "Bank recall, incident, legal, insurer, and regulator escalation path"
+    ],
+    "hard_gate_candidate": "Bank, beneficiary, refund, PO, and material credit changes require independent known-channel verification, dual approval, and logged evidence.",
+    "id": "bk107-bank-detail-change-and-invoice-fraud",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/103-bk107-bank-detail-change-and-invoice-fraud.md",
+    "local_file": "archives/business-knowledge/research/compliance/ic3_vendor_invoice_fraud_2023.html",
+    "mistake_or_risk": "Do not rely on display name, thread history, attached letterhead, caller ID, invoice, or the requesting channel. IC3 cases are US incident intelligence, not Indian prevalence estimates.",
+    "recommended_next_action": "Freeze the change; compare exact domain and master data; independently call a previously verified number; require maker-checker approval; apply a cooling period and low test limit for changed beneficiaries; verify new customer POs and credit through the organization's main contact; rehearse rapid bank recall, evidence preservation, and India-specific reporting escalation.",
+    "red_flags": [
+      "Secrecy or urgency from a senior-looking sender",
+      "Slightly altered domain or reply-to address",
+      "Bank change immediately before a large payment",
+      "Verification uses a number supplied in the same request",
+      "New customer seeks large Net-30/60 goods before independent verification"
+    ],
+    "retrieval_triggers": [
+      "vendor changed bank account",
+      "CEO urgent payment email",
+      "invoice redirection fraud",
+      "fake purchase order",
+      "business email compromise"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "A familiar vendor, customer, executive, employee, lawyer, or new account sends urgent bank-detail, beneficiary, purchase-order, credit-term, refund, or payment instructions.",
+    "source_type": "official_incident_scenarios_and_reporting",
+    "source_url": "https://www.ic3.gov/PSA/2023/PSA230324",
+    "tags": [
+      "business_email_compromise",
+      "invoice_fraud",
+      "beneficiary_change",
+      "dual_approval",
+      "vendor_fraud"
+    ],
+    "title": "Payment fraud: verify beneficiary and credit changes outside the requesting channel",
+    "trust_level": "high"
+  },
+  {
+    "agent_lesson": "Compliance owns specialist legal escalation and programme design; commercial agents recognize and stop risky conversations; the Manager reinforces independent conduct and record discipline.",
+    "agent_targets": [
+      "compliance_agent",
+      "sales_agent",
+      "marketing_agent",
+      "manager_coo"
+    ],
+    "decision_pressure": "Commercially useful discussion can drift into current/future price, customers, territories, output, bid intentions, sensitive costs, boycotts, or coordinated conduct before anyone recognizes the risk.",
+    "domains": [
+      "compliance",
+      "sales",
+      "marketing",
+      "manager_coo"
+    ],
+    "evidence_needed": [
+      "Participants, purpose, agenda, and legal/business rationale",
+      "Information requested, source, sensitivity, and aggregation",
+      "Meeting minutes and any objection/exit record",
+      "Independent bid and pricing decision evidence",
+      "Current agreements and commercial restrictions register",
+      "Current CCI/legal advice for the actual facts"
+    ],
+    "hard_gate_candidate": "Competitor, tender, association, and sensitive-data interactions require approved purpose, topic limits, records, an exit protocol, and current legal escalation.",
+    "id": "bk108-india-competition-contact-and-bid-protocol",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/104-bk108-india-competition-contact-and-bid-protocol.md",
+    "local_file": "archives/business-knowledge/research/compliance/cci_competition_advocacy_2026.pdf",
+    "mistake_or_risk": "Do not make legal conclusions from a card. Indian competition analysis is fact-specific and mutable; vertical restrictions, dominance, joint work, public information, and legitimate associations can require qualified current advice.",
+    "recommended_next_action": "Define prohibited/sensitive topics and an exit/escalation script; preapprove agenda and attendees for competitor/association meetings; keep accurate minutes; never share bid intentions or competitively sensitive non-public data without approved legal structure; maintain an agreement register; review pricing, distribution, exclusivity, tying, and tender practices with current counsel.",
+    "red_flags": [
+      "Competitor asks what price or customer the business will pursue",
+      "Trade association circulates future pricing or output intentions",
+      "Bidders discuss who should win or abstain",
+      "Sensitive discussion is moved off-record",
+      "Commercial agreement has no owner or competition review"
+    ],
+    "retrieval_triggers": [
+      "competitor asked our price",
+      "bid coordination",
+      "trade association meeting",
+      "CCI compliance program",
+      "exclusive distribution competition law India"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "Sales, Marketing, Procurement, or leadership meets competitors through tenders, associations, distributors, joint initiatives, benchmarking, hiring, or informal industry conversations.",
+    "source_type": "official_indian_regulator_guidance",
+    "source_url": "https://www.cci.gov.in/images/publications_booklet/en/competition-advocacy-booklet-2026-english1779277830.pdf",
+    "tags": [
+      "competition_law",
+      "india",
+      "bid_rigging",
+      "trade_association",
+      "pricing"
+    ],
+    "title": "Competition compliance: control competitor contacts, bids, pricing information, and association meetings",
+    "trust_level": "high"
+  },
+  {
+    "agent_lesson": "Specialists own domain interpretation; the Manager asks whether the comparison population, definition, period, and decision mechanism actually match the business.",
+    "agent_targets": [
+      "manager_coo",
+      "finance_agent",
+      "marketing_agent",
+      "sales_agent"
+    ],
+    "decision_pressure": "A credible publisher and a precise percentage make the number look universal even when the sample covers a specific firm size, registration status, city set, sector, period, and weighted survey design.",
+    "domains": [
+      "manager_coo",
+      "finance",
+      "marketing",
+      "sales"
+    ],
+    "evidence_needed": [
+      "Exact questionnaire item and response coding",
+      "Target population, registration and employee-size definition",
+      "Cities/regions, sector coverage, and reference period",
+      "Sampling strata, weights, missing values, and uncertainty",
+      "Client metric definition and comparability gaps",
+      "Microdata access/licence or published table provenance"
+    ],
+    "hard_gate_candidate": "Business benchmarks used in recommendations require variable provenance, matched universe and period, survey weights where applicable, uncertainty, and explicit comparability limits.",
+    "id": "bk109-india-smb-survey-benchmark-discipline",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/105-bk109-india-smb-survey-benchmark-discipline.md",
+    "local_file": "archives/business-knowledge/research/datasets/ddi-documentation-english_microdata-6495.pdf",
+    "mistake_or_risk": "Do not treat raw case counts as population prevalence or combine the Micro Enterprise Survey with the broader Enterprise Survey as if their universes and questionnaires were identical.",
+    "recommended_next_action": "Record the exact variable/question, universe, fieldwork and fiscal period, firm-size and registration definition, cities/regions, sector, missing-value codes, stratification, and weight; calculate weighted estimates with uncertainty where microdata access permits; state comparability gaps; use the benchmark as context, not a diagnosis.",
+    "red_flags": [
+      "Sample percentage is reported without applying weights",
+      "Nine-city micro-firm result is called all-India SMB prevalence",
+      "Different fiscal periods or variable definitions are compared",
+      "Correlation is presented as a recommended causal intervention",
+      "Restricted or registered microdata is obtained outside its licence process"
+    ],
+    "retrieval_triggers": [
+      "India small business benchmark",
+      "World Bank enterprise survey India",
+      "micro enterprise statistics",
+      "compare SMB performance",
+      "survey weights business"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "An agent uses an Indian business statistic to set a target, diagnose a client, size a problem, compare finance access, or justify a sales/marketing recommendation.",
+    "source_type": "official_weighted_business_survey_and_metadata",
+    "source_url": "https://microdata.worldbank.org/catalog/6495",
+    "tags": [
+      "india",
+      "smb",
+      "benchmarking",
+      "world_bank",
+      "survey_weights"
+    ],
+    "title": "Indian SMB benchmarking: match the survey universe and weights before using a statistic",
+    "trust_level": "high"
+  },
+  {
+    "agent_lesson": "Sales and Marketing design channels, Finance validates economics, and the Manager protects customer-interest boundaries without copying founder philosophy as universal law.",
+    "agent_targets": [
+      "sales_agent",
+      "marketing_agent",
+      "finance_agent",
+      "manager_coo"
+    ],
+    "decision_pressure": "Competitors' paid acquisition and sales targets make visible growth activity tempting even when it may weaken trust or unit economics.",
+    "domains": [
+      "sales",
+      "marketing",
+      "finance",
+      "manager_coo"
+    ],
+    "evidence_needed": [
+      "Contribution and retention by source",
+      "Referral rate and customer reasons",
+      "Customer-harm risk from incentives",
+      "Organic capacity versus opportunity window",
+      "Incremental paid-channel lift"
+    ],
+    "hard_gate_candidate": "A channel philosophy requires contribution, retention, referral, capacity and customer-harm evidence before becoming policy.",
+    "id": "bk111-zerodha-constraint-led-trust-growth",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/107-bk111-zerodha-constraint-led-trust-growth.md",
+    "local_file": "archives/business-knowledge/research/business_cases/india/zerodha_business_philosophy.html",
+    "mistake_or_risk": "This is self-reported evidence from a regulated brokerage with distinctive conditions. It does not prove that advertising, targets or outside capital are inherently harmful.",
+    "recommended_next_action": "Test contribution, retention, referral propensity and organic capacity; remove incentives that reward unsuitable customer actions; run bounded paid experiments only where incremental profitable reach preserves the promise.",
+    "red_flags": [
+      "Organic growth is praised but unmeasured",
+      "Trust excuses a weak product",
+      "Incentives oppose customer interest",
+      "A no-advertising philosophy is copied without category evidence"
+    ],
+    "retrieval_triggers": [
+      "grow without advertising",
+      "word of mouth strategy",
+      "Zerodha growth",
+      "bootstrapped sales",
+      "customer interest incentives"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "Zerodha describes a profitable, bootstrapped operating philosophy centred on product utility, customer-interest constraints and word of mouth rather than advertising and metric-based growth targets.",
+    "source_type": "primary_company_philosophy",
+    "source_url": "https://zerodha.com/about/philosophy",
+    "tags": [
+      "bootstrapping",
+      "word_of_mouth",
+      "trust",
+      "zerodha",
+      "incentives",
+      "india"
+    ],
+    "title": "Zerodha: constraint-led growth can compound trust when customer economics work",
+    "trust_level": "medium"
+  },
+  {
+    "agent_lesson": "Marketing owns evidence-backed repositioning, Sales closes the retry loop, and the Manager verifies that operations substantiate the promise.",
+    "agent_targets": [
+      "marketing_agent",
+      "sales_agent",
+      "manager_coo"
+    ],
+    "decision_pressure": "A bold confession or viral creative looks like the lever, so a business may amplify criticism before fixing the experience.",
+    "domains": [
+      "marketing",
+      "sales",
+      "manager_coo"
+    ],
+    "evidence_needed": [
+      "Structured criticism by segment",
+      "Before/after product test",
+      "Delivery and recovery readiness",
+      "Trial, repeat and complaint outcomes",
+      "Incremental effect beyond discounts"
+    ],
+    "hard_gate_candidate": "A reputation reset requires a verified product change, delivery readiness and repeat/complaint measurement.",
+    "id": "bk114-dominos-product-truth-before-campaign",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/110-bk114-dominos-product-truth-before-campaign.md",
+    "local_file": "archives/business-knowledge/research/business_cases/turnarounds/dominos_2010_annual_report.pdf",
+    "mistake_or_risk": "Do not infer causality from the campaign alone or imitate self-criticism as theatre. The intervention bundled product, message and operations.",
+    "recommended_next_action": "Turn recurring criticism into a tested product change; prepare delivery consistency and recovery; communicate the problem, verifiable change and retry invitation; measure repeat and complaint outcomes, not reach alone.",
+    "red_flags": [
+      "Campaign precedes the fix",
+      "Attention is the only success measure",
+      "Operations cannot prove the promise",
+      "Discount trial is confused with retention"
+    ],
+    "retrieval_triggers": [
+      "product relaunch campaign",
+      "admit product was bad",
+      "Dominos turnaround",
+      "customer criticism marketing",
+      "brand trust recovery"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "Domino's used harsh customer criticism while relaunching its recipe. Its 2010 annual report connects strong US same-store sales with the improved product, advertising and operational execution.",
+    "source_type": "company_annual_report_and_campaign_case",
+    "source_url": "https://ir.dominos.com/static-files/9a709686-fd64-451a-86b5-8ce23511a49a",
+    "tags": [
+      "product",
+      "positioning",
+      "campaign",
+      "dominos",
+      "feedback",
+      "operations"
+    ],
+    "title": "Domino's: truth-telling works only when product and operations change first",
+    "trust_level": "high"
+  },
+  {
+    "agent_lesson": "Specialists define customer and service measures; the Manager may accept a bounded revenue pause to restore a business-critical standard.",
+    "agent_targets": [
+      "manager_coo",
+      "marketing_agent",
+      "sales_agent"
+    ],
+    "decision_pressure": "Stopping revenue feels costlier than adding training around live operations even when staff cannot safely practise the standard there.",
+    "domains": [
+      "manager_coo",
+      "marketing",
+      "sales"
+    ],
+    "evidence_needed": [
+      "Critical standard and variance",
+      "Skill versus system root cause",
+      "Pause cost versus continued harm",
+      "Practice and certification method",
+      "Post-restart quality and repeat measures"
+    ],
+    "hard_gate_candidate": "A materially unreliable critical standard requires containment, root-cause correction and verified restart criteria.",
+    "id": "bk115-starbucks-pause-to-restore-standard",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/111-bk115-starbucks-pause-to-restore-standard.md",
+    "local_file": "archives/business-knowledge/research/HISTORICAL_BUSINESS_CASES_INDEX.md",
+    "mistake_or_risk": "Do not copy a visible closure when the root cause differs or treat training as the whole turnaround. The mechanism is protecting a critical standard with practice, verification and structural correction.",
+    "recommended_next_action": "Identify critical behaviours, observe variance, pause throughput where needed for practice, certify performance, fix staffing/process/equipment causes, and monitor customer and operating outcomes after restart.",
+    "red_flags": [
+      "Training substitutes for process repair",
+      "Closure is publicity theatre",
+      "No observed certification",
+      "Growth resumes before standards recover"
+    ],
+    "retrieval_triggers": [
+      "service quality declined with growth",
+      "close for training",
+      "Starbucks turnaround",
+      "restore standards",
+      "pause sales for quality"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "As rapid expansion weakened its intended experience, Starbucks closed roughly 7,100 US company stores for several hours of espresso training for more than 135,000 people and separately closed weak locations.",
+    "source_type": "primary_company_transformation_memo",
+    "source_url": "https://archive.starbucks.com/uploads/2018/12/4f-transformation-memos-transformation-agenda-communication-6-2008-feb-11-final.pdf",
+    "tags": [
+      "service_quality",
+      "training",
+      "standard",
+      "starbucks",
+      "turnaround",
+      "growth"
+    ],
+    "title": "Starbucks: pause throughput when growth has diluted the service standard",
+    "trust_level": "high"
+  },
+  {
+    "agent_lesson": "Finance owns transition economics, Sales and Marketing own migration, and the Manager judges durable customer and cash value rather than legacy optics.",
+    "agent_targets": [
+      "manager_coo",
+      "finance_agent",
+      "sales_agent",
+      "marketing_agent"
+    ],
+    "decision_pressure": "The legacy model reports more upfront revenue, so teams defend it even when durable customer and competitive economics favour recurring delivery.",
+    "domains": [
+      "manager_coo",
+      "finance",
+      "sales",
+      "marketing"
+    ],
+    "evidence_needed": [
+      "Customer problem improved by model",
+      "Old/new cohort cash contribution",
+      "Conversion, retention, churn and usage",
+      "Revenue and cash timing",
+      "Migration support and downside runway"
+    ],
+    "hard_gate_candidate": "Business-model migration requires cohort economics, an accounting/cash bridge, customer continuity and stop/adjust triggers.",
+    "id": "bk116-adobe-cannibalize-with-transition-metrics",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/112-bk116-adobe-cannibalize-with-transition-metrics.md",
+    "local_file": "archives/business-knowledge/research/business_cases/turnarounds/adobe_fy2012_10k.pdf",
+    "mistake_or_risk": "Not every product should be a subscription, and revenue across models is not comparable without timing adjustments. Adobe's product and brand conditions may not transfer.",
+    "recommended_next_action": "Model old/new cohort cash flow, retention, acquisition and support; define conversion, recurring revenue, churn, usage and runway milestones; segment migration; protect continuity; explicitly authorise cannibalisation.",
+    "red_flags": [
+      "Subscription serves valuation optics only",
+      "No continuing customer value",
+      "Legacy falls before retention is visible",
+      "Bookings rise while activation weakens"
+    ],
+    "retrieval_triggers": [
+      "move to subscription",
+      "cannibalize legacy revenue",
+      "Adobe transition",
+      "ARR transition metrics",
+      "license migration"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "Adobe moved creative products from perpetual licences toward Creative Cloud subscriptions, accepting different revenue timing while tracking subscriptions and recurring revenue; by FY2015 it called perpetual creative revenue immaterial.",
+    "source_type": "primary_company_filings",
+    "source_url": "https://www.adobe.com/content/dam/cc/en/investor-relations/pdfs/ADBE-10K-FY12-FINAL.pdf",
+    "tags": [
+      "subscription",
+      "business_model",
+      "cannibalization",
+      "adobe",
+      "arr",
+      "transition"
+    ],
+    "title": "Adobe: manage deliberate cannibalisation with transition metrics, not legacy revenue",
+    "trust_level": "high"
+  },
+  {
+    "agent_lesson": "Sales and Marketing own customer continuity; the Manager keeps strategic direction and migration execution as separate decisions.",
+    "agent_targets": [
+      "manager_coo",
+      "marketing_agent",
+      "sales_agent"
+    ],
+    "decision_pressure": "Leaders convinced about the destination may treat brand, account continuity, pricing sequence and workflow as execution details.",
+    "domains": [
+      "manager_coo",
+      "marketing",
+      "sales"
+    ],
+    "evidence_needed": [
+      "Strategic case independent of migration",
+      "Before/after customer journey",
+      "Cohort cancellations and reasons",
+      "Support and billing load",
+      "Rollback boundaries and retained learning"
+    ],
+    "hard_gate_candidate": "Material migrations require staged cohorts, continuity, cancellation evidence and component-level rollback.",
+    "id": "bk117-netflix-right-destination-wrong-migration",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/113-bk117-netflix-right-destination-wrong-migration.md",
+    "local_file": "archives/business-knowledge/research/business_cases/failures/netflix_q4_2011_investor_letter.pdf",
+    "mistake_or_risk": "Customer backlash does not prove the strategic destination was wrong, and not all subscriber movement can be attributed to Qwikster. Separate strategy from migration design.",
+    "recommended_next_action": "Map customer discontinuities; test price, brand, account and billing changes separately; preserve continuity; stage cohorts; monitor cancellation reasons and support load; enable component-level rollback.",
+    "red_flags": [
+      "Multiple painful changes launch together",
+      "Internal structure dictates experience",
+      "Rollback equals abandoning strategy",
+      "Objections are dismissed as resistance"
+    ],
+    "retrieval_triggers": [
+      "Qwikster failure",
+      "right strategy bad execution",
+      "migration backlash",
+      "price change churn",
+      "separate brand migration"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "Netflix's move toward streaming was defensible, but its 2011 price and Qwikster separation created friction and became a symbol of not listening. It reversed Qwikster after negative domestic net additions.",
+    "source_type": "primary_company_investor_material",
+    "source_url": "https://s22.q4cdn.com/959853165/files/doc_financials/quarterly_reports/2011/q4/Investor-Letter-Q4-2011.pdf",
+    "tags": [
+      "migration",
+      "customer_trust",
+      "qwikster",
+      "netflix",
+      "pricing",
+      "change"
+    ],
+    "title": "Netflix Qwikster: a correct destination can fail through customer-hostile migration",
+    "trust_level": "high"
+  },
+  {
+    "agent_lesson": "Specialists own data, customer and economics evidence; the Manager refuses network scale until a representative canary survives exceptions.",
+    "agent_targets": [
+      "manager_coo",
+      "finance_agent",
+      "sales_agent",
+      "marketing_agent"
+    ],
+    "decision_pressure": "Leases, launch schedules and scale economics encourage opening the network before one representative flow works from item setup through shelf and purchase.",
+    "domains": [
+      "manager_coo",
+      "finance",
+      "sales",
+      "marketing"
+    ],
+    "evidence_needed": [
+      "Master-data accuracy and owner",
+      "Forecast-to-shelf exceptions",
+      "Shelf versus warehouse availability",
+      "Local price and assortment research",
+      "Readiness and unit economics",
+      "Stage-gate evidence"
+    ],
+    "hard_gate_candidate": "Multi-site or multi-market rollout requires a real canary meeting data, availability, customer-fit and unit-economics thresholds.",
+    "id": "bk118-target-canada-scale-after-canary",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/114-bk118-target-canada-scale-after-canary.md",
+    "local_file": "archives/business-knowledge/research/business_cases/failures/target_2014_annual_report.pdf",
+    "mistake_or_risk": "Do not reduce a multi-cause failure to software or assume a foreign proposition transfers unchanged. The mechanism is scale before verified end-to-end readiness and local fit.",
+    "recommended_next_action": "Run a real canary through item, supplier, order, receipt, replenishment, price, return and customer; set accuracy/availability thresholds; expand only after representative sites survive normal and exception cycles.",
+    "red_flags": [
+      "Launch date cannot move",
+      "Full warehouse but empty shelves",
+      "Data cleanup follows scale",
+      "Foreign-market fit is assumed"
+    ],
+    "retrieval_triggers": [
+      "Target Canada failure",
+      "scale too fast",
+      "empty shelves full warehouse",
+      "master data rollout",
+      "expansion canary"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "Target opened 133 Canadian stores rapidly amid inventory, data, system, training, price and assortment problems, then exited after deciding profitability was years away and estimating a large loss.",
+    "source_type": "primary_company_reporting_and_investigative_reporting",
+    "source_url": "https://corporate.target.com/press/release/2015/01/target-corporation-announces-plans-to-discontinue-canadian-operations",
+    "tags": [
+      "scale",
+      "canary",
+      "master_data",
+      "supply_chain",
+      "target_canada",
+      "localization"
+    ],
+    "title": "Target Canada: scale only after data, replenishment and promise work end to end",
+    "trust_level": "high"
+  },
+  {
+    "agent_lesson": "Operations and Sales protect recovery and remedy, Finance funds severe-event capacity, and the Manager treats recovery as part of the promise.",
+    "agent_targets": [
+      "manager_coo",
+      "finance_agent",
+      "sales_agent"
+    ],
+    "decision_pressure": "Normal-day utilisation rewards lean recovery staffing and fragile fallbacks because contingency capacity looks idle.",
+    "domains": [
+      "manager_coo",
+      "finance",
+      "sales"
+    ],
+    "evidence_needed": [
+      "Dependency and disruption scenarios",
+      "Recovery throughput versus backlog",
+      "Fallback data, staffing and authority",
+      "Notification and remedy timing",
+      "Exercise through backlog clearance"
+    ],
+    "hard_gate_candidate": "Critical operations require tested degraded mode, backlog-clearance capacity, communication and remedy authority.",
+    "id": "bk121-southwest-recovery-is-product-capacity",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/117-bk121-southwest-recovery-is-product-capacity.md",
+    "local_file": "archives/business-knowledge/research/HISTORICAL_BUSINESS_CASES_INDEX.md",
+    "mistake_or_risk": "Do not label every disruption a technology failure or let the external trigger excuse preventable recovery harm. Separate prevention, containment, recovery and remedy.",
+    "recommended_next_action": "Model peak disruption; test degraded scheduling and manual authority; reserve recovery/communication capacity; predefine refund/remedy workflows; exercise through full backlog clearance.",
+    "red_flags": [
+      "Continuity test stops at restoration",
+      "Fallback cannot reconcile operations",
+      "Support is excluded from resilience",
+      "No remedy authority during disruption"
+    ],
+    "retrieval_triggers": [
+      "Southwest meltdown",
+      "recovery failure",
+      "continuity backlog",
+      "refund during outage",
+      "recovery capacity"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "Winter weather triggered Southwest's 2022 disruption, but recovery, notification, refund and reimbursement failed at scale. US DOT action covered more than two million passengers and a $140 million settlement.",
+    "source_type": "official_enforcement_postmortem",
+    "source_url": "https://www.transportation.gov/briefing-room/dot-penalizes-southwest-airlines-140-million-2022-holiday-meltdown",
+    "tags": [
+      "resilience",
+      "recovery",
+      "southwest",
+      "communication",
+      "refunds",
+      "operations"
+    ],
+    "title": "Southwest: capacity includes recovery, communication and refunds—not only throughput",
+    "trust_level": "authoritative"
+  },
+  {
+    "agent_lesson": "Sales owns customer value, Compliance owns assurance, Finance checks reversals, and the Manager treats dispersed warnings as system evidence.",
+    "agent_targets": [
+      "sales_agent",
+      "compliance_agent",
+      "finance_agent",
+      "manager_coo"
+    ],
+    "decision_pressure": "Leaders can call misconduct isolated because the headline metric is strong and cases are dispersed across complaints, refunds, terminations and locations.",
+    "domains": [
+      "sales",
+      "compliance",
+      "finance",
+      "manager_coo"
+    ],
+    "evidence_needed": [
+      "Customer consent and beneficial use",
+      "Complaints, reversals and refunds",
+      "Conduct cases by manager and pressure",
+      "Gaming analysis and counter-metrics",
+      "Escalation and leader response"
+    ],
+    "hard_gate_candidate": "Incentivised customer actions require consent proof, outcome checks, pattern monitoring and independent escalation.",
+    "id": "bk122-wells-fargo-warning-patterns",
+    "l4_markdown_file": "archives/business-knowledge/extracted/l4_skill_corpus/118-bk122-wells-fargo-warning-patterns.md",
+    "local_file": "archives/business-knowledge/research/business_cases/compliance/cfpb_wells_fargo_2016_enforcement.html",
+    "mistake_or_risk": "An ambitious target is not proof of misconduct, and firing frontline staff is not system remediation. The mechanism combines incentive design, warning aggregation, consent proof and leadership response.",
+    "recommended_next_action": "Verify customer consent and beneficial use; aggregate complaints, reversals, refunds and conduct cases by leader/channel; test gaming paths; give Compliance escalation access; hold leaders accountable for pattern response.",
+    "red_flags": [
+      "Sales and complaints rise together",
+      "Many people are fired for one behaviour",
+      "Controls report through Sales",
+      "Consent is inferred from employee action"
+    ],
+    "retrieval_triggers": [
+      "unauthorized accounts",
+      "sales target misconduct",
+      "complaints warning signal",
+      "Wells Fargo scandal",
+      "customer consent controls"
+    ],
+    "retrieved_at": "2026-07-26",
+    "situation": "Wells Fargo used aggressive cross-sell goals while employees opened unauthorised accounts. Enforcement and board findings showed complaints, terminations and escalation failures before full consequences were accepted.",
+    "source_type": "official_enforcement_and_independent_board_findings",
+    "source_url": "https://www.consumerfinance.gov/archive/newsroom/consumer-financial-protection-bureau-fines-wells-fargo-100-million-widespread-illegal-practice-secretly-opening-unauthorized-accounts/",
+    "tags": [
+      "sales_incentives",
+      "consent",
+      "complaints",
+      "wells_fargo",
+      "conduct",
+      "governance"
+    ],
+    "title": "Wells Fargo: complaints and repeated terminations are system-level control evidence",
+    "trust_level": "authoritative"
+  }
+]

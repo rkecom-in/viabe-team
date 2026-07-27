@@ -1,0 +1,1649 @@
+<!DOCTYPE html>
+<html lang="en-US" class="no-js">
+	<head>
+		<meta charset="UTF-8" /><script type="text/javascript">(window.NREUM||(NREUM={})).init={privacy:{cookies_enabled:true},ajax:{deny_list:["bam.nr-data.net"]},feature_flags:["soft_nav"]};(window.NREUM||(NREUM={})).loader_config={licenseKey:"NRJS-d1aad62634166c22251",applicationID:"757606115",browserID:"772331449"};;/*! For license information please see nr-loader-rum-1.318.0.min.js.LICENSE.txt */
+(()=>{var e={8122(e,t,r){"use strict";r.d(t,{a:()=>i});var n=r(944);function i(e,t){try{if(!e||"object"!=typeof e)return(0,n.R)(3);if(!t||"object"!=typeof t)return(0,n.R)(4);const r=Object.create(Object.getPrototypeOf(t),Object.getOwnPropertyDescriptors(t)),s=0===Object.keys(r).length?e:r;for(let o in s)if(void 0!==e[o])try{if(null===e[o]){r[o]=null;continue}Array.isArray(e[o])&&Array.isArray(t[o])?r[o]=Array.from(new Set([...e[o],...t[o]])):e[o]instanceof Map||e[o]instanceof Set||e[o]instanceof Date||e[o]instanceof RegExp?r[o]=e[o]:"object"==typeof e[o]&&null!==t[o]&&"object"==typeof t[o]?r[o]=i(e[o],t[o]):r[o]=e[o]}catch(e){r[o]||(0,n.R)(1,e)}return r}catch(e){(0,n.R)(2,e)}}},2555(e,t,r){"use strict";r.d(t,{f:()=>o});var n=r(384),i=r(8122);const s={beacon:n.NT.beacon,errorBeacon:n.NT.errorBeacon,licenseKey:void 0,applicationID:void 0,sa:void 0,queueTime:void 0,applicationTime:void 0,ttGuid:void 0,user:void 0,account:void 0,product:void 0,extra:void 0,jsAttributes:{},userAttributes:void 0,atts:void 0,transactionName:void 0,tNamePlain:void 0};function o(e){try{return!!e.licenseKey&&!!e.errorBeacon&&!!e.applicationID}catch(e){return!1}}r.d(t,["D",0,e=>(0,i.a)(e,s)])},7699(e,t,r){"use strict";var n=r(860);const i={[n.K7.logging]:!0,[n.K7.genericEvents]:!0,[n.K7.jserrors]:!0,[n.K7.ajax]:!0};r.d(t,["It",0,1e6,"KC",0,i,"qh",0,"SESSION_ERROR"])},9324(e,t,r){"use strict";r.d(t,["xv",0,"1.318.0"])},981(e,t,r){"use strict";r.d(t,["R",0,{AJAX:"AjaxRequest",PA:"PageAction",UA:"UserAction",BP:"BrowserPerformance",WS:"WebSocket",SPV:"SecurityPolicyViolation",JSE:"JavaScriptError",LOG:"Log",PVE:"PageView",PVT:"PageViewTiming",SR:"SessionReplay",ST:"SessionTrace",BI:"BrowserInteraction"}])},6154(e,t,r){"use strict";var n=r(1863);const i="undefined"!=typeof window&&!!window.document,s="undefined"!=typeof WorkerGlobalScope&&("undefined"!=typeof self&&self instanceof WorkerGlobalScope&&self.navigator instanceof WorkerNavigator||"undefined"!=typeof globalThis&&globalThis instanceof WorkerGlobalScope&&globalThis.navigator instanceof WorkerNavigator),o=i?window:"undefined"!=typeof WorkerGlobalScope&&("undefined"!=typeof self&&self instanceof WorkerGlobalScope&&self||"undefined"!=typeof globalThis&&globalThis instanceof WorkerGlobalScope&&globalThis),a=Boolean("hidden"===o?.document?.visibilityState),c=""+o?.location,u=/iPad|iPhone|iPod/.test(o.navigator?.userAgent),d=u&&"undefined"==typeof SharedWorker,l=((()=>{const e=o.navigator?.userAgent?.match(/Firefox[/\s](\d+\.\d+)/);Array.isArray(e)&&e.length>=2&&e[1]})(),Date.now()-(0,n.t)());r.d(t,["OF",0,u,"RI",0,i,"WN",0,l,"bv",0,s,"gm",0,o,"m",0,c,"mw",0,a,"sb",0,d,"zk",0,()=>{const e=o?.performance?.getEntriesByType?.("navigation")?.[0];if(e&&e.responseStart>0&&e.responseStart<o.performance.now())return e}])},3241(e,t,r){"use strict";r.d(t,{W:()=>i});var n=r(6154);function i(e={}){try{n.gm.dispatchEvent(new CustomEvent("newrelic",{detail:e}))}catch(e){}}},1687(e,t,r){"use strict";r.d(t,{Ak:()=>a,Ze:()=>u,x3:()=>c});var n=r(3241),i=r(3606),s=r(860),o=r(2646);function a(e,t){if(!e)return;const r={staged:!1,priority:s.P3[t]||0};e.runtime.drainRegistry.get(t)||e.runtime.drainRegistry.set(t,r)}function c(e,t){if(!e)return;const r=e.runtime.drainRegistry;r&&(r.get(t)&&r.delete(t),l(e,t,!1),r.size&&d(e))}function u(e,t="feature",r=!1){if(e){if(!e.runtime.drainRegistry.get(t)||r)return l(e,t);e.runtime.drainRegistry.get(t).staged=!0,d(e)}}function d(e){if(!e)return;const t=Array.from(e.runtime.drainRegistry);t.every(([e,t])=>t.staged)&&(t.sort((e,t)=>e[1].priority-t[1].priority),t.forEach(([t])=>{e.runtime.drainRegistry.delete(t),l(e,t)}))}function l(e,t,r=!0){if(!e)return;const s=e.ee,a=i.i.handlers;if(s&&!s.aborted&&s.backlog&&a){if((0,n.W)({type:"lifecycle",name:"drain",feature:t}),r){const e=s.backlog[t],r=a[t];if(r){for(let t=0;e&&t<e.length;++t)f(e[t],r);Object.entries(r).forEach(([e,t])=>{Object.values(t||{}).forEach(t=>{t[0]?.on&&t[0].context()instanceof o.y&&!t[0].listeners(e).includes(t[1])&&t[0].on(e,t[1])})})}}s.isolatedBacklog||delete a[t],s.backlog[t]=null,s.emit("drain-"+t,[])}}function f(e,t){var r=e[1];Object.values(t[r]||{}).forEach(t=>{var r=e[0];if(t[0]===r){var n=t[1],i=e[3],s=e[2];n.apply(i,s)}})}},7836(e,t,r){"use strict";var n=r(384),i=r(8990),s=r(2646),o=r(5607);const a="nr@context:".concat(o.W),c=function e(t,r){var n={},o={},d={},l=!1;try{l=16===r.length&&u.initializedAgents?.[r]?.runtime.isolatedBacklog}catch(e){}var f={on:p,addEventListener:p,removeEventListener:function(e,t){var r=n[e];if(!r)return;for(var i=0;i<r.length;i++)r[i]===t&&r.splice(i,1)},emit:function(e,r,n,i,s){!1!==s&&(s=!0);if(c.aborted&&!i)return;t&&s&&t.emit(e,r,n);var a=g(n);m(e).forEach(e=>{e.apply(a,r)});var u=v()[o[e]];u&&u.push([f,e,r,a]);return a},get:h,listeners:m,context:g,buffer:function(e,t){const r=v();if(t=t||"feature",f.aborted)return;Object.entries(e||{}).forEach(([e,n])=>{o[n]=t,t in r||(r[t]=[])})},abort:function(){f._aborted=!0,Object.keys(f.backlog).forEach(e=>{delete f.backlog[e]})},isBuffering:function(e){return!!v()[o[e]]},debugId:r,backlog:l?{}:t&&"object"==typeof t.backlog?t.backlog:{},isolatedBacklog:l};return Object.defineProperty(f,"aborted",{get:()=>{let e=f._aborted||!1;return e||(t&&(e=t.aborted),e)}}),f;function g(e){return e&&e instanceof s.y?e:e?(0,i.I)(e,a,()=>new s.y(a)):new s.y(a)}function p(e,t){n[e]=m(e).concat(t)}function m(e){return n[e]||[]}function h(t){return d[t]=d[t]||e(f,t)}function v(){return f.backlog}}(void 0,"globalEE"),u=(0,n.Zm)();u.ee||(u.ee=c),r.d(t,["P",0,a,"ee",0,c])},2646(e,t,r){"use strict";r.d(t,{y:()=>n});class n{constructor(e){this.contextId=e}}},9908(e,t,r){"use strict";r.d(t,{d:()=>n,p:()=>i});var n=r(7836).ee.get("handle");function i(e,t,r,i,s){s?(s.buffer([e],i),s.emit(e,t,r)):(n.buffer([e],i),n.emit(e,t,r))}},3606(e,t,r){"use strict";r.d(t,{i:()=>s});var n=r(9908);s.on=o;var i=s.handlers={};function s(e,t,r,s){o(s||n.d,i,e,t,r)}function o(e,t,r,i,s){s||(s="feature"),e||(e=n.d);var o=t[s]=t[s]||{};(o[r]=o[r]||[]).push([e,i])}},3878(e,t,r){"use strict";function n(e,t){return{capture:e,passive:!1,signal:t}}function i(e,t,r=!1,i){window.addEventListener(e,t,n(r,i))}function s(e,t,r=!1,i){document.addEventListener(e,t,n(r,i))}r.d(t,{DD:()=>s,jT:()=>n,sp:()=>i})},5607(e,t,r){"use strict";const n=(0,r(9566).bz)();r.d(t,["W",0,n])},9566(e,t,r){"use strict";r.d(t,{LA:()=>o,bz:()=>s});var n=r(6154);function i(e,t){return e?15&e[t]:16*Math.random()|0}function s(){const e=n.gm?.crypto||n.gm?.msCrypto;let t,r=0;return e&&e.getRandomValues&&(t=e.getRandomValues(new Uint8Array(30))),"xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".split("").map(e=>"x"===e?i(t,r++).toString(16):"y"===e?(3&i()|8).toString(16):e).join("")}function o(e){const t=n.gm?.crypto||n.gm?.msCrypto;let r,s=0;t&&t.getRandomValues&&(r=t.getRandomValues(new Uint8Array(e)));const o=[];for(var a=0;a<e;a++)o.push(i(r,s++).toString(16));return o.join("")}},2614(e,t,r){"use strict";r.d(t,["BB",0,18e5,"Wt",0,"NRBA_SESSION::","iL",0,{SAME_TAB:"same-tab",CROSS_TAB:"cross-tab"},"tS",0,{STARTED:"session-started",PAUSE:"session-pause",RESET:"session-reset",RESUME:"session-resume",UPDATE:"session-update"},"wk",0,144e5])},1863(e,t,r){"use strict";function n(){return Math.floor(performance.now())}r.d(t,{t:()=>n})},944(e,t,r){"use strict";r.d(t,{R:()=>i});var n=r(3241);function i(e,t){"function"==typeof console.debug&&(console.debug("New Relic Warning: https://github.com/newrelic/newrelic-browser-agent/blob/main/docs/warning-codes.md#".concat(e),t),(0,n.W)({drained:null,type:"data",name:"warn",feature:"warn",data:{code:e,secondary:t}}))}},8990(e,t,r){"use strict";r.d(t,{I:()=>i});var n=Object.prototype.hasOwnProperty;function i(e,t,r){if(n.call(e,t))return e[t];var i=r();if(Object.defineProperty&&Object.keys)try{return Object.defineProperty(e,t,{value:i,writable:!0,enumerable:!1}),i}catch(e){}return e[t]=i,i}},6389(e,t,r){"use strict";function n(e,t=500,r={}){const n=r?.leading||!1;let i;return(...r)=>{n&&void 0===i&&(e.apply(this,r),i=setTimeout(()=>{i=clearTimeout(i)},t)),n||(clearTimeout(i),i=setTimeout(()=>{e.apply(this,r)},t))}}function i(e){let t=!1;return(...r)=>{t||(t=!0,e.apply(this,r))}}r.d(t,{J:()=>i,s:()=>n})},1910(e,t,r){"use strict";r.d(t,{i:()=>s});var n=r(944);const i=new Map;function s(...e){return e.every(e=>{if(i.has(e))return i.get(e);const t="function"==typeof e?e.toString():"",r=t.includes("[native code]"),s=t.includes("nrWrapper");return r||s||(0,n.R)(64,e?.name||t),i.set(e,r),r})}},5289(e,t,r){"use strict";r.d(t,{GG:()=>o,Qr:()=>c,sB:()=>a});var n=r(3878),i=r(6389);function s(){return"undefined"==typeof document||"complete"===document.readyState}function o(e,t){if(s())return e();const r=(0,i.J)(e),o=setInterval(()=>{s()&&(clearInterval(o),r())},500);(0,n.sp)("load",r,t)}function a(e){if(s())return e();(0,n.DD)("DOMContentLoaded",e)}function c(e){if(s())return e();(0,n.sp)("popstate",e)}},384(e,t,r){"use strict";r.d(t,{Zm:()=>c,bQ:()=>d,dV:()=>u,pV:()=>l});var n=r(6154),i=r(1863),s=r(944),o=r(1910);const a={beacon:"bam.nr-data.net",errorBeacon:"bam.nr-data.net"};function c(){return n.gm.NREUM||(n.gm.NREUM={}),void 0===n.gm.newrelic&&(n.gm.newrelic=n.gm.NREUM),n.gm.NREUM}function u(){let e=c();return e.o||(e.o={ST:n.gm.setTimeout,SI:n.gm.setImmediate||n.gm.setInterval,CT:n.gm.clearTimeout,XHR:n.gm.XMLHttpRequest,REQ:n.gm.Request,EV:n.gm.Event,PR:n.gm.Promise,MO:n.gm.MutationObserver,FETCH:n.gm.fetch,WS:n.gm.WebSocket},(0,o.i)(...Object.values(e.o))),e}function d(e,t){let r=c();r.initializedAgents??={},t.initializedAt={ms:(0,i.t)(),date:new Date},r.initializedAgents[e]=t,2===Object.keys(r.initializedAgents).length&&(0,s.R)(69)}function l(){return function(){let e=c();const t=e.info||{};e.info={beacon:a.beacon,errorBeacon:a.errorBeacon,...t}}(),function(){let e=c();const t=e.init||{};e.init={...t}}(),u(),function(){let e=c();const t=e.loader_config||{};e.loader_config={...t}}(),c()}r.d(t,["NT",0,a])},2843(e,t,r){"use strict";r.d(t,{G:()=>s,u:()=>i});var n=r(3878);function i(e,t=!1,r,i){(0,n.DD)("visibilitychange",function(){if(t)return void("hidden"===document.visibilityState&&e());e(document.visibilityState)},r,i)}function s(e,t,r){(0,n.sp)("pagehide",e,t,r)}},3969(e,t,r){"use strict";const n=r(860).K7.metrics;r.d(t,["TZ",0,n,"XG",0,"storeEventMetrics","xV",0,"storeSupportabilityMetrics"])},6630(e,t,r){"use strict";const n=r(860).K7.pageViewEvent;r.d(t,["T",0,n])},782(e,t,r){"use strict";const n=r(860).K7.pageViewTiming;r.d(t,["T",0,n])},4234(e,t,r){"use strict";r.d(t,{W:()=>i});var n=r(1687);class i{constructor(e,t){this.agentRef=e,this.ee=e?.ee,this.featureName=t,this.blocked=!1}deregisterDrain(){(0,n.x3)(this.agentRef,this.featureName)}}},7767(e,t,r){"use strict";var n=r(6154);r.d(t,["V",0,e=>n.RI&&!0===e?.privacy.cookies_enabled])},8362(e,t,r){"use strict";r.d(t,{d:()=>s});var n=r(9566),i=r(1741);class s extends i.W{agentIdentifier=(0,n.LA)(16)}},1741(e,t,r){"use strict";r.d(t,{W:()=>s});var n=r(944),i=r(4261);class s{#e(e,...t){if(this[e]!==s.prototype[e])return this[e](...t);(0,n.R)(35,e)}addPageAction(e,t){return this.#e(i.hG,e,t)}register(e){return this.#e(i.eY,e)}recordCustomEvent(e,t){return this.#e(i.fF,e,t)}setPageViewName(e,t){return this.#e(i.Fw,e,t)}setCustomAttribute(e,t,r){return this.#e(i.cD,e,t,r)}noticeError(e,t){return this.#e(i.o5,e,t)}setUserId(e,t=!1){return this.#e(i.Dl,e,t)}setApplicationVersion(e){return this.#e(i.nb,e)}setErrorHandler(e){return this.#e(i.bt,e)}addRelease(e,t){return this.#e(i.k6,e,t)}log(e,t){return this.#e("log",e,t)}start(){return this.#e("start")}finished(e){return this.#e(i.BL,e)}recordReplay(){return this.#e(i.CH)}pauseReplay(){return this.#e(i.Tb)}addToTrace(e){return this.#e(i.U2,e)}setCurrentRouteName(e){return this.#e(i.PA,e)}interaction(e){return this.#e(i.dT,e)}wrapLogger(e,t,r){return this.#e(i.Wb,e,t,r)}measure(e,t){return this.#e(i.V1,e,t)}consent(e){return this.#e(i.Pv,e)}}},4261(e,t,r){"use strict";r.d(t,["BL",0,"finished","CH",0,"recordReplay","Dl",0,"setUserId","Fw",0,"setPageViewName","PA",0,"setCurrentRouteName","Pv",0,"consent","Tb",0,"pauseReplay","U2",0,"addToTrace","V1",0,"measure","Wb",0,"wrapLogger","bt",0,"setErrorHandler","cD",0,"setCustomAttribute","dT",0,"interaction","eY",0,"register","fF",0,"recordCustomEvent","hG",0,"addPageAction","k6",0,"addRelease","nb",0,"setApplicationVersion","o5",0,"noticeError"])},1738(e,t,r){"use strict";r.d(t,{U:()=>l,Y:()=>d});var n=r(3241),i=r(9908),s=r(1863),o=r(944),a=r(3969),c=r(8362),u=r(860);function d(e,t,r,s){const d=s||r;!d||d[e]&&d[e]!==c.d.prototype[e]||(d[e]=function(){(0,i.p)(a.xV,["API/"+e+"/called"],void 0,u.K7.metrics,r.ee),(0,n.W)({drained:!!r.runtime?.activatedFeatures,type:"data",name:"api",feature:"api-"+e,data:{}});try{return t.apply(this,arguments)}catch(e){(0,o.R)(23,e)}})}function l(e,t,r,n,o){const a=e.info;null===r?delete a.jsAttributes[t]:a.jsAttributes[t]=r,(o||null===r)&&(0,i.p)("api-"+n,[(0,s.t)(),t,r],void 0,"session",e.ee)}},8374(e,t,r){r.nc=(()=>{try{return document?.currentScript?.nonce}catch(e){}return""})()},860(e,t,r){"use strict";const n="events",i="jserrors",s="browser/blobs",o="browser/logs",a={ajax:"ajax",genericEvents:"generic_events",jserrors:i,logging:"logging",metrics:"metrics",pageAction:"page_action",pageViewEvent:"page_view_event",pageViewTiming:"page_view_timing",sessionReplay:"session_replay",sessionTrace:"session_trace",softNav:"soft_navigations"},c={[a.pageViewEvent]:1,[a.pageViewTiming]:2,[a.metrics]:3,[a.jserrors]:4,[a.softNav]:5,[a.ajax]:6,[a.sessionTrace]:7,[a.sessionReplay]:8,[a.logging]:9,[a.genericEvents]:10},u={[a.pageViewEvent]:"rum",[a.pageViewTiming]:n,[a.ajax]:n,[a.softNav]:n,[a.metrics]:i,[a.jserrors]:i,[a.sessionTrace]:s,[a.sessionReplay]:s,[a.logging]:o,[a.genericEvents]:"ins"};r.d(t,["$J",0,u,"K7",0,a,"P3",0,c,"XX",0,i,"Yy",0,o,"df",0,s])}};const t={};function r(n){const i=t[n];if(void 0!==i)return i.exports;const s=t[n]={exports:{}};return e[n](s,s.exports,r),s.exports}r.m=e,r.d=(e,t)=>{if(Array.isArray(t))for(var n=0;n<t.length;){var i=t[n++],s=t[n++];r.o(e,i)?0===s&&n++:0===s?Object.defineProperty(e,i,{enumerable:!0,value:t[n++]}):Object.defineProperty(e,i,{enumerable:!0,get:s})}else for(var i in t)r.o(t,i)&&!r.o(e,i)&&Object.defineProperty(e,i,{enumerable:!0,get:t[i]})},r.f={},r.e=e=>Promise.all(Object.keys(r.f).reduce((t,n)=>(r.f[n](e,t),t),[])),r.u=e=>"nr-rum-1.318.0.min.js",r.o=(e,t)=>Object.prototype.hasOwnProperty.call(e,t),(()=>{const e={},t="NRBA-1.318.0.PROD:";r.l=(n,i,s,o)=>{if(e[n])return void e[n].push(i);let a,c;if(void 0!==s){const e=document.getElementsByTagName("script");for(var u=0;u<e.length;u++){const r=e[u];if(r.getAttribute("src")==n||r.getAttribute("data-webpack")==t+s){a=r;break}}}if(!a){c=!0;var d={296:"sha512-l/aSvO0UYzQns1WyMlY2r8pdkmVR0o/Rze4wpZR98a+X8aP+uRfcG9NMVI6fcdpy4uRK5azdx+CgSn8/UKULRw=="};a=document.createElement("script"),a.charset="utf-8",r.nc&&a.setAttribute("nonce",r.nc),a.setAttribute("data-webpack",t+s),a.src=n,0!==a.src.indexOf(window.location.origin+"/")&&(a.crossOrigin="anonymous"),d[o]&&(a.integrity=d[o])}e[n]=[i];const l=(t,r)=>{a.onerror=a.onload=null,clearTimeout(f);const i=e[n];if(delete e[n],a.parentNode?.removeChild(a),i?.forEach(e=>e(r)),t)return t(r)},f=setTimeout(l.bind(null,void 0,{type:"timeout",target:a}),12e4);a.onerror=l.bind(null,a.onerror),a.onload=l.bind(null,a.onload),c&&document.head.appendChild(a)}})(),r.r=e=>{Symbol.toStringTag&&Object.defineProperty(e,Symbol.toStringTag,{value:"Module"}),Object.defineProperty(e,"__esModule",{value:!0})},r.p="https://js-agent.newrelic.com/",(()=>{const e={374:0,840:0};r.f.j=(t,n)=>{let i=r.o(e,t)?e[t]:void 0;if(0!==i)if(i)n.push(i[2]);else{const s=new Promise((r,n)=>i=e[t]=[r,n]);n.push(i[2]=s);const o=r.p+r.u(t),a=new Error,c=n=>{if(r.o(e,t)&&(i=e[t],0!==i&&(e[t]=void 0),i)){const e=n&&("load"===n.type?"missing":n.type),r=n&&n.target&&n.target.src;a.message="Loading chunk "+t+" failed: ("+e+": "+r+")",a.name="ChunkLoadError",a.type=e,a.request=r,i[1](a)}};r.l(o,c,"chunk-"+t,t)}};const t=(t,n)=>{let[i,s,o]=n;var a,c,u=0;if(i.some(t=>0!==e[t])){for(a in s)r.o(s,a)&&(r.m[a]=s[a]);if(o)o(r)}for(t&&t(n);u<i.length;u++)c=i[u],r.o(e,c)&&e[c]&&e[c][0](),e[c]=0},n=self["webpackChunk:NRBA-1.318.0.PROD"]=self["webpackChunk:NRBA-1.318.0.PROD"]||[];n.forEach(t.bind(null,0)),n.push=t.bind(null,n.push.bind(n))})(),(()=>{"use strict";r(8374);var e=r(8362),t=r(860);const n=Object.values(t.K7);var i=r(384),s=r(1741);var o=r(2555),a=r(981);t.K7.genericEvents,a.R.PA,a.R.UA,a.R.BP;const c="experimental.resources",u="register",d=(t.K7.ajax,"none"),l=e=>{if(!e||"string"!=typeof e)return!1;try{document.createDocumentFragment().querySelector(e)}catch{return!1}return!0};var f=r(2614),g=r(944),p=r(8122);const m="[data-nr-mask]",h=e=>(0,p.a)(e,(()=>{const e={feature_flags:[],experimental:{register:!1,resources:!1},mask_selector:"*",block_selector:"[data-nr-block]",mask_input_options:{color:!1,date:!1,"datetime-local":!1,email:!1,month:!1,number:!1,range:!1,search:!1,tel:!1,text:!1,time:!1,url:!1,week:!1,textarea:!1,select:!1,password:!0}};return{ajax:{deny_list:void 0,block_internal:!0,enabled:!0,autoStart:!0,capture_payloads:d},api:{register:{get enabled(){return e.feature_flags.includes(u)||e.experimental.register},set enabled(t){e.experimental.register=t},duplicate_data_to_container:!1}},browser_consent_mode:{enabled:!1},distributed_tracing:{enabled:void 0,exclude_newrelic_header:void 0,cors_use_newrelic_header:void 0,cors_use_tracecontext_headers:void 0,allowed_origins:void 0},get feature_flags(){return e.feature_flags},set feature_flags(t){e.feature_flags=t},generic_events:{enabled:!0,autoStart:!0},harvest:{interval:30},jserrors:{enabled:!0,autoStart:!0},logging:{enabled:!0,autoStart:!0},metrics:{enabled:!0,autoStart:!0},obfuscate:void 0,page_action:{enabled:!0},page_view_event:{enabled:!0,autoStart:!0},page_view_timing:{enabled:!0,autoStart:!0},performance:{capture_marks:!1,capture_measures:!1,capture_detail:!0,resources:{get enabled(){return e.feature_flags.includes(c)||e.experimental.resources},set enabled(t){e.experimental.resources=t},asset_types:[],first_party_domains:[],ignore_newrelic:!0}},privacy:{cookies_enabled:!0},proxy:{assets:void 0,beacon:void 0},session:{expiresMs:f.wk,inactiveMs:f.BB},session_replay:{autoStart:!0,enabled:!1,preload:!1,sampling_rate:10,error_sampling_rate:100,collect_fonts:!1,inline_images:!1,fix_stylesheets:!0,mask_all_inputs:!0,get mask_text_selector(){return e.mask_selector},set mask_text_selector(t){l(t)?e.mask_selector="".concat(t,",").concat(m):""===t||null===t?e.mask_selector=m:(0,g.R)(5,t)},get block_class(){return"nr-block"},get ignore_class(){return"nr-ignore"},get mask_text_class(){return"nr-mask"},get block_selector(){return e.block_selector},set block_selector(t){l(t)?e.block_selector+=",".concat(t):""!==t&&(0,g.R)(6,t)},get mask_input_options(){return e.mask_input_options},set mask_input_options(t){t&&"object"==typeof t?e.mask_input_options={...t,password:!0}:(0,g.R)(7,t)}},session_trace:{enabled:!0,autoStart:!0},soft_navigations:{enabled:!0,autoStart:!0},ssl:void 0,user_actions:{enabled:!0,elementAttributes:["id","className","tagName","type"]},web_sockets:{enabled:!1}}})());var v=r(6154),b=r(9324);let y=0;const _={buildEnv:"PROD",distMethod:"CDN",version:b.xv,originTime:v.WN},w={consented:!1},R={activatedFeatures:void 0,appMetadata:{},configured:!1,get consented(){return this.session?.state?.consent||w.consented},set consented(e){w.consented=e},customTransaction:void 0,denyList:[],disabled:!1,drainRegistry:new Map,harvester:void 0,isolatedBacklog:!1,isRecording:!1,loaderType:void 0,maxBytes:3e4,obfuscator:void 0,onerror:void 0,ptid:void 0,releaseIds:{},session:void 0,timeKeeper:void 0,registeredEntities:[],jsAttributesMetadata:{bytes:0},get harvestCount(){return++y}};var x=r(7836),A=r(3241);const k={accountID:void 0,trustKey:void 0,agentID:void 0,licenseKey:void 0,applicationID:void 0,xpid:void 0};function S(e,t={},n,a){let{init:c,info:u,loader_config:d,runtime:l={},exposed:f=!0}=t;if(!u){const e=(0,i.pV)();c=e.init,u=e.info,d=e.loader_config}var g;e.init=h(c||{}),e.loader_config=(g=d||{},(0,p.a)(g,k)),u.jsAttributes??={},v.bv&&(u.jsAttributes.isWorker=!0),e.info=(0,o.D)(u);const m=e.init;e.runtime??=(e=>{const t=(0,p.a)(e,R),r=Object.keys(_).reduce((e,t)=>(e[t]={value:_[t],writable:!1,configurable:!0,enumerable:!0},e),{});return Object.defineProperties(t,r)})(l),m.proxy.assets&&(e=>{const t=e.startsWith("http");e+="/",r.p=t?e:"https://"+e})(m.proxy.assets),e.runtime.configured||(Object.defineProperty(e,"beacons",{get:()=>[e.info.beacon,e.info.errorBeacon,e.init.proxy.assets,e.init.proxy.beacon].filter(Boolean)}),Object.defineProperty(e.runtime,"denyList",{get:()=>[...e.init.ajax.deny_list||[],...e.init.ajax.block_internal?e.beacons:[]]}),e.runtime.ptid=e.agentIdentifier,function(e){const t=(0,i.pV)();Object.getOwnPropertyNames(s.W.prototype).forEach(r=>{const n=s.W.prototype[r];if("function"!=typeof n||"constructor"===n)return;let i=t[r];e[r]&&!1!==e.exposed&&"micro-agent"!==e.runtime?.loaderType&&(t[r]=(...t)=>{const n=e[r](...t);return i?i(...t):n})})}(e),e.runtime.loaderType=n,e.ee=x.ee.get(e.agentIdentifier),e.exposed=f,(0,A.W)({drained:!!e.runtime.activatedFeatures,type:"lifecycle",name:"initialize",feature:void 0,data:e.config}),e.runtime.configured=!0)}var T=r(9908),E=r(1863),j=r(4261),P=r(1738);var N=r(1687),O=r(4234),M=r(5289),I=r(7767);function V(e){return!!(0,i.dV)().o.MO&&(0,I.V)(e)&&!0===e?.session_trace.enabled}var D=r(6389),W=r(7699);const B=new WeakSet;class K extends O.W{constructor(e,t){super(e,t),this.abortHandler=void 0,this.featAggregate=void 0,this.loadedSuccessfully=void 0,this.onAggregateImported=new Promise(e=>{this.loadedSuccessfully=e}),this.deferred=Promise.resolve(),!1===e.init[this.featureName].autoStart?this.deferred=new Promise((t,r)=>{this.ee.on("manual-start-all",(0,D.J)(()=>{(0,N.Ak)(e,this.featureName),t()}))}):(0,N.Ak)(e,t)}importAggregator(e,t,n={}){if(this.featAggregate)return;const i=async()=>{if(await this.deferred,this.#t(e),!(0,o.f)(e.info))return(0,g.R)(43),e.ee.abort(),void this.loadedSuccessfully(!1);let i;try{if((0,I.V)(e.init)){const{setupAgentSession:t}=await r.e(296).then(r.bind(r,8391));i=t(e)}}catch(e){(0,g.R)(20,e),this.ee.emit("internal-error",[e]),(0,T.p)(W.qh,[e],void 0,this.featureName,this.ee)}try{if(!this.#r(this.featureName,i,e.init))return(0,N.Ze)(this.agentRef,this.featureName),void this.loadedSuccessfully(!1);const{Aggregate:r}=await t();this.featAggregate=new r(e,n),e.runtime.harvester.initializedAggregates.push(this.featAggregate),this.loadedSuccessfully(!0)}catch(e){(0,g.R)(34,e),this.abortHandler?.(),(0,N.Ze)(this.agentRef,this.featureName,!0),this.loadedSuccessfully(!1),this.ee&&this.ee.abort()}};v.RI?(0,M.GG)(()=>i(),!0):i()}#r(e,r,n){if(this.blocked)return!1;switch(e){case t.K7.sessionReplay:return V(n)&&!!r;case t.K7.sessionTrace:return!!r;default:return!0}}#t(e){if(!B.has(e)&&(B.add(e),!(0,o.f)(e.info))){const t=(0,i.pV)();let r={...t.info?.jsAttributes};try{r={...r,...e.info?.jsAttributes}}catch(e){}S(e,{...t,info:{...t.info,jsAttributes:r},runtime:e.runtime},e.runtime.loaderType)}}}var C=r(6630);class U extends K{static featureName=C.T;constructor(e){var t;super(e,C.T),this.setupInspectionEvents(),t=e,(0,P.Y)(j.Fw,function(e,r){"string"==typeof e&&("/"!==e.charAt(0)&&(e="/"+e),t.runtime.customTransaction=(r||"http://custom.transaction")+e,(0,T.p)("api-"+j.Fw,[(0,E.t)()],void 0,void 0,t.ee))},t),this.importAggregator(e,()=>r.e(296).then(r.bind(r,1324)))}setupInspectionEvents(){const e=(e,t)=>{e&&(0,A.W)({timeStamp:e.timeStamp,loaded:"complete"===e.target.readyState,type:"window",name:t,data:e.target.location+""})};(0,M.sB)(t=>{e(t,"DOMContentLoaded")}),(0,M.GG)(t=>{e(t,"load")}),(0,M.Qr)(t=>{e(t,"navigate")}),this.ee.on(f.tS.UPDATE,(e,t)=>{(0,A.W)({type:"lifecycle",name:"session",data:t})})}}class L extends e.d{constructor(e){var t;(super(),v.gm)?(this.features={},(0,i.bQ)(this.agentIdentifier,this),this.desiredFeatures=new Set(e.features||[]),this.desiredFeatures.add(U),S(this,e,e.loaderType||"agent"),t=this,(0,P.Y)(j.cD,function(e,r,n=!1){if("string"==typeof e){if(["string","number","boolean"].includes(typeof r)||null===r)return(0,P.U)(t,e,r,j.cD,n);(0,g.R)(40,typeof r)}else(0,g.R)(39,typeof e)},t),function(e){(0,P.Y)(j.Dl,function(t,r=!1){if("string"!=typeof t&&null!==t)return void(0,g.R)(41,typeof t);const n=e.info.jsAttributes["enduser.id"];r&&null!=n&&n!==t?(0,T.p)("api-setUserIdAndResetSession",[t],void 0,"session",e.ee):(0,P.U)(e,"enduser.id",t,j.Dl,!0)},e)}(this),function(e){(0,P.Y)(j.nb,function(t){if("string"==typeof t||null===t)return(0,P.U)(e,"application.version",t,j.nb,!1);(0,g.R)(42,typeof t)},e)}(this),function(e){(0,P.Y)("start",function(){e.ee.emit("manual-start-all")},e)}(this),function(e){(0,P.Y)(j.Pv,function(t=!0){if("boolean"==typeof t){if((0,T.p)("api-"+j.Pv,[t],void 0,"session",e.ee),e.runtime.consented=t,t){const t=e.features.page_view_event;t.onAggregateImported.then(e=>{const r=t.featAggregate;e&&!r.sentRum&&r.sendRum()})}}else(0,g.R)(65,typeof t)},e)}(this),this.run()):(0,g.R)(21)}get config(){return{info:this.info,init:this.init,loader_config:this.loader_config,runtime:this.runtime}}get api(){return this}run(){try{const e=function(e){const t={};return n.forEach(r=>{t[r]=!!e[r]?.enabled}),t}(this.init),r=[...this.desiredFeatures];r.sort((e,r)=>t.P3[e.featureName]-t.P3[r.featureName]),r.forEach(r=>{if(!e[r.featureName]&&r.featureName!==t.K7.pageViewEvent)return;const n=function(e){switch(e){case t.K7.ajax:return[t.K7.jserrors];case t.K7.sessionTrace:return[t.K7.ajax,t.K7.pageViewEvent];case t.K7.sessionReplay:return[t.K7.sessionTrace];case t.K7.pageViewTiming:return[t.K7.pageViewEvent];default:return[]}}(r.featureName).filter(e=>!(e in this.features));n.length>0&&(0,g.R)(36,{targetFeature:r.featureName,missingDependencies:n}),this.features[r.featureName]=new r(this)})}catch(e){(0,g.R)(22,e);for(const e in this.features)this.features[e].abortHandler?.();const t=(0,i.Zm)();delete t.initializedAgents[this.agentIdentifier]?.features,delete this.sharedAggregator;return t.ee.get(this.agentIdentifier).abort(),!1}}}var G=r(2843),F=r(782);class H extends K{static featureName=F.T;constructor(e){super(e,F.T),v.RI&&((0,G.u)(()=>(0,T.p)("docHidden",[(0,E.t)()],void 0,F.T,this.ee),!0),(0,G.G)(()=>(0,T.p)("winPagehide",[(0,E.t)()],void 0,F.T,this.ee)),this.importAggregator(e,()=>r.e(296).then(r.bind(r,2117))))}}var z=r(3969);class Y extends K{static featureName=z.TZ;constructor(e){super(e,z.TZ),this.importAggregator(e,()=>r.e(296).then(r.bind(r,9623)))}}new L({features:[U,H,Y],loaderType:"lite"})})()})();</script>
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<link rel="preconnect" href="https://a.sfdcstatic.com">
+				<!-- OneTrust Cookies Consent Notice start -->
+				<script src="https://a.sfdcstatic.com/digital/one-trust/core/stable/scripttemplates/otSDKStub.js" data-domain-script="8e783e8c-0ad0-475d-8fca-4a03afa0a02a"></script>
+		<script>
+			/* OneTrust callback */
+			function OptanonWrapper() {
+				var ot_link = document.querySelector('a.optanon-toggle-display');
+				if (ot_link) {
+					ot_link.addEventListener('click', event => {
+						Optanon.ToggleInfoDisplay();
+						// ot_modal.style.display = "block";
+					});
+				}
+
+				function getCookie(name) {
+					var value = "; " + document.cookie;
+					var parts = value.split("; " + name + "=");
+					if (parts.length == 2) {
+						return parts.pop().split(";").shift();
+					}
+				}
+
+				function removeElement(element) {
+					if (!getCookie('OptanonAlertBoxClosed') && element) {
+						element.style.display = "none";
+					}
+				}
+
+				// Push a oneTrust group update event to dataLayer
+				if (window.dataLayer) {
+					window.dataLayer.push({event: 'OneTrustGroupsUpdated'});
+				}
+
+				//Check if user's cookies are enabled, if not remove One Trust from page
+				var cookies = ("cookie" in document && (document.cookie.length > 0 || (document.cookie = "test").indexOf.call(document.cookie, "test") > -1));
+				if (!cookies) {
+					var box = document.querySelector('#onetrust-consent-sdk');
+					box.remove();
+					return;
+				}
+
+				try {
+					//Check if current page is Privacy page, if so do not display One Trust modal
+					if(digitalData) {
+						if(digitalData.page.pagename.indexOf(":company:privacy") > -1){
+							var el = document.querySelector("#onetrust-consent-sdk");
+							removeElement(el);
+						}
+					}
+					/* reinitialize active groups after user updates consent */
+					if (SfdcWwwBase.gdpr) {
+						SfdcWwwBase.gdpr.init();
+					}
+				} catch(err) {
+					console.error(err.message)
+				}
+			}
+		</script>
+		<!-- OneTrust Cookies Consent Notice end -->
+				<script>
+			(function(w,d,s,l,i){w[l]=w[l]||[];w[l].push({'gtm.start':
+			new Date().getTime(),event:'gtm.js'});var f=d.getElementsByTagName(s)[0],
+			j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
+			'https://www.googletagmanager.com/gtm.js?id='+i+dl;f.parentNode.insertBefore(j,f);
+		})(window,document,'script','dataLayer','GTM-WRXS6TH');
+		</script>
+		<script>(function(html){html.className = html.className.replace(/\bno-js\b/,'js')})(document.documentElement);</script>
+<link rel="alternate" hreflang="x-default" href="https://www.salesforce.com/news/stories/state-of-sales-report-announcement-2026/" /><link rel="alternate" hreflang="en-us" href="https://www.salesforce.com/news/stories/state-of-sales-report-announcement-2026/" /><link rel="alternate" hreflang="ja-jp" href="https://www.salesforce.com/jp/news/stories/state-of-sales-report-announcement-2026/" /><meta name="theme-color" content="#0D9DDA" /><link rel="preload" as="font" href="https://www.salesforce.com/news/wp-content/client-mu-plugins/salesforce-shared/dist/fonts/salesforce-sans/SalesforceSans-Regular.woff2" type="font/woff2" crossorigin>
+<link rel="preload" as="font" href="https://www.salesforce.com/news/wp-content/client-mu-plugins/salesforce-shared/dist/fonts/salesforce-sans/SalesforceSans-Bold.woff2" type="font/woff2" crossorigin>
+<link rel="preload" as="font" href="https://a.sfdcstatic.com/shared/fonts/avant-garde/AvantGardeForSalesforceW05-Dm.woff2" type="font/woff2" crossorigin>
+<meta name='robots' content='index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1' />
+
+	<!-- This site is optimized with the Yoast SEO Premium plugin v27.2 (Yoast SEO v27.2) - https://yoast.com/product/yoast-seo-premium-wordpress/ -->
+	<title>Salesforce Announces State of Sales Report for 2026 - Salesforce</title>
+	<meta name="description" content="Key Takeaways Sales teams name AI and AI agents their #1 growth tactic for 2026 Administrative friction is hitting the lower rungs of the career ladder" />
+	<link rel="canonical" href="https://www.salesforce.com/news/stories/state-of-sales-report-announcement-2026/" />
+	<meta property="og:locale" content="en_US" />
+	<meta property="og:type" content="article" />
+	<meta property="og:title" content="The Productivity Gap: New Survey Shows 9 in 10 Sellers Are Betting on AI and Agents To Help" />
+	<meta property="og:description" content="Key Takeaways Sales teams name AI and AI agents their #1 growth tactic for 2026 Administrative friction is hitting the lower rungs of the career ladder" />
+	<meta property="og:url" content="https://www.salesforce.com/news/stories/state-of-sales-report-announcement-2026/" />
+	<meta property="og:site_name" content="Salesforce" />
+	<meta property="article:publisher" content="https://www.facebook.com/salesforce/" />
+	<meta property="article:published_time" content="2026-02-03T13:00:00+00:00" />
+	<meta property="article:modified_time" content="2026-02-19T21:55:29+00:00" />
+	<meta property="og:image" content="https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/Nearly-9-in-10-Sellers-Plan-to-Use-Agents-by-2027-Study-Says.png" />
+	<meta property="og:image:width" content="1200" />
+	<meta property="og:image:height" content="675" />
+	<meta property="og:image:type" content="image/png" />
+	<meta name="twitter:card" content="summary_large_image" />
+	<meta name="twitter:creator" content="@salesforcenews" />
+	<meta name="twitter:site" content="@salesforcenews" />
+	<meta name="twitter:label1" content="Est. reading time" />
+	<meta name="twitter:data1" content="6 minutes" />
+	<script type="application/ld+json" class="yoast-schema-graph">{"@context":"https://schema.org","@graph":[{"@type":"NewsArticle","@id":"https://www.salesforce.com/news/stories/state-of-sales-report-announcement-2026/#article","isPartOf":{"@id":"https://www.salesforce.com/news/stories/state-of-sales-report-announcement-2026/"},"author":[],"headline":"The Productivity Gap: New Survey Shows 9 in 10 Sellers Are Betting on AI and Agents To Help","datePublished":"2026-02-03T13:00:00+00:00","dateModified":"2026-02-19T21:55:29+00:00","mainEntityOfPage":{"@id":"https://www.salesforce.com/news/stories/state-of-sales-report-announcement-2026/"},"wordCount":1005,"publisher":{"@id":"https://www.salesforce.com/news/#organization"},"image":{"@id":"https://www.salesforce.com/news/stories/state-of-sales-report-announcement-2026/#primaryimage"},"thumbnailUrl":"https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/Nearly-9-in-10-Sellers-Plan-to-Use-Agents-by-2027-Study-Says.png","inLanguage":"en-US","articleBody":"Key Takeaways Sales teams name AI and AI agents their #1 growth tactic for 2026 Administrative friction is hitting the lower rungs of the career ladder hardest Top performers are 1.7x more likely to use AI agents than struggling teams AI agents are expected to slash research time by 34% and content creation by 36% As sales teams kick off 2026 with ambitious new quotas, they’re turning to AI — especially agents — to hit their numbers. A new survey of more than 4,000 sales professionals reveals AI as their top tactic to drive company growth this year. The data also reveals why: Sales teams are increasingly stretched between changing customer demands and limited bandwidth to meet them. The real drag on productivity, the research suggests, isn’t effort or skill; it’s administrative bottlenecks, a challenge hitting Gen Z sellers hardest. This year, they’re turning to AI and agents to do more with what they have: 94% of sales leaders with agents say they ’re critical for meeting business demands. We want to kill the busywork so our teams can focus on what actually moves deals forward: building relationships and driving success. Adam Alfano, EVP of Sales at Salesforce By improving productivity, these agents are freeing sellers to do what they do best. “We want to kill the busywork so our teams can focus on what actually moves deals forward: building relationships and driving success,” said Adam Alfano, EVP of Sales at Salesforce. “AI agents make that possible.” Detailed Findings:  Sellers are doubling down on AI agents and deploying them across the entire sales cycle. AI adoption in sales is already mainstream: 87% of sales organizations currently use some form of AI for tasks like prospecting, forecasting, lead scoring, or drafting emails.  Sellers using AI report meaningful value: 89% say AI deepens customer understanding, and 87% say it makes their job less stressful. AI agent adoption is accelerating quickly: 54% of sellers say they’ve used agents, and nearly 9 in 10 plan to by 2027. Once fully implemented, sellers expect agents to cut prospect research time by 34% and email drafting by 36%, giving sales teams meaningful time back in their day. Open Image Modal Image Modal Alfano revealed how his own teams use AI agents to drive impact. “AI agents have changed how we operate,” he said. “They help us onboard reps and quote complex deals faster and personalize outreach with better intel. Plus, they’re prospecting 24/7. It’s not just efficiency gains in one department — agents are reshaping our entire sales engine.” Scalable sales: Salesforce intelligence meets the ChatGPT interface. READ THE LATEST Top-performing sellers are 1.7 times more likely to use prospecting AI agents for outreach than underperformers. Nearly half of sales reps point to cold calling as the worst part of their job, yet a strong pipeline requires more contacts and more engagement than teams can deliver on their own. Despite devoting nearly one full day of their workweek to prospecting efforts, 48% say they lack bandwidth to do adequate cold outreach.  To close the capacity gap, 55% of sales professionals are using AI for prospecting, with another 38% planning to do so in the future. 92% of sellers with AI agents say it benefits their prospecting efforts. High performers — sellers who have substantially increased year-over-year revenue — are 1.7 times more likely to use agents to help with prospecting than underperformers who merely maintained or decreased YOY revenue. Open Image Modal Image Modal “At Salesforce, we use agents to work all our untouched leads,” said Alfano. “We used to let these leads fall to the floor like sawdust. Now, agents sweep them up and sift for gold. In four months, agents contacted 130,000 leads and created 3,200 opportunities. Next year, we believe these numbers will be 10 times higher.” How Salesforce Used SDR Agents to Revisit 100 Million Leads Learn More Administrative friction is hitting the lower rungs of the career ladder hardest. The grunt work tax is real: While the average seller spends 40% of their time selling, Gen Z reps are trapped at just 35% — losing approximately two full hours each week to manual data entry that senior reps spend researching prospects and building relationships. They’re also navigating a mentorship drought: 46% rarely get feedback on their sales conversations. 47% don’t get enough roleplay opportunities before customer calls. When asked what prevents effective enablement, Gen Z points to lack of manager time as the #1 obstacle, while millennials, Gen Xers, and baby boomers cite lack of access to data and insights. The result? Gen Z is eyeing the exits. More open to leaving their job than any other generation, they cite lack of advancement opportunities as the primary driver.  Open Image Modal Image Modal Related New Research: Patients Trust Their Doctor’s AI Agents 3x More Than Public AI 5 min read U.S. Workers Are More Wary of AI Than Their Global Peers. Here’s How Leaders Can Help 5 min read Sales teams — particularly high-performing ones — are tackling messy data to better support AI initiatives. To get the most from AI, sales professionals are focusing on trusted, connected data — with high performers leading the charge. Over half of sales leaders with AI (51%) say disconnected systems are slowing down their AI initiatives. To help, 74% of sales professionals are focusing on data cleansing — doing the unglamorous but essential work of removing duplicates, correcting errors or omissions, and standardizing formats across siloed systems to maximize their AI returns. High performers take it further: 79% prioritize data hygiene compared with only 54% of underperformers.  Open Image Modal Image Modal “The secret sauce for sales AI agents is unified data,” Alfano noted. “Stand-alone agents without comprehensive customer context  tend to fail. To get accurate results, agents need the full picture. Otherwise, you get garbage outputs.” Explore Further: Read the full State of Sales report See Salesforce sales leaders break down the research Learn how to build and activate your own sales agent Discover how customers like Asymbl scale their sales team with Agentforce Sales See how Siemens uses AI agents to personalize follow-up on 100% of leads Join the Salesblazer Community to grow your selling career  Methodology: Data is sourced from a double-anonymous survey of 4,050 sales professionals, including sales leaders, sales reps, partner reps, sales and business development representatives, and sales operations. The survey was conducted in August through September 2025. Respondents represented Australia, Brazil, Canada, Denmark, Finland, France, Germany, India, Ireland, Italy, Japan, Mexico, Netherlands, New Zealand, Norway, Portugal, Singapore, South Korea, Spain, Sweden, United Kingdom, and the United States."},{"@type":"WebPage","@id":"https://www.salesforce.com/news/stories/state-of-sales-report-announcement-2026/","url":"https://www.salesforce.com/news/stories/state-of-sales-report-announcement-2026/","name":"Salesforce Announces State of Sales Report for 2026 - Salesforce","isPartOf":{"@id":"https://www.salesforce.com/news/#website"},"primaryImageOfPage":{"@id":"https://www.salesforce.com/news/stories/state-of-sales-report-announcement-2026/#primaryimage"},"image":{"@id":"https://www.salesforce.com/news/stories/state-of-sales-report-announcement-2026/#primaryimage"},"thumbnailUrl":"https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/Nearly-9-in-10-Sellers-Plan-to-Use-Agents-by-2027-Study-Says.png","datePublished":"2026-02-03T13:00:00+00:00","dateModified":"2026-02-19T21:55:29+00:00","description":"Key Takeaways Sales teams name AI and AI agents their #1 growth tactic for 2026 Administrative friction is hitting the lower rungs of the career ladder","breadcrumb":{"@id":"https://www.salesforce.com/news/stories/state-of-sales-report-announcement-2026/#breadcrumb"},"inLanguage":"en-US","potentialAction":[{"@type":"ReadAction","target":["https://www.salesforce.com/news/stories/state-of-sales-report-announcement-2026/"]}]},{"@type":"ImageObject","inLanguage":"en-US","@id":"https://www.salesforce.com/news/stories/state-of-sales-report-announcement-2026/#primaryimage","url":"https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/Nearly-9-in-10-Sellers-Plan-to-Use-Agents-by-2027-Study-Says.png","contentUrl":"https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/Nearly-9-in-10-Sellers-Plan-to-Use-Agents-by-2027-Study-Says.png","width":1200,"height":675,"caption":"Sales Trends for 2026"},{"@type":"BreadcrumbList","@id":"https://www.salesforce.com/news/stories/state-of-sales-report-announcement-2026/#breadcrumb","itemListElement":[{"@type":"ListItem","position":1,"name":"News Explorer","item":"https://www.salesforce.com/news/news-explorer/"},{"@type":"ListItem","position":2,"name":"The Productivity Gap: New Survey Shows 9 in 10 Sellers Are Betting on AI and Agents To Help"}]},{"@type":"WebSite","@id":"https://www.salesforce.com/news/#website","url":"https://www.salesforce.com/news/","name":"Salesforce","description":"Get the latest Salesforce press releases, announcements, stories, and media contacts. See today’s CRM news.","publisher":{"@id":"https://www.salesforce.com/news/#organization"},"potentialAction":[{"@type":"SearchAction","target":{"@type":"EntryPoint","urlTemplate":"https://www.salesforce.com/news/?s={search_term_string}"},"query-input":{"@type":"PropertyValueSpecification","valueRequired":true,"valueName":"search_term_string"}}],"inLanguage":"en-US"},{"@type":"Organization","@id":"https://www.salesforce.com/news/#organization","name":"Salesforce","url":"https://www.salesforce.com/news/","logo":{"@type":"ImageObject","inLanguage":"en-US","@id":"https://www.salesforce.com/news/#/schema/logo/image/","url":"https://www.salesforce.com/news/wp-content/uploads/sites/3/2020/08/default.jpg","contentUrl":"https://www.salesforce.com/news/wp-content/uploads/sites/3/2020/08/default.jpg","width":1200,"height":630,"caption":"Salesforce"},"image":{"@id":"https://www.salesforce.com/news/#/schema/logo/image/"},"sameAs":["https://www.facebook.com/salesforce/","https://x.com/salesforcenews","https://www.linkedin.com/company/salesforce/"]}]}</script>
+	<!-- / Yoast SEO Premium plugin. -->
+
+
+<link rel='dns-prefetch' href='//www.salesforce.com' />
+<link rel='dns-prefetch' href='//a.sfdcstatic.com' />
+<link rel='dns-prefetch' href='//public.tableau.com' />
+<link rel='dns-prefetch' href='//cdn.optimizely.com' />
+<link rel="alternate" type="application/rss+xml" title="Salesforce &raquo; Feed" href="https://www.salesforce.com/news/feed/" />
+<link rel="alternate" type="application/rss+xml" title="Salesforce &raquo; Comments Feed" href="https://www.salesforce.com/news/comments/feed/" />
+<link rel="alternate" title="oEmbed (JSON)" type="application/json+oembed" href="https://www.salesforce.com/news/wp-json/oembed/1.0/embed?url=https%3A%2F%2Fwww.salesforce.com%2Fnews%2Fstories%2Fstate-of-sales-report-announcement-2026%2F" />
+<link rel="alternate" title="oEmbed (XML)" type="text/xml+oembed" href="https://www.salesforce.com/news/wp-json/oembed/1.0/embed?url=https%3A%2F%2Fwww.salesforce.com%2Fnews%2Fstories%2Fstate-of-sales-report-announcement-2026%2F&#038;format=xml" />
+<link rel='stylesheet' id='wp-img-auto-sizes-contain-css' href='https://www.salesforce.com/news/news/stories/state-of-sales-report-announcement-2026/?bc=OTH&#038;ver=1784218641' media='all' />
+<style id='wp-img-auto-sizes-contain-inline-css'>
+img:is([sizes=auto i],[sizes^="auto," i]){contain-intrinsic-size:3000px 1500px}
+/*# sourceURL=wp-img-auto-sizes-contain-inline-css */
+</style>
+<link rel='stylesheet' id='wp-block-library-css' href='https://www.salesforce.com/news/news/stories/state-of-sales-report-announcement-2026/?bc=OTH&#038;ver=1784218641' media='all' />
+<style id='wp-block-library-inline-css'>
+:root{--wp-block-synced-color:#7a00df;--wp-block-synced-color--rgb:122,0,223;--wp-bound-block-color:var(--wp-block-synced-color);--wp-editor-canvas-background:#ddd;--wp-admin-theme-color:#007cba;--wp-admin-theme-color--rgb:0,124,186;--wp-admin-theme-color-darker-10:#006ba1;--wp-admin-theme-color-darker-10--rgb:0,107,160.5;--wp-admin-theme-color-darker-20:#005a87;--wp-admin-theme-color-darker-20--rgb:0,90,135;--wp-admin-border-width-focus:2px}@media (min-resolution:192dpi){:root{--wp-admin-border-width-focus:1.5px}}.wp-element-button{cursor:pointer}:root .has-very-light-gray-background-color{background-color:#eee}:root .has-very-dark-gray-background-color{background-color:#313131}:root .has-very-light-gray-color{color:#eee}:root .has-very-dark-gray-color{color:#313131}:root .has-vivid-green-cyan-to-vivid-cyan-blue-gradient-background{background:linear-gradient(135deg,#00d084,#0693e3)}:root .has-purple-crush-gradient-background{background:linear-gradient(135deg,#34e2e4,#4721fb 50%,#ab1dfe)}:root .has-hazy-dawn-gradient-background{background:linear-gradient(135deg,#faaca8,#dad0ec)}:root .has-subdued-olive-gradient-background{background:linear-gradient(135deg,#fafae1,#67a671)}:root .has-atomic-cream-gradient-background{background:linear-gradient(135deg,#fdd79a,#004a59)}:root .has-nightshade-gradient-background{background:linear-gradient(135deg,#330968,#31cdcf)}:root .has-midnight-gradient-background{background:linear-gradient(135deg,#020381,#2874fc)}:root{--wp--preset--font-size--normal:16px;--wp--preset--font-size--huge:42px}.has-regular-font-size{font-size:1em}.has-larger-font-size{font-size:2.625em}.has-normal-font-size{font-size:var(--wp--preset--font-size--normal)}.has-huge-font-size{font-size:var(--wp--preset--font-size--huge)}.has-text-align-center{text-align:center}.has-text-align-left{text-align:left}.has-text-align-right{text-align:right}.has-fit-text{white-space:nowrap!important}#end-resizable-editor-section{display:none}.aligncenter{clear:both}.items-justified-left{justify-content:flex-start}.items-justified-center{justify-content:center}.items-justified-right{justify-content:flex-end}.items-justified-space-between{justify-content:space-between}.screen-reader-text{border:0;clip-path:inset(50%);height:1px;margin:-1px;overflow:hidden;padding:0;position:absolute;width:1px;word-wrap:normal!important}.screen-reader-text:focus{background-color:#ddd;clip-path:none;color:#444;display:block;font-size:1em;height:auto;left:5px;line-height:normal;padding:15px 23px 14px;text-decoration:none;top:5px;width:auto;z-index:100000}html :where(.has-border-color){border-style:solid}html :where([style*=border-top-color]){border-top-style:solid}html :where([style*=border-right-color]){border-right-style:solid}html :where([style*=border-bottom-color]){border-bottom-style:solid}html :where([style*=border-left-color]){border-left-style:solid}html :where([style*=border-width]){border-style:solid}html :where([style*=border-top-width]){border-top-style:solid}html :where([style*=border-right-width]){border-right-style:solid}html :where([style*=border-bottom-width]){border-bottom-style:solid}html :where([style*=border-left-width]){border-left-style:solid}html :where(img[class*=wp-image-]){height:auto;max-width:100%}:where(figure){margin:0 0 1em}html :where(.is-position-sticky){--wp-admin--admin-bar--position-offset:var(--wp-admin--admin-bar--height,0px)}@media screen and (max-width:600px){html :where(.is-position-sticky){--wp-admin--admin-bar--position-offset:0px}}
+
+/*# sourceURL=wp-block-library-inline-css */
+</style>
+<style id='global-styles-inline-css'>
+:root{--wp--preset--aspect-ratio--square: 1;--wp--preset--aspect-ratio--4-3: 4/3;--wp--preset--aspect-ratio--3-4: 3/4;--wp--preset--aspect-ratio--3-2: 3/2;--wp--preset--aspect-ratio--2-3: 2/3;--wp--preset--aspect-ratio--16-9: 16/9;--wp--preset--aspect-ratio--9-16: 9/16;--wp--preset--color--black: #000000;--wp--preset--color--cyan-bluish-gray: #abb8c3;--wp--preset--color--white: #ffffff;--wp--preset--color--pale-pink: #f78da7;--wp--preset--color--vivid-red: #cf2e2e;--wp--preset--color--luminous-vivid-orange: #ff6900;--wp--preset--color--luminous-vivid-amber: #fcb900;--wp--preset--color--light-green-cyan: #7bdcb5;--wp--preset--color--vivid-green-cyan: #00d084;--wp--preset--color--pale-cyan-blue: #8ed1fc;--wp--preset--color--vivid-cyan-blue: #0693e3;--wp--preset--color--vivid-purple: #9b51e0;--wp--preset--gradient--vivid-cyan-blue-to-vivid-purple: linear-gradient(135deg,rgb(6,147,227) 0%,rgb(155,81,224) 100%);--wp--preset--gradient--light-green-cyan-to-vivid-green-cyan: linear-gradient(135deg,rgb(122,220,180) 0%,rgb(0,208,130) 100%);--wp--preset--gradient--luminous-vivid-amber-to-luminous-vivid-orange: linear-gradient(135deg,rgb(252,185,0) 0%,rgb(255,105,0) 100%);--wp--preset--gradient--luminous-vivid-orange-to-vivid-red: linear-gradient(135deg,rgb(255,105,0) 0%,rgb(207,46,46) 100%);--wp--preset--gradient--very-light-gray-to-cyan-bluish-gray: linear-gradient(135deg,rgb(238,238,238) 0%,rgb(169,184,195) 100%);--wp--preset--gradient--cool-to-warm-spectrum: linear-gradient(135deg,rgb(74,234,220) 0%,rgb(151,120,209) 20%,rgb(207,42,186) 40%,rgb(238,44,130) 60%,rgb(251,105,98) 80%,rgb(254,248,76) 100%);--wp--preset--gradient--blush-light-purple: linear-gradient(135deg,rgb(255,206,236) 0%,rgb(152,150,240) 100%);--wp--preset--gradient--blush-bordeaux: linear-gradient(135deg,rgb(254,205,165) 0%,rgb(254,45,45) 50%,rgb(107,0,62) 100%);--wp--preset--gradient--luminous-dusk: linear-gradient(135deg,rgb(255,203,112) 0%,rgb(199,81,192) 50%,rgb(65,88,208) 100%);--wp--preset--gradient--pale-ocean: linear-gradient(135deg,rgb(255,245,203) 0%,rgb(182,227,212) 50%,rgb(51,167,181) 100%);--wp--preset--gradient--electric-grass: linear-gradient(135deg,rgb(202,248,128) 0%,rgb(113,206,126) 100%);--wp--preset--gradient--midnight: linear-gradient(135deg,rgb(2,3,129) 0%,rgb(40,116,252) 100%);--wp--preset--gradient--lavender: linear-gradient(180deg, rgba(115, 3, 148, 0.1) 0%, rgba(255, 255, 255, 0) 100%);--wp--preset--gradient--frostbite: linear-gradient(180deg, rgba(88, 103, 232, 0.1) 0%, rgba(255, 255, 255, 0) 100%);--wp--preset--gradient--seafoam: linear-gradient(180deg, rgba(4, 225, 203, 0.1) 0%, rgba(255, 255, 255, 0) 100%);--wp--preset--gradient--in-focus-one: radial-gradient(circle, rgba(207,233,254,1) 1%, rgba(255,255,255,1) 100%);--wp--preset--gradient--rounded-gradient: linear-gradient(180deg, rgba(27, 150, 255, 0.00) 42.27%, rgba(27, 150, 255, 0.11) 100%);--wp--preset--gradient--rounded-green: linear-gradient(180deg, rgba(1, 228, 202, 0.00) 48.51%, rgba(1, 228, 202, 0.22) 100%);--wp--preset--font-size--small: 16px;--wp--preset--font-size--medium: 20px;--wp--preset--font-size--large: 24px;--wp--preset--font-size--x-large: 32px;--wp--preset--font-size--2-x-large: 40px;--wp--preset--font-size--3-x-large: 48px;--wp--preset--font-size--4-x-large: 56px;--wp--preset--font-size--5-x-large: 80px;--wp--preset--spacing--20: 0.44rem;--wp--preset--spacing--30: 0.67rem;--wp--preset--spacing--40: 1rem;--wp--preset--spacing--50: 1.5rem;--wp--preset--spacing--60: 2.25rem;--wp--preset--spacing--70: 3.38rem;--wp--preset--spacing--80: 5.06rem;--wp--preset--shadow--natural: 6px 6px 9px rgba(0, 0, 0, 0.2);--wp--preset--shadow--deep: 12px 12px 50px rgba(0, 0, 0, 0.4);--wp--preset--shadow--sharp: 6px 6px 0px rgba(0, 0, 0, 0.2);--wp--preset--shadow--outlined: 6px 6px 0px -3px rgb(255, 255, 255), 6px 6px rgb(0, 0, 0);--wp--preset--shadow--crisp: 6px 6px 0px rgb(0, 0, 0);}:where(.is-layout-flex){gap: 0.5em;}:where(.is-layout-grid){gap: 0.5em;}body .is-layout-flex{display: flex;}.is-layout-flex{flex-wrap: wrap;align-items: center;}.is-layout-flex > :is(*, div){margin: 0;}body .is-layout-grid{display: grid;}.is-layout-grid > :is(*, div){margin: 0;}:where(.wp-block-columns.is-layout-flex){gap: 2em;}:where(.wp-block-columns.is-layout-grid){gap: 2em;}:where(.wp-block-post-template.is-layout-flex){gap: 1.25em;}:where(.wp-block-post-template.is-layout-grid){gap: 1.25em;}.has-black-color{color: var(--wp--preset--color--black) !important;}.has-cyan-bluish-gray-color{color: var(--wp--preset--color--cyan-bluish-gray) !important;}.has-white-color{color: var(--wp--preset--color--white) !important;}.has-pale-pink-color{color: var(--wp--preset--color--pale-pink) !important;}.has-vivid-red-color{color: var(--wp--preset--color--vivid-red) !important;}.has-luminous-vivid-orange-color{color: var(--wp--preset--color--luminous-vivid-orange) !important;}.has-luminous-vivid-amber-color{color: var(--wp--preset--color--luminous-vivid-amber) !important;}.has-light-green-cyan-color{color: var(--wp--preset--color--light-green-cyan) !important;}.has-vivid-green-cyan-color{color: var(--wp--preset--color--vivid-green-cyan) !important;}.has-pale-cyan-blue-color{color: var(--wp--preset--color--pale-cyan-blue) !important;}.has-vivid-cyan-blue-color{color: var(--wp--preset--color--vivid-cyan-blue) !important;}.has-vivid-purple-color{color: var(--wp--preset--color--vivid-purple) !important;}.has-black-background-color{background-color: var(--wp--preset--color--black) !important;}.has-cyan-bluish-gray-background-color{background-color: var(--wp--preset--color--cyan-bluish-gray) !important;}.has-white-background-color{background-color: var(--wp--preset--color--white) !important;}.has-pale-pink-background-color{background-color: var(--wp--preset--color--pale-pink) !important;}.has-vivid-red-background-color{background-color: var(--wp--preset--color--vivid-red) !important;}.has-luminous-vivid-orange-background-color{background-color: var(--wp--preset--color--luminous-vivid-orange) !important;}.has-luminous-vivid-amber-background-color{background-color: var(--wp--preset--color--luminous-vivid-amber) !important;}.has-light-green-cyan-background-color{background-color: var(--wp--preset--color--light-green-cyan) !important;}.has-vivid-green-cyan-background-color{background-color: var(--wp--preset--color--vivid-green-cyan) !important;}.has-pale-cyan-blue-background-color{background-color: var(--wp--preset--color--pale-cyan-blue) !important;}.has-vivid-cyan-blue-background-color{background-color: var(--wp--preset--color--vivid-cyan-blue) !important;}.has-vivid-purple-background-color{background-color: var(--wp--preset--color--vivid-purple) !important;}.has-black-border-color{border-color: var(--wp--preset--color--black) !important;}.has-cyan-bluish-gray-border-color{border-color: var(--wp--preset--color--cyan-bluish-gray) !important;}.has-white-border-color{border-color: var(--wp--preset--color--white) !important;}.has-pale-pink-border-color{border-color: var(--wp--preset--color--pale-pink) !important;}.has-vivid-red-border-color{border-color: var(--wp--preset--color--vivid-red) !important;}.has-luminous-vivid-orange-border-color{border-color: var(--wp--preset--color--luminous-vivid-orange) !important;}.has-luminous-vivid-amber-border-color{border-color: var(--wp--preset--color--luminous-vivid-amber) !important;}.has-light-green-cyan-border-color{border-color: var(--wp--preset--color--light-green-cyan) !important;}.has-vivid-green-cyan-border-color{border-color: var(--wp--preset--color--vivid-green-cyan) !important;}.has-pale-cyan-blue-border-color{border-color: var(--wp--preset--color--pale-cyan-blue) !important;}.has-vivid-cyan-blue-border-color{border-color: var(--wp--preset--color--vivid-cyan-blue) !important;}.has-vivid-purple-border-color{border-color: var(--wp--preset--color--vivid-purple) !important;}.has-vivid-cyan-blue-to-vivid-purple-gradient-background{background: var(--wp--preset--gradient--vivid-cyan-blue-to-vivid-purple) !important;}.has-light-green-cyan-to-vivid-green-cyan-gradient-background{background: var(--wp--preset--gradient--light-green-cyan-to-vivid-green-cyan) !important;}.has-luminous-vivid-amber-to-luminous-vivid-orange-gradient-background{background: var(--wp--preset--gradient--luminous-vivid-amber-to-luminous-vivid-orange) !important;}.has-luminous-vivid-orange-to-vivid-red-gradient-background{background: var(--wp--preset--gradient--luminous-vivid-orange-to-vivid-red) !important;}.has-very-light-gray-to-cyan-bluish-gray-gradient-background{background: var(--wp--preset--gradient--very-light-gray-to-cyan-bluish-gray) !important;}.has-cool-to-warm-spectrum-gradient-background{background: var(--wp--preset--gradient--cool-to-warm-spectrum) !important;}.has-blush-light-purple-gradient-background{background: var(--wp--preset--gradient--blush-light-purple) !important;}.has-blush-bordeaux-gradient-background{background: var(--wp--preset--gradient--blush-bordeaux) !important;}.has-luminous-dusk-gradient-background{background: var(--wp--preset--gradient--luminous-dusk) !important;}.has-pale-ocean-gradient-background{background: var(--wp--preset--gradient--pale-ocean) !important;}.has-electric-grass-gradient-background{background: var(--wp--preset--gradient--electric-grass) !important;}.has-midnight-gradient-background{background: var(--wp--preset--gradient--midnight) !important;}.has-small-font-size{font-size: var(--wp--preset--font-size--small) !important;}.has-medium-font-size{font-size: var(--wp--preset--font-size--medium) !important;}.has-large-font-size{font-size: var(--wp--preset--font-size--large) !important;}.has-x-large-font-size{font-size: var(--wp--preset--font-size--x-large) !important;}
+/*# sourceURL=global-styles-inline-css */
+</style>
+
+<link rel='stylesheet' id='dashicons-css' href='https://www.salesforce.com/news/wp-includes/css/dashicons.min.css?ver=6.9.5' media='all' />
+<link rel='stylesheet' id='admin-bar-css' href='https://www.salesforce.com/news/wp-includes/css/admin-bar.min.css?ver=6.9.5' media='all' />
+<style id='admin-bar-inline-css'>
+#wp-admin-bar-my-sites-search.hide-if-no-js {
+	display: none;
+}
+#wp-admin-bar-my-sites-search label[for="my-sites-search-text"] {
+	clip: rect(1px, 1px, 1px, 1px);
+	position: absolute !important;
+	height: 1px;
+	width: 1px;
+	overflow: hidden;
+}
+#wp-admin-bar-my-sites-search {
+	height: 38px;
+}
+#wp-admin-bar-my-sites-search .ab-item {
+	height: 34px;
+}
+#wp-admin-bar-my-sites-search input {
+	padding: 0 2px;
+	width: calc( 100% - 4px );
+}
+	
+/*# sourceURL=admin-bar-inline-css */
+</style>
+<link rel='stylesheet' id='frontend-css' href='https://www.salesforce.com/news/wp-content/themes/newsroom/dist/css/frontend.css?ver=b3982e32cbdcbe8e50dc' media='all' />
+<link rel='stylesheet' id='duet-css-css' href='https://www.salesforce.com/news/wp-content/themes/newsroom/assets/third-party/duet/themes/default.css?ver=b3982e32cbdcbe8e50dc' media='all' />
+<link rel='stylesheet' id='wp-block-heading-css' href='https://www.salesforce.com/news/wp-includes/blocks/heading/style.min.css?ver=6.9.5' media='all' />
+<link rel='stylesheet' id='wp-block-list-item-css' href='https://www.salesforce.com/news/news/stories/state-of-sales-report-announcement-2026/?bc=OTH&#038;ver=1784218641' media='all' />
+<link rel='stylesheet' id='wp-block-list-css' href='https://www.salesforce.com/news/wp-includes/blocks/list/style.min.css?ver=6.9.5' media='all' />
+<link rel='stylesheet' id='wp-block-group-css' href='https://www.salesforce.com/news/wp-includes/blocks/group/style.min.css?ver=6.9.5' media='all' />
+<link rel='stylesheet' id='wp-block-paragraph-css' href='https://www.salesforce.com/news/wp-includes/blocks/paragraph/style.min.css?ver=6.9.5' media='all' />
+<link rel='stylesheet' id='wp-block-quote-css' href='https://www.salesforce.com/news/wp-includes/blocks/quote/style.min.css?ver=6.9.5' media='all' />
+<link rel='stylesheet' id='wp-block-image-css' href='https://www.salesforce.com/news/wp-includes/blocks/image/style.min.css?ver=6.9.5' media='all' />
+<link rel='stylesheet' id='wp-block-html-css' href='https://www.salesforce.com/news/news/stories/state-of-sales-report-announcement-2026/?bc=OTH&#038;ver=1784218641' media='all' />
+<script type="text/javascript" src="https://www.salesforce.com/news/wp-includes/js/dist/hooks.min.js?ver=dd5603f07f9220ed27f1" id="wp-hooks-js"></script>
+<script type="text/javascript" src="https://www.salesforce.com/news/wp-includes/js/dist/i18n.min.js?ver=c26c3dc7bed366793375" id="wp-i18n-js"></script>
+<script type="text/javascript" id="wp-i18n-js-after">
+/* <![CDATA[ */
+wp.i18n.setLocaleData( { 'text direction\u0004ltr': [ 'ltr' ] } );
+//# sourceURL=wp-i18n-js-after
+/* ]]> */
+</script>
+<script type="text/javascript" src="https://www.salesforce.com/news/wp-content/client-mu-plugins/salesforce-shared/dist/js/top.js?ver=1784218641" id="salesforce-shared-top-js"></script>
+<script type="text/javascript" id="salesforce-shared-bottom-js-extra">
+/* <![CDATA[ */
+var sfAnalyticsData = {"pageName":"The Productivity Gap: New Survey Shows 9 in 10 Sellers Are Betting on AI and Agents To Help"};
+//# sourceURL=salesforce-shared-bottom-js-extra
+/* ]]> */
+</script>
+<script type="text/javascript" src="https://www.salesforce.com/news/wp-content/client-mu-plugins/salesforce-shared/dist/js/bottom.js?ver=1784218641" id="salesforce-shared-bottom-js"></script>
+<script type="module" src="https://a.sfdcstatic.com/digital/xsf/components/v1-stable/navs.js?ver=2.0.0"></script><script type="text/javascript" src="https://www.salesforce.com/news/wp-includes/js/jquery/jquery.min.js?ver=3.7.1" id="jquery-core-js"></script>
+<script type="text/javascript" src="https://www.salesforce.com/news/wp-includes/js/jquery/jquery-migrate.min.js?ver=3.4.1" id="jquery-migrate-js"></script>
+<script type="module" src="https://www.salesforce.com/news/wp-content/themes/newsroom/assets/third-party/duet/duet.esm.js?ver=b3982e32cbdcbe8e50dc"></script><script type="text/javascript" nomodule src="https://www.salesforce.com/news/wp-content/themes/newsroom/assets/third-party/duet/duet.js?ver=b3982e32cbdcbe8e50dc" id="duet-js"></script>
+<script type="text/javascript" src="//public.tableau.com/javascripts/api/tableau-2.min.js?ver=b3982e32cbdcbe8e50dc" id="tableau-js-js"></script>
+<script type="text/javascript" id="optimizely-web-script" data-src="https://cdn.optimizely.com/js/30112420344.js?ver=0.1.0" referrerpolicy="no-referrer-when-downgrade" data-handle="optimizely-main"></script><script type="text/javascript" id="optimizely-ga-datalayer-script" data-src="https://www.salesforce.com/news/wp-content/client-mu-plugins/salesforce-shared/assets/js/lib/optimizely-ga-datalayer.js?ver=1764612213"></script><script type="text/javascript" id="optimizely-gdpr-script" src="https://www.salesforce.com/news/wp-content/client-mu-plugins/salesforce-shared/dist/js/optimizely-gdpr.js?ver=1784218641"></script><link rel="https://api.w.org/" href="https://www.salesforce.com/news/wp-json/" /><link rel="alternate" title="JSON" type="application/json" href="https://www.salesforce.com/news/wp-json/wp/v2/posts/92099" /><link rel='shortlink' href='https://www.salesforce.com/news/?p=92099' />
+<!-- V: NOT SET -->	<script type="text/javascript">
+		window.sfdcBase = window.sfdcBase || {};
+		if (!sfdcBase.env) window.sfdcBase.env = ({
+			'www.salesforce.com': 'PROD',
+			'www-uat1.salesforce.com': 'UAT',
+			'www-perf.salesforce.com': 'PERF',
+			'www-qa1.salesforce.com': 'QA',
+			'www-int.salesforce.com': 'INT',
+		})[location.hostname] ?? 'PROD';
+		window.sfdcBase.ssoEnabled=true;
+		var mfePlugin = {"active":true}	</script>
+		<style>img#wpstats{display:none}</style>
+				<script type="text/javascript" src="https://static.cloud.coveo.com/coveo.analytics.js/coveoua.js"></script>
+		<script>
+			coveoua("init", "xx24e65ef6-c6f0-4a55-b6b9-e7fd84967788");
+			coveoua("send", "pageview", {
+			contentIdKey: "@clickableuri",
+			contentIdValue: window.location.href
+			});
+		</script>
+
+		<script>!function(s,a,e,v,n,t,z){if(s.saq)return;n=s.saq=function(){n.callMethod?n.callMethod.apply(n,arguments):n.queue.push(arguments)};if(!s._saq)s._saq=n;n.push=n;n.loaded=!0;n.version='1.0';n.queue=[];t=a.createElement(e);t.async=!0;t.src=v;z=a.getElementsByTagName(e)[0];z.parentNode.insertBefore(t,z)}(window,document,'script','https://tags.srv.stackadapt.com/events.js');saq('ts', '9kHjs_EPz1CFA1cBMi7Vpw, e6TeLgwvLlCNyl0A6HyEiQ');</script>
+		<!-- X Pixel Code -->
+	<script>
+	!function(e,t,n,s,u,a){e.twq||(s=e.twq=function(){s.exe?s.exe.apply(s,arguments):s.queue.push(arguments);
+	},s.version='1.1',s.queue=[],u=t.createElement(n),u.async=!0,u.src='https://static.ads-twitter.com/uwt.js',
+	a=t.getElementsByTagName(n)[0],a.parentNode.insertBefore(u,a))}(window,document,'script');
+	twq('config','o67oo');
+	</script>
+	<!-- End X Pixel Code -->
+		<!-- Reddit Pixel -->
+	<script>
+	!function(w,d){if(!w.rdt){var p=w.rdt=function(){p.sendEvent?p.sendEvent.apply(p,arguments):p.callQueue.push(arguments)};p.callQueue=[];var t=d.createElement("script");t.src="https://www.redditstatic.com/ads/pixel.js",t.async=!0;var s=d.getElementsByTagName("script")[0];s.parentNode.insertBefore(t,s)}}(window,document);rdt('init','t2_vtmkkpdp');rdt('track', 'PageVisit');
+	</script>
+	<!-- DO NOT MODIFY UNLESS TO REPLACE A USER IDENTIFIER -->
+	<!-- End Reddit Pixel -->
+	<link rel="icon" href="https://www.salesforce.com/news/wp-content/uploads/sites/3/2020/08/cropped-Salesforce_Logo_Web_Notext-1.png?w=32" sizes="32x32" />
+<link rel="icon" href="https://www.salesforce.com/news/wp-content/uploads/sites/3/2020/08/cropped-Salesforce_Logo_Web_Notext-1.png?w=192" sizes="192x192" />
+<link rel="apple-touch-icon" href="https://www.salesforce.com/news/wp-content/uploads/sites/3/2020/08/cropped-Salesforce_Logo_Web_Notext-1.png?w=180" />
+<meta name="msapplication-TileImage" content="https://www.salesforce.com/news/wp-content/uploads/sites/3/2020/08/cropped-Salesforce_Logo_Web_Notext-1.png?w=270" />
+		<style type="text/css" id="wp-custom-css">
+			.wp-block-image:not(.is-style-rounded) img {
+	border-radius: 1rem!important;
+}
+
+.margin-0 {
+	margin: 0!important;
+}
+
+.underline-none a {
+	text-decoration: none!important;
+}
+
+.wp-block-post-title a {
+	text-decoration: none!important;
+}
+
+.has-text-color a:hover,
+.has-text-color p {
+	color: inherit;
+}
+
+.wp-block-post-featured-image img {
+	height: inherit!important;
+}
+
+.wp-block-post-featured-image {
+	height: 0;
+}
+
+
+.anchor-link-gap {
+	margin-top: -60px;
+	padding-top: 60px;
+}
+
+.page-template-page-assets-library .collection__actions--download {
+	display: none;
+}
+
+.page-template-page-assets-library .collection__actions a:last-child:before {
+	display: none;
+}
+
+.wp-block-post-featured-image {
+  margin-top: 0;
+}
+
+/* For "Media Resources on the Future of CRM" */
+.wp-block-gallery.has-nested-images.is-cropped figure.wp-block-image:not(#individual-image) a.is-downloadable {
+	height: 24px;
+	width: 24px;
+}
+.wp-block-gallery.has-nested-images figure.wp-block-image .wp-element-caption {
+	border-radius: 0 0 1rem 1rem;
+	padding: 16px 8px;
+}
+.downloadable-image__wrapper {
+	height: 100%;
+    width: 100%;
+}
+
+
+@media screen and ( max-width: 47.9375em ) {
+  .wp-block-post-featured-image {
+    margin: 0;
+  }
+}
+
+.wp-block-post-featured-image a {
+  display: block;
+}
+
+@media (min-width: 30em) {
+	.secondary-title {
+		white-space: nowrap;
+	}
+}
+
+@media (max-width: 400px) {
+	.secondary-title{ font-size: 19px;
+	}
+}
+
+/* DF Homepage Work */
+.has-in-focus-one-gradient-background:before {
+	background: radial-gradient(circle, rgba(207,233,254,1) 4%, rgba(255,255,255,1) 83%);
+}
+
+.card--shadow-border {
+	min-height: 28rem;
+}
+
+.card--shadow-border .card__headline {
+	font-size: 1.2rem;
+}
+
+.image-asset-wrapper img {
+	object-fit: contain;
+}
+
+/* target UAT and prod page IDs for card height issue on desktop */
+.page-id-64822 .tns-inner {
+	margin-bottom: 2px !important;
+}
+
+
+@media screen and (max-width: 768px) {
+.tns-inner {
+    margin-left: 0 !important;
+	}
+	
+.wp-block-columns.are-vertically-aligned-center.is-layout-flex.wp-container-18.wp-block-columns-is-layout-flex {
+    flex-direction: column-reverse;
+	}
+	
+	.image-asset-wrapper.image-vertical-bottom.image-horizontal-left {
+    display: none;
+	}
+}
+
+@media screen and (max-width: 1024px) {
+	.image-asset-wrapper.image-vertical-bottom.image-horizontal-left {
+		display: none;
+	}
+	.cat-desktop-spacer {
+		display: none;
+	}
+	.digital-transformation-columns {
+		flex-direction: column-reverse;
+	}
+	.image-asset-wrapper.image-vertical-top.image-horizontal-right img {
+		max-height: 140px;
+		top: 200px;
+	}
+	#h-salesforce-in-focus {
+		margin-bottom: 30px;
+		max-width: 250px;
+	}
+}
+
+.slider {
+	height: fit-content;
+  padding-bottom: 20px;
+}
+.has-in-focus-one-gradient-background {
+	background: radial-gradient(circle, rgba(207,233,254,1) 2%, rgba(255,255,255,1) 50%);
+}
+
+.image-asset-wrapper.image-vertical-bottom.image-horizontal-left img {
+	max-width: 550px;
+    bottom: 55px;
+	width: 25%;
+}
+
+/* Hide Subscribe Footer on one page only */
+.page-id-68994 .newsletter-signup--footer {
+    display: none;
+}
+
+/* Make Image Compare block controller SF blue instead of white */
+.sf-blue div.jx-control {
+    color: var(--c-brand-400);
+}
+
+/* Set image modal z-index above Context Navigation to ensure close icon is accessible */
+
+.image-modal {
+	z-index: 20000 !important;
+}
+
+/* Override Content Cluster background with Data Cloud background */
+
+.has-data-cloud-background {
+		background-image: url(https://www.salesforce.com/news/wp-content/uploads/sites/3/2024/04/data-cloud-bg.png);
+}
+
+@media screen and (max-width: 1024px) {
+.has-data-cloud-background {
+	background-image: url(https://www.salesforce.com/news/wp-content/uploads/sites/3/2024/04/data-cloud-bg-mobile.png);
+	}
+}
+
+/* Override Content Cluster background with generic gradient background */
+
+.has-generic-gradient-background {
+		background-image: url(https://www.salesforce.com/news/wp-content/uploads/sites/3/2024/07/content-cluster-gradient-bg.png);
+}
+
+@media screen and (max-width: 1024px) {
+.has-generic-gradient-background {
+	background-image: url(https://www.salesforce.com/news/wp-content/uploads/sites/3/2024/07/content-cluster-gradient-bg.png);
+	}
+}		</style>
+			<style id='core-block-supports-inline-css'>
+.wp-elements-471ecb11ca02c2e7ea813f9dd3857484 a:where(:not(.wp-element-button)){color:var(--wp--preset--color--black);}
+/*# sourceURL=core-block-supports-inline-css */
+</style>
+
+
+<script>(window.BOOMR_mq=window.BOOMR_mq||[]).push(["addVar",{"rua.upush":"false","rua.cpush":"false","rua.upre":"false","rua.cpre":"false","rua.uprl":"false","rua.cprl":"false","rua.cprf":"false","rua.trans":"","rua.cook":"false","rua.ims":"false","rua.ufprl":"false","rua.cfprl":"false","rua.isuxp":"false","rua.texp":"norulematch","rua.ceh":"false","rua.ueh":"false","rua.ieh.st":"0"}]);</script>
+                                <script>!function(e){var n="https://s.go-mpulse.net/boomerang/";if("False"=="True")e.BOOMR_config=e.BOOMR_config||{},e.BOOMR_config.PageParams=e.BOOMR_config.PageParams||{},e.BOOMR_config.PageParams.pci=!0,n="https://s2.go-mpulse.net/boomerang/";if(window.BOOMR_API_key="NCPYV-VGJPP-N4J93-8HN3B-8B6S3",function(){function e(){if(!i){var e=document.createElement("script");e.id="boomr-scr-as",e.src=window.BOOMR.url,e.async=!0,o.parentNode.appendChild(e),i=!0}}function t(e){i=!0;var n,t,a,r,d=document,O=window;if(window.BOOMR.snippetMethod=e?"if":"i",t=function(e,n){var t=d.createElement("script");t.id=n||"boomr-if-as",t.src=window.BOOMR.url,BOOMR_lstart=(new Date).getTime(),e=e||d.body,e.appendChild(t)},!window.addEventListener&&window.attachEvent&&navigator.userAgent.match(/MSIE [67]\./))return window.BOOMR.snippetMethod="s",void t(o.parentNode,"boomr-async");a=document.createElement("IFRAME"),a.src="about:blank",a.title="",a.role="presentation",a.loading="eager",r=(a.frameElement||a).style,r.width=0,r.height=0,r.border=0,r.display="none",o.parentNode.appendChild(a);try{O=a.contentWindow,d=O.document.open()}catch(_){n=document.domain,a.src="javascript:var d=document.open();d.domain='"+n+"';void(0);",O=a.contentWindow,d=O.document.open()}if(n)d._boomrl=function(){this.domain=n,t()},d.write("<bo"+"dy onload='document._boomrl();'>");else if(O._boomrl=function(){t()},O.addEventListener)O.addEventListener("load",O._boomrl,!1);else if(O.attachEvent)O.attachEvent("onload",O._boomrl);d.close()}function a(e){window.BOOMR_onload=e&&e.timeStamp||(new Date).getTime()}if(!window.BOOMR||!window.BOOMR.version&&!window.BOOMR.snippetExecuted){window.BOOMR=window.BOOMR||{},window.BOOMR.snippetStart=(new Date).getTime(),window.BOOMR.snippetExecuted=!0,window.BOOMR.snippetVersion=12,window.BOOMR.url=n+"NCPYV-VGJPP-N4J93-8HN3B-8B6S3";var o=document.currentScript||document.getElementsByTagName("script")[0],i=!1,r=document.createElement("link");if(r.relList&&"function"==typeof r.relList.supports&&r.relList.supports("preload")&&"as"in r)window.BOOMR.snippetMethod="p",r.href=window.BOOMR.url,r.rel="preload",r.as="script",r.addEventListener("load",e),r.addEventListener("error",function(){t(!0)}),setTimeout(function(){if(!i)t(!0)},3e3),BOOMR_lstart=(new Date).getTime(),o.parentNode.appendChild(r);else t(!1);if(window.addEventListener)window.addEventListener("load",a,!1);else if(window.attachEvent)window.attachEvent("onload",a)}}(),"".length>0)if(e&&"performance"in e&&e.performance&&"function"==typeof e.performance.setResourceTimingBufferSize)e.performance.setResourceTimingBufferSize();!function(){if(BOOMR=e.BOOMR||{},BOOMR.plugins=BOOMR.plugins||{},!BOOMR.plugins.AK){var n=""=="true"?1:0,t="",a="m65mneqxg72ku2tfdhma-f-1b8be6119-clientnsv4-s.akamaihd.net",o="false"=="true"?2:1,i={"ak.v":"41","ak.cp":"1093204","ak.ai":parseInt("638429",10),"ak.ol":"0","ak.cr":5,"ak.ipv":4,"ak.proto":"h2","ak.rid":"cfc6a094","ak.r":50721,"ak.a2":n,"ak.m":"dsca","ak.n":"essl","ak.cport":62461,"ak.gh":"23.55.244.166","ak.quicv":"","ak.tlsv":"tls1.3","ak.0rtt":"","ak.0rtt.ed":"","ak.csrc":"-","ak.acc":"","ak.t":"1785010648","ak.ak":"hOBiQwZUYzCg5VSAfCLimQ==0dk52S4qUHMLLl0JKb8LkCIQ2I9AdVfy87XKSYqVzK+OxrljD+1+89zhD6dUngCxYfN/8h1iGsr114pRAw0hquhZaMnOatYHqJAI5yBB2XMTXKBGKZszjks9HeqnWCXJ0lYSoR/PPr+nWKdkEYHIRa/dv0nOKEudV9KYHcR6MIJG/gMRuCiRWhqGOPTVZVLtV2bYFJt/ZqowIqC9JKgg9XVVR+1IM/D0ZO2H00EB2cBAHZJJlzFBcBfEavsJyho0rFH64GGRt5InPUOzAwd5jVhEjLH552MQglgJd3lHkhdkBG0U5X5TFxENZX/T3jOXxjymzGOScFECht8CQ7RqCYIgLC/72A4bMzIoe0ZBMXQhcPRuTwxHjcpZqokIuEqLrwJbCC0zFlFHSscJ6EbnAkaqmqX7L3fyBt6Noac6uZo=","ak.pv":"1098","ak.dpoabenc":"","ak.tf":o};if(""!==t)i["ak.ruds"]=t;var r={i:!1,av:function(n){var t="http.initiator";if(n&&(!n[t]||"spa_hard"===n[t]))i["ak.feo"]=void 0!==e.aFeoApplied?1:0,BOOMR.addVar(i)},rv:function(){var e=["ak.cport","ak.cr","ak.csrc","ak.gh","ak.ipv","ak.m","ak.n","ak.ol","ak.proto","ak.quicv","ak.tlsv","ak.0rtt","ak.0rtt.ed","ak.r","ak.acc","ak.t","ak.tf"];BOOMR.removeVar(e)}};BOOMR.plugins.AK={akVars:i,akDNSPreFetchDomain:a,init:function(){if(!r.i){var e=BOOMR.subscribe;e("before_beacon",r.av,null,null),e("onbeacon",r.rv,null,null),r.i=!0}return this},is_complete:function(){return!0}}}}()}(window);</script></head>
+	<body class="wp-singular post-template-default single single-post postid-92099 single-format-standard wp-theme-newsroom theme-newsroom has-context-nav cxt-has-fixed-nav">
+			<a href="#main-content" class="screen-reader-text-content">
+		<div class="screen-reader-container">
+			Skip to Content		</div>
+	</a>
+
+			<hgf-c360nav
+			id="c360-hgf-nav"
+			search="false"
+			origin="https://wp.sfdcdigital.com/en-us/wp-json"
+			show-region-selector="true"
+			home-href="/"
+			context-nav-enabled="true"
+			locale="us"
+							show-button-main="true"
+				button-override-main-label="Try for Free"
+				button-override-main-href="https://www.salesforce.com/form/signup/freetrial-salesforce-starter/?d=pb"
+				button-override-main-target="_blank"
+				button-override-main-variant="trial"
+					>
+		</hgf-c360nav>
+
+		<script>
+			const navElement = document.getElementById('c360-hgf-nav');
+
+			/**
+			 * Extract values from the "ak_loc" cookie that is set on the Salesforce sites.
+			 *
+			 * @param {string} key The key of the value to return. If empty, the entire cookie value is returned.
+			 *
+			 * @returns {string|undefined}
+			 */
+			const getLocaleCookieValue = (key) => {
+				// Get the value for the ak_loc cookie if it exists.
+				const cookieValue = document.cookie
+					.split('; ')
+					.find((row) => row.startsWith('ak_loc='))
+					?.split('=')[1];
+
+				if ('string' !== typeof cookieValue) {
+					return;
+				}
+
+				if (!key) {
+					return cookieValue;
+				}
+
+				// Parse the cookie to get the value for one of the key/value pairs within it. Example cookie for a visitor in London: cc:GB,ct:LONDON,st:EN,msa:EN,pmsa:EN
+				const countryValue = cookieValue
+					.split(',')
+					.find((row) => row.startsWith(`${key}:`))
+					?.split(':')[1];
+
+				return countryValue.toLowerCase();
+			};
+
+			/**
+			 * Potentially override the global nav based on the country value in the "ak_loc" cookie.
+			 * The only use case for this functionality at the moment is showing the UK nav on the
+			 * EU blog site when visiting from Great Britain.
+			 */
+			const maybeOverrideGlobalNav = () => {
+				if (!navElement) {
+					return;
+				}
+
+				const siteLocale = 'us';
+				const localeLangMapping = {"au":"en-au","uk":"en-gb","gb":"en-gb","br":"pt-br","de":"de-de","ap":"en-ap","in":"en-in","jp":"ja-jp","mx":"es-mx","ca":"en-ca","es":"es-es","eu":"en-eu","fr":"fr-fr","it":"it-it","nl":"nl-nl","il":"en-eu","se":"sv-se","kr":"ko-kr"};
+				const navOriginUrlPattern = 'https://wp.sfdcdigital.com/%s/wp-json';
+
+				// Get the value for the "cc" (country) key within the "ak_loc" cookie.
+				let countryCookieValue = getLocaleCookieValue('cc');
+
+				if (!countryCookieValue || 'string' !== typeof countryCookieValue) {
+					return;
+				}
+
+				// If the country value is not "gb" or "uk", do nothing.
+				if (!['gb', 'uk'].includes(countryCookieValue)) {
+					return;
+				}
+
+				const navOriginUrl = navOriginUrlPattern.replace('%s', localeLangMapping[countryCookieValue]);
+				const replacementNav = navElement.cloneNode(true);
+				replacementNav.setAttribute('origin', navOriginUrl);
+				replacementNav.setAttribute('locale', 'uk');
+
+				navElement.replaceWith(replacementNav);
+			};
+
+			/**
+			 * Register events.
+			 */
+			const registerEvents = () => {
+				if (!navElement) {
+					return;
+				}
+
+				const addTrackingEvent = function (event) {
+					if (event.detail && event.detail.event) {
+						dataLayer.push(event.detail)
+					}
+				};
+
+				document.addEventListener("www_track", addTrackingEvent, false);
+			};
+
+			maybeOverrideGlobalNav();
+			registerEvents();
+		</script>
+	<script id='jetpack-search-theme-token-sampler'>(function(){try{var c=getComputedStyle(document.body),r=document.documentElement,ink=c.color,bg=c.backgroundColor;if(ink){r.style.setProperty('--jp-search-page-ink',ink);}if(bg&&bg!==ink&&bg!=='rgba(0, 0, 0, 0)'&&bg!=='transparent'){r.style.setProperty('--jp-search-page-surface',bg);}}catch(e){}})();</script>		<!-- Google Tag Manager (noscript) -->
+		<noscript>
+			<iframe src="https://www.googletagmanager.com/ns.html?id=GTM-WRXS6TH" height="0" width="0" style="display:none;visibility:hidden"></iframe>
+		</noscript>
+		<!-- End Google Tag Manager (noscript) -->
+			<div class="context-nav-wrapper">
+		<hgf-c360contextnav data="{&quot;isLogoEnabled&quot;:true,&quot;variation&quot;:&quot;static&quot;,&quot;propertyTitle&quot;:{&quot;label&quot;:&quot;News &amp; Insights&quot;,&quot;ariaLabel&quot;:&quot;News &amp; Insights&quot;,&quot;url&quot;:&quot;/news/&quot;,&quot;target&quot;:&quot;&quot;},&quot;propertyLogo&quot;:{&quot;src&quot;:&quot;https://a.sfdcstatic.com/shared/images/c360-nav/mobile_logo.png&quot;,&quot;alt&quot;:&quot;Property Logo&quot;},&quot;menuGroup&quot;:{&quot;menuItems&quot;:[{&quot;ID&quot;:76742,&quot;link&quot;:{&quot;label&quot;:&quot;Latest&quot;,&quot;ariaLabel&quot;:&quot;Latest&quot;,&quot;url&quot;:&quot;/news/&quot;,&quot;target&quot;:&quot;_self&quot;}},{&quot;ID&quot;:76743,&quot;title&quot;:&quot;News&quot;,&quot;submenu&quot;:[{&quot;ID&quot;:&quot;4&quot;,&quot;menuItems&quot;:[{&quot;ID&quot;:76744,&quot;link&quot;:{&quot;label&quot;:&quot;All News&quot;,&quot;ariaLabel&quot;:&quot;All News&quot;,&quot;url&quot;:&quot;https://www.salesforce.com/news/all-news/&quot;,&quot;target&quot;:&quot;_self&quot;}},{&quot;ID&quot;:81608,&quot;link&quot;:{&quot;label&quot;:&quot;Salesforce Platform&quot;,&quot;ariaLabel&quot;:&quot;Salesforce Platform&quot;,&quot;url&quot;:&quot;https://www.salesforce.com/news/products/salesforce-platform/&quot;,&quot;target&quot;:&quot;_self&quot;}},{&quot;ID&quot;:76746,&quot;link&quot;:{&quot;label&quot;:&quot;Agentforce&quot;,&quot;ariaLabel&quot;:&quot;Agentforce&quot;,&quot;url&quot;:&quot;https://www.salesforce.com/news/products/agentforce/&quot;,&quot;target&quot;:&quot;_self&quot;}},{&quot;ID&quot;:93302,&quot;link&quot;:{&quot;label&quot;:&quot;Data 360&quot;,&quot;ariaLabel&quot;:&quot;Data 360&quot;,&quot;url&quot;:&quot;https://www.salesforce.com/news/products/data-360/&quot;,&quot;target&quot;:&quot;_self&quot;}},{&quot;ID&quot;:76749,&quot;link&quot;:{&quot;label&quot;:&quot;Customer 360 Apps&quot;,&quot;ariaLabel&quot;:&quot;Customer 360 Apps&quot;,&quot;url&quot;:&quot;https://www.salesforce.com/news/products/customer-360/&quot;,&quot;target&quot;:&quot;_self&quot;}},{&quot;ID&quot;:76748,&quot;link&quot;:{&quot;label&quot;:&quot;Slack&quot;,&quot;ariaLabel&quot;:&quot;Slack&quot;,&quot;url&quot;:&quot;https://slack.com/blog/news&quot;,&quot;target&quot;:&quot;_blank&quot;}}]}]},{&quot;ID&quot;:76751,&quot;title&quot;:&quot;Topics&quot;,&quot;submenu&quot;:[{&quot;ID&quot;:&quot;5&quot;,&quot;menuItems&quot;:[{&quot;ID&quot;:76752,&quot;link&quot;:{&quot;label&quot;:&quot;All Topics&quot;,&quot;ariaLabel&quot;:&quot;All Topics&quot;,&quot;url&quot;:&quot;https://www.salesforce.com/news/all-stories/&quot;,&quot;target&quot;:&quot;_self&quot;}},{&quot;ID&quot;:94057,&quot;link&quot;:{&quot;label&quot;:&quot;Agents&quot;,&quot;ariaLabel&quot;:&quot;Agents&quot;,&quot;url&quot;:&quot;https://www.salesforce.com/news/topics/agents/&quot;,&quot;target&quot;:&quot;_self&quot;}},{&quot;ID&quot;:94058,&quot;link&quot;:{&quot;label&quot;:&quot;Digital Transformation&quot;,&quot;ariaLabel&quot;:&quot;Digital Transformation&quot;,&quot;url&quot;:&quot;https://www.salesforce.com/news/topics/digital-transformation/&quot;,&quot;target&quot;:&quot;_self&quot;}},{&quot;ID&quot;:94059,&quot;link&quot;:{&quot;label&quot;:&quot;Customer Success&quot;,&quot;ariaLabel&quot;:&quot;Customer Success&quot;,&quot;url&quot;:&quot;https://www.salesforce.com/news/topics/customer-success/&quot;,&quot;target&quot;:&quot;_self&quot;}},{&quot;ID&quot;:94060,&quot;link&quot;:{&quot;label&quot;:&quot;Future of Work&quot;,&quot;ariaLabel&quot;:&quot;Future of Work&quot;,&quot;url&quot;:&quot;https://www.salesforce.com/news/topics/future-of-work/&quot;,&quot;target&quot;:&quot;_self&quot;}},{&quot;ID&quot;:76755,&quot;link&quot;:{&quot;label&quot;:&quot;Stakeholder Capitalism&quot;,&quot;ariaLabel&quot;:&quot;Stakeholder Capitalism&quot;,&quot;url&quot;:&quot;/news/topics/business-as-a-platform-for-change/&quot;,&quot;target&quot;:&quot;_self&quot;}}]}]},{&quot;ID&quot;:76758,&quot;title&quot;:&quot;Press Resources&quot;,&quot;submenu&quot;:[{&quot;ID&quot;:&quot;6&quot;,&quot;menuItems&quot;:[{&quot;ID&quot;:78876,&quot;link&quot;:{&quot;label&quot;:&quot;Search All Articles&quot;,&quot;ariaLabel&quot;:&quot;Search All Articles&quot;,&quot;url&quot;:&quot;https://www.salesforce.com/news/news-explorer/&quot;,&quot;target&quot;:&quot;_self&quot;}},{&quot;ID&quot;:76760,&quot;link&quot;:{&quot;label&quot;:&quot;Press Releases &amp; News Announcements&quot;,&quot;ariaLabel&quot;:&quot;Press Releases &amp; News Announcements&quot;,&quot;url&quot;:&quot;/news/press-releases/&quot;,&quot;target&quot;:&quot;_self&quot;}},{&quot;ID&quot;:82369,&quot;link&quot;:{&quot;label&quot;:&quot;Media Library&quot;,&quot;ariaLabel&quot;:&quot;Media Library&quot;,&quot;url&quot;:&quot;https://www.salesforce.com/news/media-library/&quot;,&quot;target&quot;:&quot;_self&quot;}},{&quot;ID&quot;:76762,&quot;link&quot;:{&quot;label&quot;:&quot;Stat Library&quot;,&quot;ariaLabel&quot;:&quot;Stat Library&quot;,&quot;url&quot;:&quot;/news/stat-library/&quot;,&quot;target&quot;:&quot;_self&quot;}},{&quot;ID&quot;:76763,&quot;link&quot;:{&quot;label&quot;:&quot;History&quot;,&quot;ariaLabel&quot;:&quot;History&quot;,&quot;url&quot;:&quot;/news/stories/the-history-of-salesforce/&quot;,&quot;target&quot;:&quot;_self&quot;}},{&quot;ID&quot;:76764,&quot;link&quot;:{&quot;label&quot;:&quot;Executive Leadership&quot;,&quot;ariaLabel&quot;:&quot;Executive Leadership&quot;,&quot;url&quot;:&quot;https://www.salesforce.com/company/leadership/&quot;,&quot;target&quot;:&quot;_blank&quot;}},{&quot;ID&quot;:76765,&quot;link&quot;:{&quot;label&quot;:&quot;Investor Relations&quot;,&quot;ariaLabel&quot;:&quot;Investor Relations&quot;,&quot;url&quot;:&quot;https://investor.salesforce.com/&quot;,&quot;target&quot;:&quot;_blank&quot;}},{&quot;ID&quot;:76766,&quot;link&quot;:{&quot;label&quot;:&quot;Research Reports&quot;,&quot;ariaLabel&quot;:&quot;Research Reports&quot;,&quot;url&quot;:&quot;https://www.salesforce.com/resources/research-reports/&quot;,&quot;target&quot;:&quot;_blank&quot;}}]}]},{&quot;ID&quot;:76768,&quot;link&quot;:{&quot;label&quot;:&quot;The 360 Blog&quot;,&quot;ariaLabel&quot;:&quot;The 360 Blog&quot;,&quot;url&quot;:&quot;/blog/&quot;,&quot;target&quot;:&quot;_blank&quot;}}]},&quot;utilityNavigation&quot;:{&quot;inMobileHeader&quot;:false,&quot;ctasecondary&quot;:{&quot;cta&quot;:{&quot;label&quot;:&quot;Newsletter&quot;,&quot;ariaLabel&quot;:&quot;Newsletter&quot;,&quot;url&quot;:&quot;&quot;,&quot;target&quot;:&quot;&quot;,&quot;variant&quot;:&quot;secondary&quot;}}}}"></hgf-c360contextnav>
+	</div>
+	
+		<a href="#footer" class="screen-reader-text-content">
+			<div class="screen-reader-container">
+				Skip to Footer			</div>
+		</a>
+
+		
+		<main id="main-content">
+<div class="sf-progress-indicator" id="progress-indicator">
+	<progress class="sf-progress-indicator__percentage screen-reader-hidden" id="progress-indicator-percentage" max="100" value="0" aria-label="Article progress">0%</progress>
+</div>
+		<article class="single single--article layout layout--post">
+			<div class="single__header layout__column layout__column--top">
+				
+<header class="post__header">
+	<div class="container">
+		<div class="hero-v2 hero-v2--article hero-v2--no-author">
+
+			<div class="hero__taxonomies">
+
+				
+<a href="https://www.salesforce.com/news/topics/sales/" class="sf-tag topic topic--sales sf-tag--sales" aria-label="Filed under Sales">
+	Sales</a>
+			</div>
+
+			<h1 class="h2">The Productivity Gap: New Survey Shows 9 in 10 Sellers Are Betting on AI and Agents To Help</h1>
+
+			
+			<div class="hero-v2__ornaments-container">
+				<figure class="hero-v2__image"><span class="img-object-fit"><img src="https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/Nearly-9-in-10-Sellers-Plan-to-Use-Agents-by-2027-Study-Says.png?w=300" sizes="(min-width: 48em) 500px, 100vw" srcset="https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/Nearly-9-in-10-Sellers-Plan-to-Use-Agents-by-2027-Study-Says.png 1200w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/Nearly-9-in-10-Sellers-Plan-to-Use-Agents-by-2027-Study-Says.png?w=300&amp;h=169 300w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/Nearly-9-in-10-Sellers-Plan-to-Use-Agents-by-2027-Study-Says.png?w=768&amp;h=432 768w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/Nearly-9-in-10-Sellers-Plan-to-Use-Agents-by-2027-Study-Says.png?w=1024&amp;h=576 1024w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/Nearly-9-in-10-Sellers-Plan-to-Use-Agents-by-2027-Study-Says.png?w=264&amp;h=149 264w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/Nearly-9-in-10-Sellers-Plan-to-Use-Agents-by-2027-Study-Says.png?w=500&amp;h=281 500w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/Nearly-9-in-10-Sellers-Plan-to-Use-Agents-by-2027-Study-Says.png?w=150&amp;h=84 150w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/Nearly-9-in-10-Sellers-Plan-to-Use-Agents-by-2027-Study-Says.png?w=314&amp;h=177 314w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/Nearly-9-in-10-Sellers-Plan-to-Use-Agents-by-2027-Study-Says.png?w=343&amp;h=193 343w" alt="Sales Trends for 2026" loading="eager" fetchpriority="high" /></span></figure>			</div>
+
+			<article class="card card--list card--authors card--authors-0">
+			<div class="card__contents card__contents--row">
+			<div class="card__meta">
+					<script>
+		window.dataLayer = window.dataLayer || [];
+		dataLayer.push({
+			'event': 'publishDate',
+			'publishDate': '2026-02-03'
+		});
+	</script>
+<div class="post__info">
+			<time class="post__date label" datetime="2026-02-03">February 3, 2026</time>
+				<span class="post__reading-time label">
+			4 min read		</span>
+	</div>
+			</div>
+		</div>
+	</article>
+		</div>
+	</div>
+</header>
+			</div>
+
+			<section class="layout__column--content">
+				
+<div class="wp-block-group is-style-shadow-box is-style-takeaways"><div class="wp-block-group__inner-container is-layout-constrained wp-block-group-is-layout-constrained">
+<h2 class="wp-block-heading has-black-color has-text-color has-link-color wp-elements-471ecb11ca02c2e7ea813f9dd3857484" id="h-key-takeaways">Key Takeaways</h2>
+
+
+
+<ul class="wp-block-list">
+<li><em>Sales teams name AI and AI agents their #1 growth tactic for 2026</em></li>
+
+
+
+<li>Administrative friction is hitting the lower rungs of the career ladder hardest</li>
+
+
+
+<li><em>Top performers are 1.7x more likely to use AI agents than struggling teams</em></li>
+
+
+
+<li><em>AI agents are expected to slash research time by 34% and content creation by 36%</em></li>
+</ul>
+</div></div>
+
+
+
+<p>As sales teams kick off 2026 with ambitious new quotas, they&#8217;re turning to AI — especially <a href="https://www.salesforce.com/agentforce/ai-agents/?d=cta-body-promo-8" target="_blank" rel="noreferrer noopener">agents</a> — to hit their numbers. A <a href="http://sforce.co/sos7-6" target="_blank" rel="noreferrer noopener">new survey</a> of more than 4,000 sales professionals reveals AI as their top tactic to drive company growth this year.</p>
+
+
+
+<p>The data also reveals why: Sales teams are increasingly stretched between changing customer demands and limited bandwidth to meet them. The real drag on productivity, the research suggests, isn’t effort or skill; it’s administrative bottlenecks, a challenge hitting Gen Z sellers hardest. This year, they’re turning to <a href="https://www.salesforce.com/artificial-intelligence/what-is-ai/" target="_blank" rel="noreferrer noopener">AI</a> and agents to do more with what they have: 94% of sales leaders with agents say they ’re critical for meeting business demands.</p>
+
+
+
+<blockquote class="wp-block-quote is-layout-flow wp-block-quote-is-layout-flow">
+<p>We want to kill the busywork so our teams can focus on what actually moves deals forward: building relationships and driving success.</p>
+<cite>Adam Alfano, EVP of Sales at Salesforce</cite></blockquote>
+
+
+
+<p>By improving productivity, these agents are freeing sellers to do what they do best. &#8220;We want to kill the busywork so our teams can focus on what actually moves deals forward: building relationships and driving success,&#8221; said Adam Alfano, EVP of Sales at Salesforce. &#8220;AI agents make that possible.&#8221;</p>
+
+
+
+<h2 class="wp-block-heading" id="h-detailed-findings-nbsp"><strong>Detailed Findings:</strong>&nbsp;</h2>
+
+
+
+<p><strong>Sellers are doubling down on AI agents and deploying them across the entire sales cycle.</strong></p>
+
+
+
+<ul class="wp-block-list">
+<li>AI adoption in sales is already mainstream: 87% of sales organizations currently use some form of AI for tasks like prospecting, forecasting, lead scoring, or drafting emails.&nbsp;</li>
+
+
+
+<li>Sellers using AI report meaningful value: 89% say AI deepens customer understanding, and 87% say it makes their job less stressful.</li>
+
+
+
+<li>AI agent adoption is accelerating quickly: 54% of sellers say they’ve used agents, and nearly 9 in 10 plan to by 2027. Once fully implemented, sellers expect agents to cut prospect research time by 34% and email drafting by 36%, giving sales teams meaningful time back in their day.</li>
+</ul>
+
+
+<div class="wp-block-image"><div class="wp-block-image__wrapper">
+<figure class="aligncenter size-large prevent-download"><a href="#" class="wp-block-image__modal-toggle" aria-expanded="false" data-modal-id="92126-modal"><span class="screen-reader-text">Open Image Modal</span><img loading="lazy" decoding="async" height="576" width="1024" src="https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/Top-AI-Agent-Use-Cases.png?w=1024" alt="Chart ranking top AI Agent use cases." class="wp-image-92126" srcset="https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/Top-AI-Agent-Use-Cases.png 1920w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/Top-AI-Agent-Use-Cases.png?w=300&amp;h=169 300w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/Top-AI-Agent-Use-Cases.png?w=768&amp;h=432 768w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/Top-AI-Agent-Use-Cases.png?w=1024&amp;h=576 1024w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/Top-AI-Agent-Use-Cases.png?w=1536&amp;h=864 1536w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/Top-AI-Agent-Use-Cases.png?w=264&amp;h=149 264w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/Top-AI-Agent-Use-Cases.png?w=500&amp;h=281 500w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/Top-AI-Agent-Use-Cases.png?w=150&amp;h=84 150w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/Top-AI-Agent-Use-Cases.png?w=314&amp;h=177 314w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/Top-AI-Agent-Use-Cases.png?w=343&amp;h=193 343w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/Top-AI-Agent-Use-Cases.png?w=1414&amp;h=796 1414w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/Top-AI-Agent-Use-Cases.png?w=1218&amp;h=685 1218w" sizes="auto, (max-width: 1024px) 100vw, 1024px" /></a></figure>
+<div id="92126-modal" class="image-modal" aria-hidden="true" aria-labelledby="image-dialog-title"><div class="image-modal__overlay" tabindex="-1" data-a11y-dialog-hide></div><div class="image-modal__content" role="dialog"><button class="image-modal__close-button" type="button" data-a11y-dialog-hide aria-label="Close this image dialog window"><svg viewBox="0 0 26 25" height="16" width="16" fill="currentColor" xmlns="http://www.w3.org/2000/svg"><rect x=".626" y="22.753" width="32" height="3" rx="1.5" transform="rotate(-45 .626 22.753)"/><rect x="2.747" y=".125" width="32" height="3" rx="1.5" transform="rotate(45 2.747 .125)"/></svg></button><h1 id="image-dialog-title" class="screen-reader-text">Image Modal</h1>
+<figure class="wp-block-image aligncenter size-large prevent-download"><img loading="lazy" decoding="async" width="1920" height="1080" src="https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/Top-AI-Agent-Use-Cases.png?w=1024" alt="Chart ranking top AI Agent use cases." class="wp-image-92126" srcset="https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/Top-AI-Agent-Use-Cases.png 1920w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/Top-AI-Agent-Use-Cases.png?w=300&amp;h=169 300w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/Top-AI-Agent-Use-Cases.png?w=768&amp;h=432 768w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/Top-AI-Agent-Use-Cases.png?w=1024&amp;h=576 1024w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/Top-AI-Agent-Use-Cases.png?w=1536&amp;h=864 1536w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/Top-AI-Agent-Use-Cases.png?w=264&amp;h=149 264w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/Top-AI-Agent-Use-Cases.png?w=500&amp;h=281 500w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/Top-AI-Agent-Use-Cases.png?w=150&amp;h=84 150w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/Top-AI-Agent-Use-Cases.png?w=314&amp;h=177 314w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/Top-AI-Agent-Use-Cases.png?w=343&amp;h=193 343w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/Top-AI-Agent-Use-Cases.png?w=1414&amp;h=796 1414w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/Top-AI-Agent-Use-Cases.png?w=1218&amp;h=685 1218w" sizes="auto, (max-width: 1920px) 100vw, 1920px" /></figure>
+</div></div></div></div>
+
+
+<p>Alfano revealed how his own teams use AI agents to drive impact. “AI agents have changed how we operate,” he said. “They help us onboard reps and quote complex deals faster and personalize outreach with better intel. Plus, they’re prospecting 24/7. It&#8217;s not just efficiency gains in one department — agents are reshaping our entire sales engine.”</p>
+
+
+
+<aside class="contextual-driver has-text-align-left contextual-driver--green-cliff">
+	<header class="tidbit-header">
+		<h2 class="tidbit-head">
+			 Scalable sales: Salesforce intelligence meets the ChatGPT interface.		</h2>
+	</header>
+	<div class="tidbit-body">
+		<p></p>	</div>
+			<p class="tidbit-link label">
+			<a class="label has-right-arrow has-right-arrow--small" href="https://www.salesforce.com/news/stories/agentforce-sales-chatgpt-announcement/" target="_blank">
+				<span>READ THE LATEST</span>
+				<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 14 10">
+	<path d="M13.92 5.38a1 1 0 000-.76.9.9 0 00-.17-.26.25.25 0 000-.07l-4-4a1 1 0 00-1.46 1.42L10.59 4H1.07a1 1 0 000 2h9.52l-2.3 2.29a1 1 0 000 1.42 1 1 0 001.42 0l4-4a.25.25 0 000-.07.9.9 0 00.21-.26z" />
+</svg>
+			</a>
+		</p>
+				<img class="tidbit img-green-cliff"
+		srcset="
+			https://www.salesforce.com/news/wp-content/themes/newsroom/assets/images/article-tidbit-green-cliff-large@0.5x.png 84w,
+			https://www.salesforce.com/news/wp-content/themes/newsroom/assets/images/article-tidbit-green-cliff-large@1x.png 168w,
+			https://www.salesforce.com/news/wp-content/themes/newsroom/assets/images/article-tidbit-green-cliff-large@2x.png 336w
+		"
+		src="https://www.salesforce.com/news/wp-content/themes/newsroom/assets/images/article-tidbit-green-cliff-large@1x.png"
+		alt="Illustration of green-cliff"
+		sizes="(min-width:1024px) 175px, 130px"
+	>
+	</aside>
+
+
+
+
+<p><strong>Top-performing sellers are 1.7 times more likely to use prospecting AI agents for outreach than underperformers.</strong></p>
+
+
+
+<ul class="wp-block-list">
+<li>Nearly half of sales reps point to cold calling as the worst part of their job, yet a strong pipeline requires more contacts and more engagement than teams can deliver on their own.
+<ul class="wp-block-list">
+<li>Despite devoting nearly one full day of their workweek to prospecting efforts, 48% say they lack bandwidth to do adequate cold outreach.&nbsp;</li>
+</ul>
+</li>
+
+
+
+<li>To close the capacity gap, 55% of sales professionals are using AI for prospecting, with another 38% planning to do so in the future.
+<ul class="wp-block-list">
+<li>92% of sellers with AI agents say it benefits their prospecting efforts.</li>
+</ul>
+</li>
+
+
+
+<li>High performers — sellers who have substantially increased year-over-year revenue — are 1.7 times more likely to use agents to help with prospecting than underperformers who merely maintained or decreased YOY revenue.</li>
+</ul>
+
+
+<div class="wp-block-image"><div class="wp-block-image__wrapper">
+<figure class="aligncenter size-large prevent-download"><a href="#" class="wp-block-image__modal-toggle" aria-expanded="false" data-modal-id="92127-modal"><span class="screen-reader-text">Open Image Modal</span><img loading="lazy" decoding="async" height="576" width="1024" src="https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/AI-Agents-Stats.png?w=1024" alt="Charts showing AI agent stats for sales pros." class="wp-image-92127" srcset="https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/AI-Agents-Stats.png 1920w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/AI-Agents-Stats.png?w=300&amp;h=169 300w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/AI-Agents-Stats.png?w=768&amp;h=432 768w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/AI-Agents-Stats.png?w=1024&amp;h=576 1024w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/AI-Agents-Stats.png?w=1536&amp;h=864 1536w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/AI-Agents-Stats.png?w=264&amp;h=149 264w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/AI-Agents-Stats.png?w=500&amp;h=281 500w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/AI-Agents-Stats.png?w=150&amp;h=84 150w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/AI-Agents-Stats.png?w=314&amp;h=177 314w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/AI-Agents-Stats.png?w=343&amp;h=193 343w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/AI-Agents-Stats.png?w=1414&amp;h=796 1414w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/AI-Agents-Stats.png?w=1218&amp;h=685 1218w" sizes="auto, (max-width: 1024px) 100vw, 1024px" /></a></figure>
+<div id="92127-modal" class="image-modal" aria-hidden="true" aria-labelledby="image-dialog-title"><div class="image-modal__overlay" tabindex="-1" data-a11y-dialog-hide></div><div class="image-modal__content" role="dialog"><button class="image-modal__close-button" type="button" data-a11y-dialog-hide aria-label="Close this image dialog window"><svg viewBox="0 0 26 25" height="16" width="16" fill="currentColor" xmlns="http://www.w3.org/2000/svg"><rect x=".626" y="22.753" width="32" height="3" rx="1.5" transform="rotate(-45 .626 22.753)"/><rect x="2.747" y=".125" width="32" height="3" rx="1.5" transform="rotate(45 2.747 .125)"/></svg></button><h1 id="image-dialog-title" class="screen-reader-text">Image Modal</h1>
+<figure class="wp-block-image aligncenter size-large prevent-download"><img loading="lazy" decoding="async" width="1920" height="1080" src="https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/AI-Agents-Stats.png?w=1024" alt="Charts showing AI agent stats for sales pros." class="wp-image-92127" srcset="https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/AI-Agents-Stats.png 1920w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/AI-Agents-Stats.png?w=300&amp;h=169 300w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/AI-Agents-Stats.png?w=768&amp;h=432 768w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/AI-Agents-Stats.png?w=1024&amp;h=576 1024w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/AI-Agents-Stats.png?w=1536&amp;h=864 1536w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/AI-Agents-Stats.png?w=264&amp;h=149 264w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/AI-Agents-Stats.png?w=500&amp;h=281 500w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/AI-Agents-Stats.png?w=150&amp;h=84 150w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/AI-Agents-Stats.png?w=314&amp;h=177 314w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/AI-Agents-Stats.png?w=343&amp;h=193 343w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/AI-Agents-Stats.png?w=1414&amp;h=796 1414w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/AI-Agents-Stats.png?w=1218&amp;h=685 1218w" sizes="auto, (max-width: 1920px) 100vw, 1920px" /></figure>
+</div></div></div></div>
+
+
+<p>“At Salesforce, we use agents to work all our untouched leads,” said Alfano. “We used to let these leads fall to the floor like sawdust. Now, agents sweep them up and sift for gold. In four months, agents contacted 130,000 leads and created 3,200 opportunities. Next year, we believe these numbers will be 10 times higher.”</p>
+
+
+
+<aside class="contextual-driver has-text-align-left contextual-driver--evergreen">
+	<header class="tidbit-header">
+		<h2 class="tidbit-head">
+			How Salesforce Used SDR Agents to Revisit 100 Million Leads		</h2>
+	</header>
+	<div class="tidbit-body">
+		<p></p>	</div>
+			<p class="tidbit-link label">
+			<a class="label has-right-arrow has-right-arrow--small" href="https://www.salesforce.com/blog/ai-for-lead-qualification/" target="_blank">
+				<span>Learn More</span>
+				<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 14 10">
+	<path d="M13.92 5.38a1 1 0 000-.76.9.9 0 00-.17-.26.25.25 0 000-.07l-4-4a1 1 0 00-1.46 1.42L10.59 4H1.07a1 1 0 000 2h9.52l-2.3 2.29a1 1 0 000 1.42 1 1 0 001.42 0l4-4a.25.25 0 000-.07.9.9 0 00.21-.26z" />
+</svg>
+			</a>
+		</p>
+				<img class="tidbit img-evergreen"
+		srcset="
+			https://www.salesforce.com/news/wp-content/themes/newsroom/assets/images/article-tidbit-evergreen-large@0.5x.png 84w,
+			https://www.salesforce.com/news/wp-content/themes/newsroom/assets/images/article-tidbit-evergreen-large@1x.png 168w,
+			https://www.salesforce.com/news/wp-content/themes/newsroom/assets/images/article-tidbit-evergreen-large@2x.png 336w
+		"
+		src="https://www.salesforce.com/news/wp-content/themes/newsroom/assets/images/article-tidbit-evergreen-large@1x.png"
+		alt="Illustration of evergreen"
+		sizes="(min-width:1024px) 175px, 130px"
+	>
+	</aside>
+
+
+
+
+<p><strong>Administrative friction is hitting the lower rungs of the career ladder hardest.</strong></p>
+
+
+
+<ul class="wp-block-list">
+<li>The grunt work tax is real: While the average seller spends 40% of their time selling, Gen Z reps are trapped at just 35% — losing approximately two full hours each week to manual data entry that senior reps spend researching prospects and building relationships.</li>
+
+
+
+<li>They&#8217;re also navigating a mentorship drought:
+<ul class="wp-block-list">
+<li>46% rarely get feedback on their sales conversations.</li>
+
+
+
+<li>47% don&#8217;t get enough roleplay opportunities before customer calls.</li>
+</ul>
+</li>
+
+
+
+<li>When asked what prevents effective enablement, Gen Z points to lack of manager time as the #1 obstacle, while millennials, Gen Xers, and baby boomers cite lack of access to data and insights.</li>
+
+
+
+<li>The result? Gen Z is eyeing the exits. More open to leaving their job than any other generation, they cite lack of advancement opportunities as the primary driver.&nbsp;</li>
+</ul>
+
+
+<div class="wp-block-image"><div class="wp-block-image__wrapper">
+<figure class="aligncenter size-large prevent-download"><a href="#" class="wp-block-image__modal-toggle" aria-expanded="false" data-modal-id="92128-modal"><span class="screen-reader-text">Open Image Modal</span><img loading="lazy" decoding="async" height="576" width="1024" src="https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/Gen-Z-Most-Willing-to-Change-Jobs.png?w=1024" alt="Bar graph showing Gen Z is the generation of sales professionals most willing to change jobs this year." class="wp-image-92128" srcset="https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/Gen-Z-Most-Willing-to-Change-Jobs.png 1920w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/Gen-Z-Most-Willing-to-Change-Jobs.png?w=300&amp;h=169 300w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/Gen-Z-Most-Willing-to-Change-Jobs.png?w=768&amp;h=432 768w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/Gen-Z-Most-Willing-to-Change-Jobs.png?w=1024&amp;h=576 1024w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/Gen-Z-Most-Willing-to-Change-Jobs.png?w=1536&amp;h=864 1536w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/Gen-Z-Most-Willing-to-Change-Jobs.png?w=264&amp;h=149 264w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/Gen-Z-Most-Willing-to-Change-Jobs.png?w=500&amp;h=281 500w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/Gen-Z-Most-Willing-to-Change-Jobs.png?w=150&amp;h=84 150w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/Gen-Z-Most-Willing-to-Change-Jobs.png?w=314&amp;h=177 314w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/Gen-Z-Most-Willing-to-Change-Jobs.png?w=343&amp;h=193 343w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/Gen-Z-Most-Willing-to-Change-Jobs.png?w=1414&amp;h=796 1414w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/Gen-Z-Most-Willing-to-Change-Jobs.png?w=1218&amp;h=685 1218w" sizes="auto, (max-width: 1024px) 100vw, 1024px" /></a></figure>
+<div id="92128-modal" class="image-modal" aria-hidden="true" aria-labelledby="image-dialog-title"><div class="image-modal__overlay" tabindex="-1" data-a11y-dialog-hide></div><div class="image-modal__content" role="dialog"><button class="image-modal__close-button" type="button" data-a11y-dialog-hide aria-label="Close this image dialog window"><svg viewBox="0 0 26 25" height="16" width="16" fill="currentColor" xmlns="http://www.w3.org/2000/svg"><rect x=".626" y="22.753" width="32" height="3" rx="1.5" transform="rotate(-45 .626 22.753)"/><rect x="2.747" y=".125" width="32" height="3" rx="1.5" transform="rotate(45 2.747 .125)"/></svg></button><h1 id="image-dialog-title" class="screen-reader-text">Image Modal</h1>
+<figure class="wp-block-image aligncenter size-large prevent-download"><img loading="lazy" decoding="async" width="1920" height="1080" src="https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/Gen-Z-Most-Willing-to-Change-Jobs.png?w=1024" alt="Bar graph showing Gen Z is the generation of sales professionals most willing to change jobs this year." class="wp-image-92128" srcset="https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/Gen-Z-Most-Willing-to-Change-Jobs.png 1920w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/Gen-Z-Most-Willing-to-Change-Jobs.png?w=300&amp;h=169 300w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/Gen-Z-Most-Willing-to-Change-Jobs.png?w=768&amp;h=432 768w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/Gen-Z-Most-Willing-to-Change-Jobs.png?w=1024&amp;h=576 1024w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/Gen-Z-Most-Willing-to-Change-Jobs.png?w=1536&amp;h=864 1536w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/Gen-Z-Most-Willing-to-Change-Jobs.png?w=264&amp;h=149 264w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/Gen-Z-Most-Willing-to-Change-Jobs.png?w=500&amp;h=281 500w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/Gen-Z-Most-Willing-to-Change-Jobs.png?w=150&amp;h=84 150w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/Gen-Z-Most-Willing-to-Change-Jobs.png?w=314&amp;h=177 314w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/Gen-Z-Most-Willing-to-Change-Jobs.png?w=343&amp;h=193 343w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/Gen-Z-Most-Willing-to-Change-Jobs.png?w=1414&amp;h=796 1414w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/Gen-Z-Most-Willing-to-Change-Jobs.png?w=1218&amp;h=685 1218w" sizes="auto, (max-width: 1920px) 100vw, 1920px" /></figure>
+</div></div></div></div>
+
+
+<aside class="more-from-block more-from-block--2 alignfull wp-block-newsroom-moreontopic">
+	<div class="more-from-block__content">
+					<h4 class="more-from-block__title">Related</h4>
+		
+		<div class="more-from-block__cards more-from-block__cards--2"
+				>
+			
+
+<article			data-card-id="94062"
+		class="content-card content-card--large-inline is-entire-area-clickable content-card--is-boxed"
+			data-clickable-area-link="https://www.salesforce.com/news/stories/patients-trust-doctors-agents-over-public-ai/"
+	>
+			<div class="content-card__image-container" itemprop="image" itemscope itemtype="https://schema.org/ImageObject">
+			<img width="1024" height="576" src="https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/06/fy27-q2-hls-2026-global-health-consumer-report-and-promos-newsroom-image-1200x675-Header.png?w=1024" class="content-card__image" alt="Connected Health Consumer Report 2026" sizes="auto, (max-width: 1024px) 100vw, 1024px" loading="lazy" decoding="async" srcset="https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/06/fy27-q2-hls-2026-global-health-consumer-report-and-promos-newsroom-image-1200x675-Header.png 1200w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/06/fy27-q2-hls-2026-global-health-consumer-report-and-promos-newsroom-image-1200x675-Header.png?w=300&amp;h=169 300w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/06/fy27-q2-hls-2026-global-health-consumer-report-and-promos-newsroom-image-1200x675-Header.png?w=768&amp;h=432 768w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/06/fy27-q2-hls-2026-global-health-consumer-report-and-promos-newsroom-image-1200x675-Header.png?w=1024&amp;h=576 1024w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/06/fy27-q2-hls-2026-global-health-consumer-report-and-promos-newsroom-image-1200x675-Header.png?w=264&amp;h=149 264w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/06/fy27-q2-hls-2026-global-health-consumer-report-and-promos-newsroom-image-1200x675-Header.png?w=500&amp;h=281 500w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/06/fy27-q2-hls-2026-global-health-consumer-report-and-promos-newsroom-image-1200x675-Header.png?w=150&amp;h=84 150w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/06/fy27-q2-hls-2026-global-health-consumer-report-and-promos-newsroom-image-1200x675-Header.png?w=314&amp;h=177 314w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/06/fy27-q2-hls-2026-global-health-consumer-report-and-promos-newsroom-image-1200x675-Header.png?w=343&amp;h=193 343w" />					</div>
+	
+	<div class="content-card__content-container content-card__content-container--style-">
+		
+		
+					<h3 itemprop="headline" class="content-card__title">
+									<a
+						href="https://www.salesforce.com/news/stories/patients-trust-doctors-agents-over-public-ai/"
+																			target="_blank"
+												class="content-card__title-link"
+					>
+								New Research: Patients Trust Their Doctor’s AI Agents 3x More Than Public AI				</a>			</h3>
+		
+				
+		
+					<div itemprop="readTime" class="content-card__read-time">
+				5 min read			</div>
+		
+			</div>
+
+</article>
+
+
+
+<article			data-card-id="93562"
+		class="content-card content-card--large-inline is-entire-area-clickable content-card--is-boxed"
+			data-clickable-area-link="https://www.salesforce.com/news/stories/what-leaders-should-do-about-american-workers-ai-skepticism/"
+	>
+			<div class="content-card__image-container" itemprop="image" itemscope itemtype="https://schema.org/ImageObject">
+			<img width="1024" height="577" src="https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/05/U.S.-Workers-Are-More-Wary-of-AI-Than-Their-Global-Peers.-Heres-How-Leaders-Can-Help.png?w=1024" class="content-card__image" alt="How Leaders Can Help U.S. Workers Wary of AI" sizes="auto, (max-width: 1024px) 100vw, 1024px" loading="lazy" decoding="async" srcset="https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/05/U.S.-Workers-Are-More-Wary-of-AI-Than-Their-Global-Peers.-Heres-How-Leaders-Can-Help.png 1999w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/05/U.S.-Workers-Are-More-Wary-of-AI-Than-Their-Global-Peers.-Heres-How-Leaders-Can-Help.png?w=300&amp;h=169 300w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/05/U.S.-Workers-Are-More-Wary-of-AI-Than-Their-Global-Peers.-Heres-How-Leaders-Can-Help.png?w=768&amp;h=433 768w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/05/U.S.-Workers-Are-More-Wary-of-AI-Than-Their-Global-Peers.-Heres-How-Leaders-Can-Help.png?w=1024&amp;h=577 1024w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/05/U.S.-Workers-Are-More-Wary-of-AI-Than-Their-Global-Peers.-Heres-How-Leaders-Can-Help.png?w=1536&amp;h=865 1536w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/05/U.S.-Workers-Are-More-Wary-of-AI-Than-Their-Global-Peers.-Heres-How-Leaders-Can-Help.png?w=264&amp;h=149 264w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/05/U.S.-Workers-Are-More-Wary-of-AI-Than-Their-Global-Peers.-Heres-How-Leaders-Can-Help.png?w=500&amp;h=282 500w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/05/U.S.-Workers-Are-More-Wary-of-AI-Than-Their-Global-Peers.-Heres-How-Leaders-Can-Help.png?w=150&amp;h=84 150w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/05/U.S.-Workers-Are-More-Wary-of-AI-Than-Their-Global-Peers.-Heres-How-Leaders-Can-Help.png?w=314&amp;h=177 314w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/05/U.S.-Workers-Are-More-Wary-of-AI-Than-Their-Global-Peers.-Heres-How-Leaders-Can-Help.png?w=343&amp;h=193 343w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/05/U.S.-Workers-Are-More-Wary-of-AI-Than-Their-Global-Peers.-Heres-How-Leaders-Can-Help.png?w=1414&amp;h=796 1414w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/05/U.S.-Workers-Are-More-Wary-of-AI-Than-Their-Global-Peers.-Heres-How-Leaders-Can-Help.png?w=1218&amp;h=686 1218w" />					</div>
+	
+	<div class="content-card__content-container content-card__content-container--style-">
+		
+		
+					<h3 itemprop="headline" class="content-card__title">
+									<a
+						href="https://www.salesforce.com/news/stories/what-leaders-should-do-about-american-workers-ai-skepticism/"
+																			target="_blank"
+												class="content-card__title-link"
+					>
+								U.S. Workers Are More Wary of AI Than Their Global Peers. Here’s How Leaders Can Help				</a>			</h3>
+		
+				
+		
+					<div itemprop="readTime" class="content-card__read-time">
+				5 min read			</div>
+		
+			</div>
+
+</article>
+
+		</div>
+		<noscript>
+<div class="pagination-fallback">
+
+</div>
+</noscript>
+	</div>
+</aside>
+
+
+
+<p><strong>Sales teams — particularly high-performing ones — are tackling messy data to better support AI initiatives.</strong></p>
+
+
+
+<ul class="wp-block-list">
+<li>To get the most from AI, sales professionals are focusing on trusted, connected data — with high performers leading the charge.</li>
+
+
+
+<li>Over half of sales leaders with AI (51%) say disconnected systems are slowing down their AI initiatives.
+<ul class="wp-block-list">
+<li>To help, 74% of sales professionals are focusing on data cleansing — doing the unglamorous but essential work of removing duplicates, correcting errors or omissions, and standardizing formats across siloed systems to maximize their AI returns.</li>
+
+
+
+<li>High performers take it further:
+<ul class="wp-block-list">
+<li>79% prioritize data hygiene compared with only 54% of underperformers.&nbsp;</li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+
+
+<div class="wp-block-image"><div class="wp-block-image__wrapper">
+<figure class="aligncenter size-large prevent-download"><a href="#" class="wp-block-image__modal-toggle" aria-expanded="false" data-modal-id="92129-modal"><span class="screen-reader-text">Open Image Modal</span><img loading="lazy" decoding="async" height="576" width="1024" src="https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/High-Performers-Prioritize-Data-Hygiene.png?w=1024" alt="Bar graph showing high performers prioritize data hygiene." class="wp-image-92129" srcset="https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/High-Performers-Prioritize-Data-Hygiene.png 1920w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/High-Performers-Prioritize-Data-Hygiene.png?w=300&amp;h=169 300w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/High-Performers-Prioritize-Data-Hygiene.png?w=768&amp;h=432 768w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/High-Performers-Prioritize-Data-Hygiene.png?w=1024&amp;h=576 1024w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/High-Performers-Prioritize-Data-Hygiene.png?w=1536&amp;h=864 1536w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/High-Performers-Prioritize-Data-Hygiene.png?w=264&amp;h=149 264w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/High-Performers-Prioritize-Data-Hygiene.png?w=500&amp;h=281 500w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/High-Performers-Prioritize-Data-Hygiene.png?w=150&amp;h=84 150w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/High-Performers-Prioritize-Data-Hygiene.png?w=314&amp;h=177 314w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/High-Performers-Prioritize-Data-Hygiene.png?w=343&amp;h=193 343w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/High-Performers-Prioritize-Data-Hygiene.png?w=1414&amp;h=796 1414w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/High-Performers-Prioritize-Data-Hygiene.png?w=1218&amp;h=685 1218w" sizes="auto, (max-width: 1024px) 100vw, 1024px" /></a></figure>
+<div id="92129-modal" class="image-modal" aria-hidden="true" aria-labelledby="image-dialog-title"><div class="image-modal__overlay" tabindex="-1" data-a11y-dialog-hide></div><div class="image-modal__content" role="dialog"><button class="image-modal__close-button" type="button" data-a11y-dialog-hide aria-label="Close this image dialog window"><svg viewBox="0 0 26 25" height="16" width="16" fill="currentColor" xmlns="http://www.w3.org/2000/svg"><rect x=".626" y="22.753" width="32" height="3" rx="1.5" transform="rotate(-45 .626 22.753)"/><rect x="2.747" y=".125" width="32" height="3" rx="1.5" transform="rotate(45 2.747 .125)"/></svg></button><h1 id="image-dialog-title" class="screen-reader-text">Image Modal</h1>
+<figure class="wp-block-image aligncenter size-large prevent-download"><img loading="lazy" decoding="async" width="1920" height="1080" src="https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/High-Performers-Prioritize-Data-Hygiene.png?w=1024" alt="Bar graph showing high performers prioritize data hygiene." class="wp-image-92129" srcset="https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/High-Performers-Prioritize-Data-Hygiene.png 1920w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/High-Performers-Prioritize-Data-Hygiene.png?w=300&amp;h=169 300w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/High-Performers-Prioritize-Data-Hygiene.png?w=768&amp;h=432 768w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/High-Performers-Prioritize-Data-Hygiene.png?w=1024&amp;h=576 1024w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/High-Performers-Prioritize-Data-Hygiene.png?w=1536&amp;h=864 1536w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/High-Performers-Prioritize-Data-Hygiene.png?w=264&amp;h=149 264w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/High-Performers-Prioritize-Data-Hygiene.png?w=500&amp;h=281 500w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/High-Performers-Prioritize-Data-Hygiene.png?w=150&amp;h=84 150w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/High-Performers-Prioritize-Data-Hygiene.png?w=314&amp;h=177 314w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/High-Performers-Prioritize-Data-Hygiene.png?w=343&amp;h=193 343w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/High-Performers-Prioritize-Data-Hygiene.png?w=1414&amp;h=796 1414w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/02/High-Performers-Prioritize-Data-Hygiene.png?w=1218&amp;h=685 1218w" sizes="auto, (max-width: 1920px) 100vw, 1920px" /></figure>
+</div></div></div></div>
+
+
+<p>“The secret sauce for sales AI agents is unified data,” Alfano noted. “Stand-alone agents without comprehensive customer context&nbsp; tend to fail. To get accurate results, agents need the full picture. Otherwise, you get garbage outputs.”</p>
+
+
+
+<h4 class="wp-block-heading" id="h-explore-further"><strong>Explore Further:</strong></h4>
+
+
+
+<ul class="wp-block-list">
+<li>Read the full <a href="http://sforce.co/sos7-6" target="_blank" rel="noreferrer noopener">State of Sales report</a></li>
+
+
+
+<li>See Salesforce sales leaders break down the <a href="https://www.salesforce.com/events/webinars/state-of-sales-7-preview/" target="_blank" rel="noreferrer noopener">research</a></li>
+
+
+
+<li>Learn how to <a href="https://www.salesforce.com/form/sales/agentforce-for-sales-quick-start/" target="_blank" rel="noreferrer noopener">build and activate your own sales agent</a></li>
+
+
+
+<li>Discover how customers like Asymbl <a href="https://www.salesforce.com/customer-stories/asymbl/" target="_blank" rel="noreferrer noopener">scale their sales team with Agentforce Sales</a></li>
+
+
+
+<li>See how Siemens <a href="https://www.salesforce.com/customer-stories/siemens/" target="_blank" rel="noreferrer noopener">uses AI agents to personalize follow-up</a> on 100% of leads</li>
+
+
+
+<li>Join the <a href="https://join.slack.com/t/salesblazer-community/shared_invite/zt-3oures0k7-deKtTQG0dCfSlQYJyeSv7g" target="_blank" rel="noreferrer noopener">Salesblazer Community</a> to grow your selling career&nbsp;</li>
+</ul>
+
+
+
+<h4 class="wp-block-heading" id="h-methodology"><strong>Methodology:</strong></h4>
+
+
+
+<p>Data is sourced from a double-anonymous survey of 4,050 sales professionals, including sales leaders, sales reps, partner reps, sales and business development representatives, and sales operations. The survey was conducted in August through September 2025. Respondents represented Australia, Brazil, Canada, Denmark, Finland, France, Germany, India, Ireland, Italy, Japan, Mexico, Netherlands, New Zealand, Norway, Portugal, Singapore, South Korea, Spain, Sweden, United Kingdom, and the United States.</p>
+			</section>
+
+			<div class="layout__column layout__column--right-sidebar-top layout__column--has-newsletter-cta">
+				
+<div class="post__social post__social--v2 post__social--top post__social--has-title post__social--title-position-above">
+
+			<h2 class="screen-reader-mobile-only post__social-title">Share article</h2>
+	
+	<ul class="social-nav social-nav-v2">
+					<li class="social-nav__item">
+				<a
+					aria-label="Share on LinkedIn (Opens in a new tab)"
+					href="http://www.linkedin.com/shareArticle?mini=true&#038;url=https%3A%2F%2Fwww.salesforce.com%2Fnews%2Fstories%2Fstate-of-sales-report-announcement-2026%2F%3Futm_source%3DLinkedIn%26utm_medium%3Dorganic_social%26utm_campaign%3Dus_cbaw%26utm_content%3Dnewsroom-ctt&#038;title=The%20Productivity%20Gap%3A%20New%20Survey%20Shows%209%20in%2010%20Sellers%20Are%20Betting%20on%20AI%20and%20Agents%20To%20Help"
+					target="_blank"
+				>
+					
+<svg xmlns="http://www.w3.org/2000/svg" width="21" height="21" fill="none"><path fill="#032D60" d="M16.625 0H4.375A4.375 4.375 0 0 0 0 4.375v12.25A4.375 4.375 0 0 0 4.375 21h12.25A4.375 4.375 0 0 0 21 16.625V4.375A4.375 4.375 0 0 0 16.625 0M7 16.625H4.375V7H7zM5.687 5.89a1.54 1.54 0 0 1-1.53-1.543c0-.852.685-1.544 1.53-1.544.846 0 1.532.692 1.532 1.544S6.534 5.89 5.687 5.89M17.5 16.625h-2.625v-4.903c0-2.947-3.5-2.724-3.5 0v4.903H8.75V7h2.625v1.544c1.222-2.262 6.125-2.43 6.125 2.167z" /></svg>
+				</a>
+			</li>
+					<li class="social-nav__item">
+				<a
+					aria-label="Share on Twitter (Opens in a new tab)"
+					href="https://x.com/intent/tweet?text=The%20Productivity%20Gap%3A%20New%20Survey%20Shows%209%20in%2010%20Sellers%20Are%20Betting%20on%20AI%20and%20Agents%20To%20Help&#038;url=https%3A%2F%2Fwww.salesforce.com%2Fnews%2Fstories%2Fstate-of-sales-report-announcement-2026%2F%3Futm_source%3DX%26utm_medium%3Dorganic_social%26utm_campaign%3Dus_cbaw%26utm_content%3Dnewsroom-ctt&#038;via=salesforce"
+					target="_blank"
+				>
+					
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" fill="#032D60" viewBox="0 0 32 32"><path d="M17.4 14.8 23 8.3h-1.3L16.8 14 13 8.3H8.5l5.9 8.5-5.9 6.8h1.3l5.1-6 4.1 6h4.5zm-1.8 2.1-.6-.8-4.7-6.8h2l3.8 5.5.6.8 5 7.1h-2z" /></svg>
+				</a>
+			</li>
+					<li class="social-nav__item">
+				<a
+					aria-label="Share on Facebook (Opens in a new tab)"
+					href="https://www.facebook.com/sharer/sharer.php?u=https%3A%2F%2Fwww.salesforce.com%2Fnews%2Fstories%2Fstate-of-sales-report-announcement-2026%2F%3Futm_source%3DFacebook%26utm_medium%3Dorganic_social%26utm_campaign%3Dus_cbaw%26utm_content%3Dnewsroom-ctt"
+					target="_blank"
+				>
+					
+<svg xmlns="http://www.w3.org/2000/svg" width="19" height="19" fill="none"><path fill="#032D60" d="M19 9.5a9.5 9.5 0 0 0-19 0c0 4.742 3.474 8.672 8.016 9.385v-6.639H5.604V9.5h2.412V7.407c0-2.38 1.418-3.696 3.588-3.696 1.04 0 2.127.185 2.127.185v2.338h-1.198c-1.18 0-1.549.733-1.549 1.484V9.5h2.635l-.421 2.746h-2.214v6.639C15.526 18.172 19 14.242 19 9.5" /></svg>
+				</a>
+			</li>
+		
+					<li class="social-nav__item">
+				<button
+					class="copy-share js-copy-link"
+					aria-label="Copy link to clipboard"
+					href="#"
+					data-clipboard-text='"The Productivity Gap: New Survey Shows 9 in 10 Sellers Are Betting on AI and Agents To Help" https://www.salesforce.com/news/stories/state-of-sales-report-announcement-2026/'
+				>
+					
+<svg xmlns="http://www.w3.org/2000/svg" width="20" height="10" fill="none"><path fill="#032D60" d="M14.586.406h-3.667V2.24h3.667a2.76 2.76 0 0 1 2.75 2.75 2.76 2.76 0 0 1-2.75 2.75h-3.667v1.833h3.667a4.585 4.585 0 0 0 4.583-4.583A4.585 4.585 0 0 0 14.586.406m-5.5 7.334H5.419a2.76 2.76 0 0 1-2.75-2.75 2.76 2.76 0 0 1 2.75-2.75h3.667V.406H5.419A4.585 4.585 0 0 0 .836 4.99a4.585 4.585 0 0 0 4.583 4.583h3.667zm-2.75-3.667h7.333v1.833H6.336z" /></svg>
+				</button>
+			</li>
+			</ul>
+</div>
+
+									<div class="layout__column-content--sticky">
+				
+				
+<div class="justforyou__container">
+	
+	
+<div class="newsletter-article-cta newsletter-article-cta--top">
+	<h2 class="post__social-title newsletter-article-cta__heading">
+		Get the latest Salesforce News &amp; Insights, straight to your inbox	</h2>
+	<button type="button" class="btn btn-primary form-subscribe-modal-open newsletter-article-cta__button">
+		Subscribe now	</button>
+</div>
+
+	<div class="justforyou  justforyou--right-rail">
+
+	
+		<header class="justforyou__header">
+			<h2 class="justforyou__title">Just For You</h2>
+		</header>
+
+		<div class="justforyou__list">
+			
+<article class="card card--v2 js-intersection">
+			<a href="https://www.salesforce.com/news/stories/video/simplify-sales-unifying-data-in-slack/" class="card__thumbnail" aria-label="Read Simplify Sales: Unifying Data in Slack" tabindex="-1" target="_blank">
+			<span class="img-object-fit"><img src="https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/07/Simplify-Sales_-Unifying-Data-in-Slack.png?w=300" sizes="100vw" srcset="https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/07/Simplify-Sales_-Unifying-Data-in-Slack.png 1200w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/07/Simplify-Sales_-Unifying-Data-in-Slack.png?w=300&amp;h=169 300w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/07/Simplify-Sales_-Unifying-Data-in-Slack.png?w=768&amp;h=432 768w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/07/Simplify-Sales_-Unifying-Data-in-Slack.png?w=1024&amp;h=576 1024w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/07/Simplify-Sales_-Unifying-Data-in-Slack.png?w=264&amp;h=149 264w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/07/Simplify-Sales_-Unifying-Data-in-Slack.png?w=500&amp;h=281 500w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/07/Simplify-Sales_-Unifying-Data-in-Slack.png?w=150&amp;h=84 150w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/07/Simplify-Sales_-Unifying-Data-in-Slack.png?w=314&amp;h=177 314w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/07/Simplify-Sales_-Unifying-Data-in-Slack.png?w=343&amp;h=193 343w" alt="Slack and Salesforce logos." loading="eager" /></span>		</a>
+	
+	<div class="card__contents">
+
+		<header>
+			
+			<h2 class="card__title h4">
+				<a href="https://www.salesforce.com/news/stories/video/simplify-sales-unifying-data-in-slack/" target="_blank">
+					Simplify Sales: Unifying Data in Slack				</a>
+			</h2>
+		</header>
+		<div class="card__meta">
+			
+<span class="read-time">
+	1 min read</span>
+		</div>
+	</div>
+</article>
+
+<article class="card card--v2 js-intersection">
+			<a href="https://www.salesforce.com/news/stories/agentforce-sales-announcement/" class="card__thumbnail" aria-label="Read Agentforce Sales: Agents Handle The Grind, Sellers Focus on the Win." tabindex="-1" target="_blank">
+			<span class="img-object-fit"><img src="https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/03/7-Digital-Workforce-that-Ends-the-Sales-Grind.png?w=300" sizes="100vw" srcset="https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/03/7-Digital-Workforce-that-Ends-the-Sales-Grind.png 1200w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/03/7-Digital-Workforce-that-Ends-the-Sales-Grind.png?w=300&amp;h=169 300w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/03/7-Digital-Workforce-that-Ends-the-Sales-Grind.png?w=768&amp;h=432 768w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/03/7-Digital-Workforce-that-Ends-the-Sales-Grind.png?w=1024&amp;h=576 1024w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/03/7-Digital-Workforce-that-Ends-the-Sales-Grind.png?w=264&amp;h=149 264w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/03/7-Digital-Workforce-that-Ends-the-Sales-Grind.png?w=500&amp;h=281 500w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/03/7-Digital-Workforce-that-Ends-the-Sales-Grind.png?w=150&amp;h=84 150w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/03/7-Digital-Workforce-that-Ends-the-Sales-Grind.png?w=314&amp;h=177 314w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/03/7-Digital-Workforce-that-Ends-the-Sales-Grind.png?w=343&amp;h=193 343w" alt="The 24/7 Digital Workforce that Ends the Sales Grind" loading="eager" /></span>		</a>
+	
+	<div class="card__contents">
+
+		<header>
+			
+			<h2 class="card__title h4">
+				<a href="https://www.salesforce.com/news/stories/agentforce-sales-announcement/" target="_blank">
+					Agentforce Sales: Agents Handle The Grind, Sellers Focus on the Win.				</a>
+			</h2>
+		</header>
+		<div class="card__meta">
+			
+<span class="read-time">
+	5 min read</span>
+		</div>
+	</div>
+</article>
+		</div>
+
+	
+	</div>
+</div>
+
+									</div>
+							</div>
+
+			<div class="layout__column layout__column--right-sidebar-bottom">
+				
+<div class="post__social post__social--v2 post__social--has-title post__social--title-position-above">
+
+			<h2 class="screen-reader-mobile-only post__social-title">Share article</h2>
+	
+	<ul class="social-nav social-nav-v2">
+					<li class="social-nav__item">
+				<a
+					aria-label="Share on LinkedIn (Opens in a new tab)"
+					href="http://www.linkedin.com/shareArticle?mini=true&#038;url=https%3A%2F%2Fwww.salesforce.com%2Fnews%2Fstories%2Fstate-of-sales-report-announcement-2026%2F%3Futm_source%3DLinkedIn%26utm_medium%3Dorganic_social%26utm_campaign%3Dus_cbaw%26utm_content%3Dnewsroom-ctt&#038;title=The%20Productivity%20Gap%3A%20New%20Survey%20Shows%209%20in%2010%20Sellers%20Are%20Betting%20on%20AI%20and%20Agents%20To%20Help"
+					target="_blank"
+				>
+					
+<svg xmlns="http://www.w3.org/2000/svg" width="21" height="21" fill="none"><path fill="#032D60" d="M16.625 0H4.375A4.375 4.375 0 0 0 0 4.375v12.25A4.375 4.375 0 0 0 4.375 21h12.25A4.375 4.375 0 0 0 21 16.625V4.375A4.375 4.375 0 0 0 16.625 0M7 16.625H4.375V7H7zM5.687 5.89a1.54 1.54 0 0 1-1.53-1.543c0-.852.685-1.544 1.53-1.544.846 0 1.532.692 1.532 1.544S6.534 5.89 5.687 5.89M17.5 16.625h-2.625v-4.903c0-2.947-3.5-2.724-3.5 0v4.903H8.75V7h2.625v1.544c1.222-2.262 6.125-2.43 6.125 2.167z" /></svg>
+				</a>
+			</li>
+					<li class="social-nav__item">
+				<a
+					aria-label="Share on Twitter (Opens in a new tab)"
+					href="https://x.com/intent/tweet?text=The%20Productivity%20Gap%3A%20New%20Survey%20Shows%209%20in%2010%20Sellers%20Are%20Betting%20on%20AI%20and%20Agents%20To%20Help&#038;url=https%3A%2F%2Fwww.salesforce.com%2Fnews%2Fstories%2Fstate-of-sales-report-announcement-2026%2F%3Futm_source%3DX%26utm_medium%3Dorganic_social%26utm_campaign%3Dus_cbaw%26utm_content%3Dnewsroom-ctt&#038;via=salesforce"
+					target="_blank"
+				>
+					
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" fill="#032D60" viewBox="0 0 32 32"><path d="M17.4 14.8 23 8.3h-1.3L16.8 14 13 8.3H8.5l5.9 8.5-5.9 6.8h1.3l5.1-6 4.1 6h4.5zm-1.8 2.1-.6-.8-4.7-6.8h2l3.8 5.5.6.8 5 7.1h-2z" /></svg>
+				</a>
+			</li>
+					<li class="social-nav__item">
+				<a
+					aria-label="Share on Facebook (Opens in a new tab)"
+					href="https://www.facebook.com/sharer/sharer.php?u=https%3A%2F%2Fwww.salesforce.com%2Fnews%2Fstories%2Fstate-of-sales-report-announcement-2026%2F%3Futm_source%3DFacebook%26utm_medium%3Dorganic_social%26utm_campaign%3Dus_cbaw%26utm_content%3Dnewsroom-ctt"
+					target="_blank"
+				>
+					
+<svg xmlns="http://www.w3.org/2000/svg" width="19" height="19" fill="none"><path fill="#032D60" d="M19 9.5a9.5 9.5 0 0 0-19 0c0 4.742 3.474 8.672 8.016 9.385v-6.639H5.604V9.5h2.412V7.407c0-2.38 1.418-3.696 3.588-3.696 1.04 0 2.127.185 2.127.185v2.338h-1.198c-1.18 0-1.549.733-1.549 1.484V9.5h2.635l-.421 2.746h-2.214v6.639C15.526 18.172 19 14.242 19 9.5" /></svg>
+				</a>
+			</li>
+		
+					<li class="social-nav__item">
+				<button
+					class="copy-share js-copy-link"
+					aria-label="Copy link to clipboard"
+					href="#"
+					data-clipboard-text='"The Productivity Gap: New Survey Shows 9 in 10 Sellers Are Betting on AI and Agents To Help" https://www.salesforce.com/news/stories/state-of-sales-report-announcement-2026/'
+				>
+					
+<svg xmlns="http://www.w3.org/2000/svg" width="20" height="10" fill="none"><path fill="#032D60" d="M14.586.406h-3.667V2.24h3.667a2.76 2.76 0 0 1 2.75 2.75 2.76 2.76 0 0 1-2.75 2.75h-3.667v1.833h3.667a4.585 4.585 0 0 0 4.583-4.583A4.585 4.585 0 0 0 14.586.406m-5.5 7.334H5.419a2.76 2.76 0 0 1-2.75-2.75 2.76 2.76 0 0 1 2.75-2.75h3.667V.406H5.419A4.585 4.585 0 0 0 .836 4.99a4.585 4.585 0 0 0 4.583 4.583h3.667zm-2.75-3.667h7.333v1.833H6.336z" /></svg>
+				</button>
+			</li>
+			</ul>
+</div>
+
+<div class="newsletter-article-cta newsletter-article-cta--bottom">
+	<h2 class="post__social-title newsletter-article-cta__heading">
+		Get the latest Salesforce News &amp; Insights, straight to your inbox	</h2>
+	<button type="button" class="btn btn-primary form-subscribe-modal-open newsletter-article-cta__button">
+		Subscribe now	</button>
+</div>
+
+<div class="justforyou__container">
+	
+	
+	<div class="justforyou justforyou--bottom-right-rail justforyou--right-rail">
+
+	
+		<header class="justforyou__header">
+			<h2 class="justforyou__title">Just For You</h2>
+		</header>
+
+		<div class="justforyou__list">
+			
+<article class="card card--v2 js-intersection">
+			<a href="https://www.salesforce.com/news/stories/video/simplify-sales-unifying-data-in-slack/" class="card__thumbnail" aria-label="Read Simplify Sales: Unifying Data in Slack" tabindex="-1" target="_blank">
+			<span class="img-object-fit"><img src="https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/07/Simplify-Sales_-Unifying-Data-in-Slack.png?w=300" sizes="100vw" srcset="https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/07/Simplify-Sales_-Unifying-Data-in-Slack.png 1200w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/07/Simplify-Sales_-Unifying-Data-in-Slack.png?w=300&amp;h=169 300w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/07/Simplify-Sales_-Unifying-Data-in-Slack.png?w=768&amp;h=432 768w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/07/Simplify-Sales_-Unifying-Data-in-Slack.png?w=1024&amp;h=576 1024w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/07/Simplify-Sales_-Unifying-Data-in-Slack.png?w=264&amp;h=149 264w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/07/Simplify-Sales_-Unifying-Data-in-Slack.png?w=500&amp;h=281 500w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/07/Simplify-Sales_-Unifying-Data-in-Slack.png?w=150&amp;h=84 150w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/07/Simplify-Sales_-Unifying-Data-in-Slack.png?w=314&amp;h=177 314w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/07/Simplify-Sales_-Unifying-Data-in-Slack.png?w=343&amp;h=193 343w" alt="Slack and Salesforce logos." loading="eager" /></span>		</a>
+	
+	<div class="card__contents">
+
+		<header>
+			
+			<h2 class="card__title h4">
+				<a href="https://www.salesforce.com/news/stories/video/simplify-sales-unifying-data-in-slack/" target="_blank">
+					Simplify Sales: Unifying Data in Slack				</a>
+			</h2>
+		</header>
+		<div class="card__meta">
+			
+<span class="read-time">
+	1 min read</span>
+		</div>
+	</div>
+</article>
+
+<article class="card card--v2 js-intersection">
+			<a href="https://www.salesforce.com/news/stories/agentforce-sales-announcement/" class="card__thumbnail" aria-label="Read Agentforce Sales: Agents Handle The Grind, Sellers Focus on the Win." tabindex="-1" target="_blank">
+			<span class="img-object-fit"><img src="https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/03/7-Digital-Workforce-that-Ends-the-Sales-Grind.png?w=300" sizes="100vw" srcset="https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/03/7-Digital-Workforce-that-Ends-the-Sales-Grind.png 1200w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/03/7-Digital-Workforce-that-Ends-the-Sales-Grind.png?w=300&amp;h=169 300w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/03/7-Digital-Workforce-that-Ends-the-Sales-Grind.png?w=768&amp;h=432 768w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/03/7-Digital-Workforce-that-Ends-the-Sales-Grind.png?w=1024&amp;h=576 1024w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/03/7-Digital-Workforce-that-Ends-the-Sales-Grind.png?w=264&amp;h=149 264w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/03/7-Digital-Workforce-that-Ends-the-Sales-Grind.png?w=500&amp;h=281 500w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/03/7-Digital-Workforce-that-Ends-the-Sales-Grind.png?w=150&amp;h=84 150w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/03/7-Digital-Workforce-that-Ends-the-Sales-Grind.png?w=314&amp;h=177 314w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2026/03/7-Digital-Workforce-that-Ends-the-Sales-Grind.png?w=343&amp;h=193 343w" alt="The 24/7 Digital Workforce that Ends the Sales Grind" loading="eager" /></span>		</a>
+	
+	<div class="card__contents">
+
+		<header>
+			
+			<h2 class="card__title h4">
+				<a href="https://www.salesforce.com/news/stories/agentforce-sales-announcement/" target="_blank">
+					Agentforce Sales: Agents Handle The Grind, Sellers Focus on the Win.				</a>
+			</h2>
+		</header>
+		<div class="card__meta">
+			
+<span class="read-time">
+	5 min read</span>
+		</div>
+	</div>
+</article>
+		</div>
+
+	
+	</div>
+</div>
+			</div>
+
+			<div class="layout__column layout__column--bottom">
+				<div class="layout_column-section">
+					
+	<div class="related-topics">
+
+		<h2 class="related-topics__title">Explore related content by topic</h2>
+
+		<ul class="topic-list">
+
+		
+			<li>
+				<a class="label-secondary" href="https://www.salesforce.com/news/topics/agents/" aria-label="Filed under Agents">
+					Agents				</a>
+			</li>
+
+			
+			<li>
+				<a class="label-secondary" href="https://www.salesforce.com/news/topics/ai/" aria-label="Filed under AI">
+					AI				</a>
+			</li>
+
+			
+			<li>
+				<a class="label-secondary" href="https://www.salesforce.com/news/topics/future-of-work/" aria-label="Filed under Future of Work">
+					Future of Work				</a>
+			</li>
+
+			
+			<li>
+				<a class="label-secondary" href="https://www.salesforce.com/news/topics/sales/" aria-label="Filed under Sales">
+					Sales				</a>
+			</li>
+
+			
+		</ul>
+	</div>
+				</div>
+							</div>
+		</article>
+
+		
+<div class="justforyou__container">
+	
+	
+	<div class="justforyou  justforyou--bottom">
+
+	
+				
+					<div class="container container--375 justforyou__wrapper">
+				<header class="justforyou__header">
+					<h2 class="justforyou__title">
+						Related Articles					</h2>
+				</header>
+
+				<!-- Related Posts Row One -->
+				<div class="justforyou__grid">
+					
+<article class="card card--v2 js-intersection">
+			<a href="https://www.salesforce.com/news/stories/agentforce-for-revenue-announcement/" class="card__thumbnail" aria-label="Read Agentforce Cuts Sales Quoting Time by 75%, Dramatically Reduces Manual Work for Reps" tabindex="-1" target="_blank">
+			<span class="img-object-fit"><img src="https://www.salesforce.com/news/wp-content/uploads/sites/3/2025/07/Agentforce-Cuts-Sales-Quoting-Time-by-up-to-75-Accelerating-Deal-Velocity-3.png?w=300" sizes="100vw" srcset="https://www.salesforce.com/news/wp-content/uploads/sites/3/2025/07/Agentforce-Cuts-Sales-Quoting-Time-by-up-to-75-Accelerating-Deal-Velocity-3.png 1200w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2025/07/Agentforce-Cuts-Sales-Quoting-Time-by-up-to-75-Accelerating-Deal-Velocity-3.png?w=300&amp;h=169 300w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2025/07/Agentforce-Cuts-Sales-Quoting-Time-by-up-to-75-Accelerating-Deal-Velocity-3.png?w=768&amp;h=432 768w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2025/07/Agentforce-Cuts-Sales-Quoting-Time-by-up-to-75-Accelerating-Deal-Velocity-3.png?w=1024&amp;h=576 1024w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2025/07/Agentforce-Cuts-Sales-Quoting-Time-by-up-to-75-Accelerating-Deal-Velocity-3.png?w=264&amp;h=149 264w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2025/07/Agentforce-Cuts-Sales-Quoting-Time-by-up-to-75-Accelerating-Deal-Velocity-3.png?w=500&amp;h=281 500w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2025/07/Agentforce-Cuts-Sales-Quoting-Time-by-up-to-75-Accelerating-Deal-Velocity-3.png?w=150&amp;h=84 150w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2025/07/Agentforce-Cuts-Sales-Quoting-Time-by-up-to-75-Accelerating-Deal-Velocity-3.png?w=314&amp;h=177 314w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2025/07/Agentforce-Cuts-Sales-Quoting-Time-by-up-to-75-Accelerating-Deal-Velocity-3.png?w=343&amp;h=193 343w" alt="Salesforce Launches Agentforce for Revenue" loading="eager" /></span>		</a>
+	
+	<div class="card__contents">
+
+		<header>
+			
+			<h2 class="card__title h4">
+				<a href="https://www.salesforce.com/news/stories/agentforce-for-revenue-announcement/" target="_blank">
+					Agentforce Cuts Sales Quoting Time by 75%, Dramatically Reduces Manual Work for Reps				</a>
+			</h2>
+		</header>
+		<div class="card__meta">
+			
+<span class="read-time">
+	5 min read</span>
+		</div>
+	</div>
+</article>
+
+<article class="card card--v2 js-intersection">
+			<a href="https://www.salesforce.com/news/press-releases/2025/06/19/nexstar-media-cloud-agentforce-media-sales/" class="card__thumbnail" aria-label="Read Salesforce Extends Relationship with National Broadcasting Leader Nexstar Media Group, Inc." tabindex="-1" target="_blank">
+			<span class="img-object-fit"><img src="https://www.salesforce.com/news/wp-content/uploads/sites/3/2025/06/Nexstar-Optimizes-Local-Advertising-Sales-with-Salesforces-Agentforce.png?w=300" sizes="100vw" srcset="https://www.salesforce.com/news/wp-content/uploads/sites/3/2025/06/Nexstar-Optimizes-Local-Advertising-Sales-with-Salesforces-Agentforce.png 1200w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2025/06/Nexstar-Optimizes-Local-Advertising-Sales-with-Salesforces-Agentforce.png?w=300&amp;h=169 300w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2025/06/Nexstar-Optimizes-Local-Advertising-Sales-with-Salesforces-Agentforce.png?w=768&amp;h=432 768w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2025/06/Nexstar-Optimizes-Local-Advertising-Sales-with-Salesforces-Agentforce.png?w=1024&amp;h=576 1024w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2025/06/Nexstar-Optimizes-Local-Advertising-Sales-with-Salesforces-Agentforce.png?w=264&amp;h=149 264w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2025/06/Nexstar-Optimizes-Local-Advertising-Sales-with-Salesforces-Agentforce.png?w=500&amp;h=281 500w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2025/06/Nexstar-Optimizes-Local-Advertising-Sales-with-Salesforces-Agentforce.png?w=150&amp;h=84 150w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2025/06/Nexstar-Optimizes-Local-Advertising-Sales-with-Salesforces-Agentforce.png?w=314&amp;h=177 314w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2025/06/Nexstar-Optimizes-Local-Advertising-Sales-with-Salesforces-Agentforce.png?w=343&amp;h=193 343w" alt="Nexstar Taps Salesforce Media Cloud, Agentforce for Media Sales" loading="eager" /></span>		</a>
+	
+	<div class="card__contents">
+
+		<header>
+			
+			<h2 class="card__title h4">
+				<a href="https://www.salesforce.com/news/press-releases/2025/06/19/nexstar-media-cloud-agentforce-media-sales/" target="_blank">
+					Salesforce Extends Relationship with National Broadcasting Leader Nexstar Media Group, Inc.				</a>
+			</h2>
+		</header>
+		<div class="card__meta">
+			
+<span class="read-time">
+	3 min read</span>
+		</div>
+	</div>
+</article>
+
+<article class="card card--v2 js-intersection">
+			<a href="https://www.salesforce.com/news/stories/summer-2025-product-release-announcement/" class="card__thumbnail" aria-label="Read Salesforce Summer &#8217;25 Release: New Agentforce Capabilities and Product Enhancements to Create Richer Customer Experiences" tabindex="-1" target="_blank">
+			<span class="img-object-fit"><img src="https://www.salesforce.com/news/wp-content/uploads/sites/3/2025/06/Summer-Release-Newsroom-Image-1200x675-1.webp?w=300" sizes="100vw" srcset="https://www.salesforce.com/news/wp-content/uploads/sites/3/2025/06/Summer-Release-Newsroom-Image-1200x675-1.webp 1200w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2025/06/Summer-Release-Newsroom-Image-1200x675-1.webp?w=300&amp;h=169 300w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2025/06/Summer-Release-Newsroom-Image-1200x675-1.webp?w=768&amp;h=432 768w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2025/06/Summer-Release-Newsroom-Image-1200x675-1.webp?w=1024&amp;h=576 1024w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2025/06/Summer-Release-Newsroom-Image-1200x675-1.webp?w=264&amp;h=149 264w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2025/06/Summer-Release-Newsroom-Image-1200x675-1.webp?w=500&amp;h=281 500w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2025/06/Summer-Release-Newsroom-Image-1200x675-1.webp?w=150&amp;h=84 150w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2025/06/Summer-Release-Newsroom-Image-1200x675-1.webp?w=314&amp;h=177 314w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2025/06/Summer-Release-Newsroom-Image-1200x675-1.webp?w=343&amp;h=193 343w" alt="Salesforce’s Summer 2025 Product Release Announcement" loading="eager" /></span>		</a>
+	
+	<div class="card__contents">
+
+		<header>
+			
+			<h2 class="card__title h4">
+				<a href="https://www.salesforce.com/news/stories/summer-2025-product-release-announcement/" target="_blank">
+					Salesforce Summer &#8217;25 Release: New Agentforce Capabilities and Product Enhancements to Create Richer Customer Experiences				</a>
+			</h2>
+		</header>
+		<div class="card__meta">
+			
+<span class="read-time">
+	4 min read</span>
+		</div>
+	</div>
+</article>
+
+<article class="card card--v2 js-intersection">
+			<a href="https://www.salesforce.com/news/stories/ai-sales-agents-for-revenue/" class="card__thumbnail" aria-label="Read AI Sales Agents Drive Revenue, Free Teams for Key Deals" tabindex="-1" target="_blank">
+			<span class="img-object-fit"><img src="https://www.salesforce.com/news/wp-content/uploads/sites/3/2025/06/AI-Sales-Agents-Drive-Revenue-Free-Teams-for-Key-Deals.png?w=300" sizes="100vw" srcset="https://www.salesforce.com/news/wp-content/uploads/sites/3/2025/06/AI-Sales-Agents-Drive-Revenue-Free-Teams-for-Key-Deals.png 1200w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2025/06/AI-Sales-Agents-Drive-Revenue-Free-Teams-for-Key-Deals.png?w=300&amp;h=169 300w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2025/06/AI-Sales-Agents-Drive-Revenue-Free-Teams-for-Key-Deals.png?w=768&amp;h=432 768w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2025/06/AI-Sales-Agents-Drive-Revenue-Free-Teams-for-Key-Deals.png?w=1024&amp;h=576 1024w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2025/06/AI-Sales-Agents-Drive-Revenue-Free-Teams-for-Key-Deals.png?w=264&amp;h=149 264w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2025/06/AI-Sales-Agents-Drive-Revenue-Free-Teams-for-Key-Deals.png?w=500&amp;h=281 500w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2025/06/AI-Sales-Agents-Drive-Revenue-Free-Teams-for-Key-Deals.png?w=150&amp;h=84 150w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2025/06/AI-Sales-Agents-Drive-Revenue-Free-Teams-for-Key-Deals.png?w=314&amp;h=177 314w, https://www.salesforce.com/news/wp-content/uploads/sites/3/2025/06/AI-Sales-Agents-Drive-Revenue-Free-Teams-for-Key-Deals.png?w=343&amp;h=193 343w" alt="AI Agents for Revenue" loading="eager" /></span>		</a>
+	
+	<div class="card__contents">
+
+		<header>
+			
+			<h2 class="card__title h4">
+				<a href="https://www.salesforce.com/news/stories/ai-sales-agents-for-revenue/" target="_blank">
+					AI Sales Agents Drive Revenue, Free Teams for Key Deals				</a>
+			</h2>
+		</header>
+		<div class="card__meta">
+			
+<span class="read-time">
+	4 min read</span>
+		</div>
+	</div>
+</article>
+				</div>
+
+				
+			</div>
+			
+	</div>
+</div>
+
+		
+<div class="bottom-bar-wrapper">
+	<div class="bottom-bar">
+		<div class="icon">
+			<img src="https://www.salesforce.com/news/wp-content/themes/newsroom/assets/images/subscribe-astro@1x.png" alt="Astro"/>
+		</div>
+		<div class="text">
+			<p>Get the latest Salesforce News</p>
+		</div>
+		<div class="btn-container">
+			<button name="Subscribe" class="button button--brand form-subscribe-modal-open">Subscribe</button>
+		</div>
+	</div>
+	<button class="close-btn">
+		<span class="screen-reader-text">Close</span>
+	</button>
+</div>
+	</main>
+
+	<div class="">
+		
+<footer class="footer" id="footer">
+
+	
+<section class="newsletter newsletter--default newsletter--no-js">
+	<header class="newsletter__header">
+		<h2 class="newsletter__title">
+			Insight, Opinion, News, and Data		</h2>
+		<p class="newsletter__subtitle">
+			Sign up for Salesforce News &amp; Insights, direct to your inbox.		</p>
+	</header>
+
+	<iframe src="https://cloud.mail.salesforce.com/newsroomsignup"
+		class="newsletter__iframe"
+		title="Insight, Opinion, News, and Data"
+	>
+	</iframe>
+
+</section>
+
+		<div class="footer__wrapper">
+		<a href="https://www.salesforce.com/news" class="footer__logo-wrapper js-intersection" aria-label="Go to Newsroom Homepage">
+			<div class="footer__logo">
+				<span class="screen-reader-text">Footer Logo</span>
+				
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 63 44" fill="none" aria-hidden="true"><path d="M26.223 4.797a10.973 10.973 0 017.985-3.413c4.166 0 7.777 2.306 9.72 5.742a13.664 13.664 0 015.486-1.153C56.913 5.973 63 12.084 63 19.625c0 7.541-6.087 13.653-13.586 13.653-.926 0-1.805-.093-2.685-.277a9.936 9.936 0 01-8.656 5.074c-1.55 0-3.032-.37-4.351-.992-1.736 4.036-5.74 6.872-10.415 6.872a11.31 11.31 0 01-10.624-7.38c-.694.139-1.412.231-2.152.231C4.698 36.76 0 32.032 0 26.175c0-3.92 2.106-7.334 5.254-9.179a12.005 12.005 0 01-.995-4.843C4.259 5.443 9.72 0 16.479 0c3.981 0 7.499 1.868 9.744 4.797z" fill="#00B3FF" /><path d="M9.12 22.785c-.047.092.023.115.023.138.115.092.231.139.37.208.648.346 1.25.438 1.875.438 1.296 0 2.106-.692 2.106-1.776v-.023c0-1.015-.903-1.384-1.76-1.66l-.115-.046c-.648-.208-1.204-.392-1.204-.808v-.023c0-.369.325-.622.834-.622.555 0 1.226.184 1.643.415 0 0 .116.069.162-.046.023-.07.232-.646.255-.715.023-.07-.023-.116-.07-.139-.486-.3-1.157-.484-1.851-.484h-.14c-1.18 0-2.013.715-2.013 1.73v.023c0 1.084.903 1.43 1.76 1.66l.138.046c.625.185 1.157.346 1.157.784v.023c0 .392-.347.692-.902.692-.209 0-.903 0-1.667-.484-.092-.046-.139-.092-.208-.138-.046-.023-.139-.07-.162.069l-.232.738zM28.051 22.785c-.046.092.023.115.023.138.116.092.232.139.37.208.649.346 1.25.438 1.875.438 1.296 0 2.106-.692 2.106-1.776v-.023c0-1.015-.902-1.384-1.759-1.66l-.115-.046c-.648-.208-1.204-.392-1.204-.808v-.023c0-.369.324-.622.833-.622.556 0 1.227.184 1.644.415 0 0 .115.069.162-.046.023-.07.231-.646.254-.715.023-.07-.023-.116-.07-.139-.485-.3-1.156-.484-1.85-.484h-.14c-1.18 0-2.013.715-2.013 1.73v.023c0 1.084.902 1.43 1.759 1.66l.139.046c.625.185 1.157.346 1.157.784v.023c0 .392-.347.692-.903.692-.208 0-.902 0-1.666-.484-.093-.046-.139-.092-.208-.138-.024-.023-.14-.047-.163.069l-.23.738zM42.031 19.464a2.921 2.921 0 00-.486-.922c-.232-.254-.51-.485-.833-.623-.324-.161-.718-.23-1.158-.23-.44 0-.833.069-1.157.23a2.812 2.812 0 00-.833.623 2.519 2.519 0 00-.486.922 3.658 3.658 0 00-.162 1.153c0 .415.046.807.162 1.153s.278.67.486.923c.231.253.51.484.833.622.324.139.718.231 1.157.231.44 0 .834-.07 1.158-.23.324-.139.601-.37.833-.623a2.52 2.52 0 00.486-.923c.116-.346.162-.738.162-1.153 0-.415-.046-.784-.162-1.153zm-1.088 1.153c0 .623-.115 1.107-.347 1.453-.231.346-.579.508-1.041.508-.486 0-.81-.162-1.042-.508-.231-.346-.347-.83-.347-1.453 0-.622.116-1.107.347-1.453.231-.346.556-.507 1.041-.507.487 0 .834.162 1.042.507.232.346.347.83.347 1.453z" fill="#fff" /><path fill-rule="evenodd" clip-rule="evenodd" d="M50.896 22.44c-.046-.116-.139-.07-.139-.07-.162.07-.324.115-.51.138-.184.023-.37.047-.6.047-.533 0-.927-.162-1.228-.462-.3-.3-.462-.807-.462-1.476 0-.6.138-1.06.416-1.407.255-.345.671-.53 1.204-.53.44 0 .787.046 1.134.162 0 0 .092.046.116-.07.092-.253.162-.438.254-.738.023-.092-.046-.115-.07-.115a6.273 6.273 0 00-.717-.184c-.231-.046-.509-.046-.81-.046-.463 0-.856.069-1.203.23a2.746 2.746 0 00-.88.623 2.609 2.609 0 00-.532.922 3.648 3.648 0 00-.185 1.153c0 .9.231 1.615.717 2.145s1.204.807 2.13.807c.555 0 1.11-.115 1.527-.277 0 0 .07-.046.046-.138l-.208-.715zM56.405 19.256a2.437 2.437 0 00-.463-.853c-.231-.254-.463-.438-.694-.53a2.468 2.468 0 00-1.042-.208c-.463 0-.88.07-1.203.23a2.133 2.133 0 00-.834.646 2.305 2.305 0 00-.485.946 3.757 3.757 0 00-.162 1.153c0 .415.046.807.162 1.153.115.346.277.669.532.922.231.254.555.462.926.6.37.138.81.208 1.319.208 1.065 0 1.62-.231 1.828-.37.047-.022.07-.069.023-.184l-.231-.669c-.046-.092-.139-.069-.139-.069-.255.092-.625.277-1.504.277-.556 0-.995-.162-1.25-.438-.278-.277-.394-.669-.417-1.2h3.657s.093 0 .116-.092c-.023.023.093-.691-.139-1.522zm-3.634.761c.047-.346.14-.622.301-.853.232-.346.556-.53 1.042-.53s.787.184 1.018.53c.139.23.208.53.232.853H52.77zM27.173 19.256a2.437 2.437 0 00-.463-.853c-.232-.254-.463-.438-.695-.53a2.468 2.468 0 00-1.041-.208c-.463 0-.88.07-1.204.23a2.133 2.133 0 00-.833.646 2.305 2.305 0 00-.486.946 3.757 3.757 0 00-.162 1.153c0 .415.046.807.162 1.153s.278.669.532.922c.232.254.556.462.926.6.37.138.81.208 1.32.208 1.064 0 1.62-.231 1.828-.37.046-.022.07-.069.023-.184l-.231-.669c-.047-.092-.14-.069-.14-.069-.254.092-.624.277-1.504.277-.555 0-.995-.162-1.25-.438-.277-.277-.393-.669-.416-1.2h3.657s.092 0 .115-.092c-.023.023.093-.691-.138-1.522zm-3.634.761c.046-.346.139-.622.3-.853.232-.346.556-.53 1.042-.53s.787.184 1.019.53c.139.23.208.53.231.853H23.54z" fill="#fff" /><path d="M17.105 19.856c-.139 0-.347-.023-.579-.023-.323 0-.624.046-.902.115a2.29 2.29 0 00-.764.346 1.881 1.881 0 00-.532.6c-.14.23-.185.53-.185.83 0 .323.046.6.162.83.115.23.277.415.486.577a2.4 2.4 0 00.74.323c.278.069.602.092.972.092s.741-.023 1.111-.092c.348-.07.787-.139.926-.185.116-.023.255-.07.255-.07.092-.022.092-.114.092-.114v-3.321c0-.738-.185-1.269-.578-1.615-.394-.322-.95-.507-1.667-.507-.277 0-.717.046-.972.092 0 0-.787.162-1.134.415 0 0-.07.047-.023.139l.255.692c.023.092.115.069.115.069s.023 0 .07-.023c.694-.37 1.597-.37 1.597-.37.393 0 .694.07.902.231.209.162.301.392.301.877v.161c-.37-.046-.648-.069-.648-.069zm-1.458 2.56c-.139-.116-.162-.139-.208-.208a.935.935 0 01-.116-.484c0-.323.116-.553.324-.715 0 0 .324-.277 1.065-.254.532 0 .995.093.995.093v1.66s-.463.092-.995.138c-.741.023-1.065-.23-1.065-.23z" fill="#fff" /><path fill-rule="evenodd" clip-rule="evenodd" d="M46.545 17.988c.023-.092-.023-.115-.046-.138a2.52 2.52 0 00-.602-.093c-.463-.023-.717.046-.949.162a1.579 1.579 0 00-.625.461v-.438c0-.07-.046-.116-.115-.116h-.926c-.07 0-.116.047-.116.116v5.42c0 .069.046.115.116.115h.949c.07 0 .115-.047.115-.116v-2.744c0-.369.047-.738.116-.945.07-.231.185-.416.324-.531.139-.138.278-.23.44-.277a1.9 1.9 0 01.486-.069c.185 0 .393.046.393.046.07 0 .116-.046.14-.092.092-.184.277-.669.3-.761zM37.54 15.451a1.737 1.737 0 00-.37-.092 2.896 2.896 0 00-.486-.046c-.671 0-1.18.184-1.55.553-.37.37-.602.923-.741 1.66l-.047.255h-.833s-.092 0-.115.115l-.14.76c0 .07.024.116.116.116h.81l-.81 4.543c-.069.37-.138.67-.208.9-.07.23-.162.392-.255.507-.092.115-.185.208-.324.254-.115.046-.277.069-.44.069-.092 0-.207-.023-.3-.023-.093-.023-.139-.046-.208-.07 0 0-.093-.045-.14.07-.022.069-.254.669-.277.738-.023.069 0 .138.046.138.116.046.185.07.324.092.209.047.37.047.533.047.347 0 .648-.047.902-.139a1.67 1.67 0 00.672-.461 2.31 2.31 0 00.462-.807 8.31 8.31 0 00.324-1.222l.834-4.636h1.203s.093 0 .116-.115l.139-.761c0-.07-.023-.115-.116-.115h-1.157c0-.023.07-.439.185-.83a.964.964 0 01.255-.393.598.598 0 01.3-.184c.116-.046.255-.046.394-.046.116 0 .208.023.3.023.116.023.163.046.186.046.116.046.139 0 .162-.046l.278-.761c.07-.092 0-.116-.023-.139zM21.225 23.338c0 .07-.046.115-.116.115h-.972c-.07 0-.116-.046-.116-.115v-7.772c0-.069.047-.115.116-.115h.972c.07 0 .116.046.116.115v7.772z" fill="#fff" /></svg>
+			</div>
+		</a>
+
+		<nav class="js-intersection">
+			<div id="primary-footer-nav" class="footer__menu"><ul><li id="menu-item-74761" class="menu-item menu-item-type-custom menu-item-object-custom menu-item-74761"><a href="/news/all-news/">News</a></li>
+<li id="menu-item-74762" class="menu-item menu-item-type-custom menu-item-object-custom menu-item-74762"><a href="/news/all-stories/">Stories</a></li>
+<li id="menu-item-74763" class="menu-item menu-item-type-custom menu-item-object-custom menu-item-74763"><a href="/news/press-releases/">Press Releases</a></li>
+</ul></div>		</nav>
+
+		<div class="footer__social-menu js-intersection">
+			<span class="footer__social-menu-label">Follow us</span>
+
+			
+<div class="post__social post__social--v2 post__social--has-title post__social--title-position-above">
+
+			<h2 class="screen-reader-mobile-only post__social-title">Share article</h2>
+	
+	<ul class="social-nav social-nav-v2">
+					<li class="social-nav__item">
+				<a
+					aria-label="Share on LinkedIn (Opens in a new tab)"
+					href="https://www.linkedin.com/showcase/salesforce-news"
+					target="_blank"
+				>
+					
+<svg xmlns="http://www.w3.org/2000/svg" width="21" height="21" fill="none"><path fill="#032D60" d="M16.625 0H4.375A4.375 4.375 0 0 0 0 4.375v12.25A4.375 4.375 0 0 0 4.375 21h12.25A4.375 4.375 0 0 0 21 16.625V4.375A4.375 4.375 0 0 0 16.625 0M7 16.625H4.375V7H7zM5.687 5.89a1.54 1.54 0 0 1-1.53-1.543c0-.852.685-1.544 1.53-1.544.846 0 1.532.692 1.532 1.544S6.534 5.89 5.687 5.89M17.5 16.625h-2.625v-4.903c0-2.947-3.5-2.724-3.5 0v4.903H8.75V7h2.625v1.544c1.222-2.262 6.125-2.43 6.125 2.167z" /></svg>
+				</a>
+			</li>
+					<li class="social-nav__item">
+				<a
+					aria-label="Share on Twitter (Opens in a new tab)"
+					href="https://x.com/SalesforceNews"
+					target="_blank"
+				>
+					
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" fill="#032D60" viewBox="0 0 32 32"><path d="M17.4 14.8 23 8.3h-1.3L16.8 14 13 8.3H8.5l5.9 8.5-5.9 6.8h1.3l5.1-6 4.1 6h4.5zm-1.8 2.1-.6-.8-4.7-6.8h2l3.8 5.5.6.8 5 7.1h-2z" /></svg>
+				</a>
+			</li>
+					<li class="social-nav__item">
+				<a
+					aria-label="Share on Facebook (Opens in a new tab)"
+					href="https://www.facebook.com/salesforce"
+					target="_blank"
+				>
+					
+<svg xmlns="http://www.w3.org/2000/svg" width="19" height="19" fill="none"><path fill="#032D60" d="M19 9.5a9.5 9.5 0 0 0-19 0c0 4.742 3.474 8.672 8.016 9.385v-6.639H5.604V9.5h2.412V7.407c0-2.38 1.418-3.696 3.588-3.696 1.04 0 2.127.185 2.127.185v2.338h-1.198c-1.18 0-1.549.733-1.549 1.484V9.5h2.635l-.421 2.746h-2.214v6.639C15.526 18.172 19 14.242 19 9.5" /></svg>
+				</a>
+			</li>
+		
+					<li class="social-nav__item">
+				<a
+					aria-label="Contact the newsroom by email"
+					href="mailto:pr@salesforce.com"
+					target="_blank"
+				>
+					
+<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" fill="none"><path d="M10.826 12.885c.23.23.577.23.807 0l8.693-8.077c.154-.308.115-.808-.5-.808l-17.193.038c-.461 0-.846.424-.5.808zm9.654-4.923a.464.464 0 0 0-.77-.347l-6.807 6.27a2.43 2.43 0 0 1-1.654.654 2.58 2.58 0 0 1-1.654-.616l-6.77-6.308a.455.455 0 0 0-.768.347c-.039-.116-.039 8.73-.039 8.73 0 .846.692 1.539 1.539 1.539H18.94c.846 0 1.539-.693 1.539-1.539z" clip-rule="evenodd" /></svg>
+				</a>
+			</li>
+			</ul>
+</div>
+		</div>
+
+	</div>
+	
+</footer>
+		
+<div class="footer-secondary">
+	<div class="footer-secondary__wrapper">
+		<div class="footer-secondary__menu-global-wrapper">
+			<button
+				id="js-global-submenu-button"
+				class="footer-secondary__menu-global"
+				aria-expanded="false"
+			>
+				<svg viewBox="0 0 24 23" fill="none" xmlns="http://www.w3.org/2000/svg" class="globe-icon"><path d="M12 .697C5.383.697 0 5.69 0 11.829c0 6.14 5.383 11.133 12 11.133s12-4.994 12-11.133C24 5.69 18.617.697 12 .697zm0 1.855c.18 0 .453.101.813.493.359.391.726 1.033 1.062 1.884.156.399.309.856.438 1.334H9.686c.13-.478.282-.935.438-1.334.336-.851.703-1.493 1.063-1.884.359-.392.632-.493.812-.493zm-3.188.464a9.497 9.497 0 00-.593 1.276c-.235.598-.422 1.264-.594 1.971H4a10.017 10.017 0 014.813-3.247zm6.376 0A10.017 10.017 0 0120 6.263h-3.625c-.172-.707-.36-1.373-.594-1.971a9.481 9.481 0 00-.594-1.276zM2.812 8.118h4.47c-.13.881-.22 1.816-.25 2.784h-4.97a8.724 8.724 0 01.75-2.784zm6.5 0h5.376c.14.87.242 1.805.28 2.784H9.032a23.3 23.3 0 01.281-2.784zm7.407 0h4.468c.403.867.649 1.805.75 2.784H16.97a24.801 24.801 0 00-.25-2.784zm-14.657 4.64h4.97c.03.967.12 1.902.25 2.782h-4.47a8.723 8.723 0 01-.75-2.783zm6.97 0h5.937a23.31 23.31 0 01-.281 2.782H9.311c-.14-.87-.242-1.804-.28-2.783zm7.937 0h4.968a8.725 8.725 0 01-.75 2.782H16.72a24.8 24.8 0 00.25-2.783zM4 17.395h3.625c.172.707.36 1.373.594 1.971.18.46.37.888.594 1.276A10.016 10.016 0 014 17.396zm5.688 0h4.624c-.128.478-.28.935-.437 1.334-.336.851-.703 1.493-1.063 1.884-.359.391-.632.493-.812.493-.18 0-.453-.102-.813-.493-.359-.391-.726-1.033-1.062-1.884a12.915 12.915 0 01-.438-1.334zm6.687 0H20a10.016 10.016 0 01-4.813 3.247c.223-.388.415-.815.594-1.276.235-.598.422-1.264.594-1.971z" /></svg>				<span>Worldwide</span>
+				<svg width="16" height="16" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg"><path d="M13 5.7l-.7-.7L8 9.5 3.7 5l-.7.7L8 11z" fill-rule="evenodd" /></svg>			</button>
+
+			
+<div
+	class="global-submenu"
+	id="js-global-submenu"
+	aria-hidden="true"
+>
+	<div class="global-submenu__container">
+		<p class="global-submenu__heading h6" id="americas">Americas</p>
+		<ul class="global-submenu__list">
+			<li class="global-submenu__link">
+				<a href="https://www.salesforce.com/mx/" target="_blank" lang="pt">América Latina (Español)</a>
+			</li>
+			<li class="global-submenu__link">
+				<a href="https://www.salesforce.com/br/" target="_blank" lang="pt">Brasil (Português)</a>
+			</li>
+			<li class="global-submenu__link">
+				<a href="https://www.salesforce.com/ca/" target="_blank">Canada (English)</a>
+			</li>
+			<li class="global-submenu__link">
+				<a href="https://www.salesforce.com/fr-ca/" target="_blank">Canada (Français)</a>
+			</li>
+			<li class="global-submenu__link">
+				<a href="https://www.salesforce.com/" target="_blank">United States (English)</a>
+			</li>
+		</ul>
+	</div>
+
+	<div class="global-submenu__container">
+		<p class="global-submenu__heading h6">Europe, Middle East, and Africa</p>
+		<ul class="global-submenu__list">
+			<li class="global-submenu__link">
+				<a href="https://www.salesforce.com/es" target="_blank" lang="de">España (Español)</a>
+			</li>
+			<li class="global-submenu__link">
+				<a href="https://www.salesforce.com/de/" target="_blank" lang="de">Deutschland (Deutsch)</a>
+			</li>
+			<li class="global-submenu__link">
+				<a href="https://www.salesforce.com/fr/" target="_blank" lang="fr">France (Français)</a>
+			</li>
+			<li class="global-submenu__link">
+				<a href="https://www.salesforce.com/it/" target="_blank" lang="fr">Italia (Italiano)</a>
+			</li>
+			<li class="global-submenu__link">
+				<a href="https://www.salesforce.com/nl/" target="_blank" lang="nl">Nederland (Nederlands)</a>
+			</li>
+			<li class="global-submenu__link">
+				<a href="https://www.salesforce.com/se/" target="_blank" lang="nl">Sverige (Svenska)</a>
+			</li>
+			<li class="global-submenu__link">
+				<a href="https://www.salesforce.com/uk/" target="_blank">United Kingdom (English)</a>
+			</li>
+			<li class="global-submenu__link">
+				<a href="https://www.salesforce.com/eu/" target="_blank">All other countries (English)</a>
+			</li>
+		</ul>
+	</div>
+
+	<div class="global-submenu__container">
+		<p id="asia-pacific" class="global-submenu__heading h6">Asia Pacific</p>
+		<ul class="global-submenu__list">
+			<li class="global-submenu__link">
+				<a href="https://www.salesforce.com/au/" target="_blank">Australia (English)</a>
+			</li>
+			<li class="global-submenu__link">
+				<a href="https://www.salesforce.com/in/" target="_blank">India (English)</a>
+			</li>
+			<li class="global-submenu__link">
+				<a href="https://www.salesforce.com/jp/" target="_blank" lang="ja">日本 (日本語)</a>
+			</li>
+			<li class="global-submenu__link">
+				<a href="https://www.salesforce.com/cn/" target="_blank">中国 (简体中文)</a>
+			</li>
+			<li class="global-submenu__link">
+				<a href="https://www.salesforce.com/hk/" target="_blank">香港 (繁體中文)</a>
+			</li>
+			<li class="global-submenu__link">
+				<a href="https://www.salesforce.com/tw/" target="_blank">台灣 (繁體中文)</a>
+			</li>
+			<li class="global-submenu__link">
+				<a href="https://www.salesforce.com/kr/" target="_blank">한국 (한국어)</a>
+			</li>
+			<li class="global-submenu__link">
+				<a href="https://www.salesforce.com/my/" target="_blank">Malaysia (English)</a>
+			</li>
+			<li class="global-submenu__link">
+				<a href="https://www.salesforce.com/th/" target="_blank">ประเทศไทย (ไทย)</a>
+			</li>
+			<li class="global-submenu__link">
+				<a href="https://www.salesforce.com/ap/" target="_blank">All other countries (English)</a>
+			</li>
+		</ul>
+	</div>
+</div>
+		</div>
+		<div class="footer-secondary__menu-links">
+			<p class="footer-secondary__copyright">
+							© Copyright 2026 Salesforce, inc. <a href="https://www.salesforce.com/company/legal/intellectual/">All rights reserved. </a>Various trademarks held by their respective owners. Salesforce, inc. Salesforce Tower, 415 Mission Street, 3rd Floor, San Francisco, CA 94105, United States
+						</p>
+
+			<nav>
+				<div class="menu-secondary-footer-container"><ul id="footer-secondary-nav" class="footer-secondary__menu"><li id="menu-item-37543" class="menu-item menu-item-type-custom menu-item-object-custom menu-item-37543"><a href="https://www.salesforce.com/company/legal/">Legal</a></li>
+<li id="menu-item-37544" class="menu-item menu-item-type-custom menu-item-object-custom menu-item-37544"><a href="https://www.salesforce.com/company/legal/sfdc-website-terms-of-service/">Terms of Service</a></li>
+<li id="menu-item-36374" class="menu-item menu-item-type-custom menu-item-object-custom menu-item-36374"><a href="https://www.salesforce.com/company/privacy/">Privacy Information</a></li>
+<li id="menu-item-36375" class="menu-item menu-item-type-custom menu-item-object-custom menu-item-36375"><a href="https://www.salesforce.com/company/disclosure/">Responsible Disclosure</a></li>
+<li id="menu-item-36376" class="menu-item menu-item-type-custom menu-item-object-custom menu-item-36376"><a href="https://trust.salesforce.com/">Trust</a></li>
+<li id="menu-item-36377" class="menu-item menu-item-type-custom menu-item-object-custom menu-item-36377"><a href="https://www.salesforce.com/form/contact/contactme/">Contact</a></li>
+<li class="menu-item"><a class="page-footer_link optanon-toggle-display" href="javascript:void(0)">Cookie Preferences</a></li><li><a href=/form/other/privacy-request/?d=cta-footer-1><img src="https://www.salesforce.com/content/dam/web/global/svg-icons/icon-cpra.svg" class="footer-link-icon" alt="" />Your Privacy Choices</a></li></ul></div>			</nav>
+		</div>
+	</div>
+</div>
+	</div>
+
+	<div class="skip-links screen-reader-text">
+		<a href="#main">Skip to Content</a>
+		<a href="#header">Skip to Header</a>
+	</div>
+
+		<div class="form-subscribe-modal">
+		
+<section class="newsletter newsletter--modal newsletter--no-js">
+	<header class="newsletter__header">
+		<h2 class="newsletter__title">
+			Insight, Opinion, News, and Data		</h2>
+		<p class="newsletter__subtitle">
+			Sign up for Salesforce News &amp; Insights, direct to your inbox.		</p>
+	</header>
+
+	<iframe src="https://cloud.mail.salesforce.com/newsroomsignup"
+		class="newsletter__iframe"
+		title="Insight, Opinion, News, and Data"
+	>
+	</iframe>
+
+</section>
+	</div>
+	
+		<div class="copy-event-message" aria-hidden="true">
+		<span>Copied</span>
+	</div>
+	<script type="speculationrules">
+{"prefetch":[{"source":"document","where":{"and":[{"href_matches":"/news/*"},{"not":{"href_matches":["/news/wp-*.php","/news/wp-admin/*","/news/wp-content/uploads/sites/3/*","/news/wp-content/*","/news/wp-content/plugins/*","/news/wp-content/themes/newsroom/*","/news/*\\?(.+)"]}},{"not":{"selector_matches":"a[rel~=\"nofollow\"]"}},{"not":{"selector_matches":".no-prefetch, .no-prefetch a"}}]},"eagerness":"conservative"}]}
+</script>
+<script type="text/javascript" src="https://www.salesforce.com/news/wp-includes/js/hoverintent-js.min.js?ver=2.2.1" id="hoverintent-js-js"></script>
+<script type="text/javascript" src="https://www.salesforce.com/news/wp-includes/js/admin-bar.min.js?ver=6.9.5" id="admin-bar-js"></script>
+<script type="text/javascript" id="admin-bar-js-after">
+/* <![CDATA[ */
+jQuery(document).ready( function($) {
+	$('#wp-admin-bar-my-sites-search.hide-if-no-js').show();
+	$('#wp-admin-bar-my-sites-search input').keyup( function( ) {
+		var searchValRegex = new RegExp( $(this).val(), 'i');
+		$('#wp-admin-bar-my-sites-list > li.menupop').hide().filter(function() {
+			return searchValRegex.test( $(this).find('> a').text() );
+		}).show();
+	});
+});
+//# sourceURL=admin-bar-js-after
+/* ]]> */
+</script>
+<script type="text/javascript" src="https://www.salesforce.com/news/wp-content/client-mu-plugins/salesforce-shared/dist/js/frontend.js?ver=1784218641" id="salesforce-shared-frontend-js"></script>
+<script type="text/javascript" src="https://www.salesforce.com/news/wp-includes/js/dist/dom-ready.min.js?ver=f77871ff7694fffea381" id="wp-dom-ready-js"></script>
+<script type="text/javascript" src="https://www.salesforce.com/news/wp-includes/js/dist/a11y.min.js?ver=cb460b4676c94bd228ed" id="wp-a11y-js"></script>
+<script type="text/javascript" id="frontend-js-extra">
+/* <![CDATA[ */
+var NEWSROOM = {"ajaxurl":"https://www.salesforce.com/news/wp-admin/admin-ajax.php","ajaxnonce":"3bae5fc3e5","autosuggestEndpoint":"https://www.salesforce.com/news/wp-json/newsroom/v1/assets/autosuggest","collections":[{"label":"Company Logos","url":"https://www.salesforce.com/news/media-collection/company-logos-and-video/","keywords":""},{"label":"Culture","url":"https://www.salesforce.com/news/media-collection/culture/","keywords":""},{"label":"Dreamforce","url":"https://www.salesforce.com/news/media-collection/dreamforce/","keywords":""},{"label":"Dreamforce 2022","url":"https://www.salesforce.com/news/media-collection/dreamforce-2022/","keywords":""},{"label":"Dreamforce 2023","url":"https://www.salesforce.com/news/media-collection/dreamforce-2023/","keywords":""},{"label":"Dreamforce 2024","url":"https://www.salesforce.com/news/media-collection/dreamforce-2024/","keywords":""},{"label":"Dreamforce 2024 Onsite Photography","url":"https://www.salesforce.com/news/media-collection/dreamforce-2024-onsite-photography/","keywords":""},{"label":"Dreamforce 2024 Product Media","url":"https://www.salesforce.com/news/media-collection/dreamforce-2024-product-media/","keywords":""},{"label":"Dreamforce 2025","url":"https://www.salesforce.com/news/media-collection/dreamforce-2025/","keywords":""},{"label":"Events","url":"https://www.salesforce.com/news/media-collection/events/","keywords":""},{"label":"Leadership","url":"https://www.salesforce.com/news/media-collection/leadership/","keywords":""},{"label":"Real Estate","url":"https://www.salesforce.com/news/media-collection/real-estate/","keywords":""},{"label":"Salesforce Characters","url":"https://www.salesforce.com/news/media-collection/salesforce-characters/","keywords":""},{"label":"Salesforce Tower Atlanta","url":"https://www.salesforce.com/news/media-collection/salesforce-tower-atlanta/","keywords":""},{"label":"Salesforce Tower Chicago","url":"https://www.salesforce.com/news/media-collection/salesforce-tower-chicago/","keywords":""},{"label":"Salesforce Tower Dublin","url":"https://www.salesforce.com/news/media-collection/salesforce-tower-dublin/","keywords":""},{"label":"Salesforce Tower Indianapolis","url":"https://www.salesforce.com/news/media-collection/salesforce-tower-indianapolis/","keywords":""},{"label":"Salesforce Tower London","url":"https://www.salesforce.com/news/media-collection/salesforce-tower-london/","keywords":""},{"label":"Salesforce Tower New York","url":"https://www.salesforce.com/news/media-collection/salesforce-tower-new-york/","keywords":""},{"label":"Salesforce Tower San Francisco","url":"https://www.salesforce.com/news/media-collection/salesforce-tower-san-francisco/","keywords":""},{"label":"Salesforce Tower Sydney","url":"https://www.salesforce.com/news/media-collection/salesforce-tower-sydney/","keywords":""},{"label":"Spokespeople","url":"https://www.salesforce.com/news/media-collection/spokespeople/","keywords":""}],"marketingCloudNewsletterFormUrl":"https://cloud.mail.salesforce.com/newsroomsignup","search_results_page":"https://www.salesforce.com/news/media-library/search"};
+//# sourceURL=frontend-js-extra
+/* ]]> */
+</script>
+<script type="text/javascript" src="https://www.salesforce.com/news/wp-content/themes/newsroom/dist/js/frontend.js?ver=b3982e32cbdcbe8e50dc" id="frontend-js"></script>
+<script type="text/javascript" id="jetpack-stats-js-before">
+/* <![CDATA[ */
+_stq = window._stq || [];
+_stq.push([ "view", {"v":"ext","blog":"218239395","post":"92099","tz":"-7","srv":"wp-bn.salesforce.com","hp":"vip","j":"1:16.0.1"} ]);
+_stq.push([ "clickTrackerInit", "218239395", "92099" ]);
+//# sourceURL=jetpack-stats-js-before
+/* ]]> */
+</script>
+<script type="text/javascript" src="https://stats.wp.com/e-202630.js" id="jetpack-stats-js" defer="defer" data-wp-strategy="defer" fetchpriority="low"></script>
+	<script type="text/javascript">window.NREUM||(NREUM={});NREUM.info={"beacon":"bam.nr-data.net","licenseKey":"NRJS-d1aad62634166c22251","applicationID":"757606115","transactionName":"ZFJQZEdYV0AFVRUNXl0YZ0JcFlBdAFMZSkFbRw==","queueTime":0,"applicationTime":400,"atts":"SBVTEg9CRE4=","errorBeacon":"bam.nr-data.net","agent":""}</script><script type="text/javascript"  src="/1Lvasz/j/x/ensmooaylo83/ViObctr15picmtcY/fUEcPjI/el/oHWhgGUAYC"></script><link rel="stylesheet" type="text/css"  href="/1Lvasz/j/x/ensmooaylo83/NDOb/Sg0QPjI/QE/4OKm8vYE5Y"><script  src="/1Lvasz/j/x/ensmooaylo83/ViOb/Sg0QPjI/Ui/cfIUBVVz8q" async defer></script><div id="sec-overlay" style="display:none;"><div id="sec-container"></div></div></body>
+</html>

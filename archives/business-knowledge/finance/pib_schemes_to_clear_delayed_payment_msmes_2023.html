@@ -1,0 +1,926 @@
+
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head id="Head1"><title>
+	Press Release:Press Information Bureau
+</title><link href="css/style.css" rel="stylesheet" type="text/css" /><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" /><link rel="alternate stylesheet" href="css/change.css" media="screen" title="change" /><link rel="alternate stylesheet" href="css/green.css" media="screen" title="green" /><link rel="alternate stylesheet" href="css/yellow.css" media="screen" title="yellow" /><link rel="stylesheet" type="text/css" href="css/prtint.css" media="print" /><link rel="stylesheet" href="css/style3.1.css" type="text/css" />
+
+
+      <script src="js/jquery.min.js" type="text/javascript"></script>
+      <link rel="preconnect" href="https://fonts.googleapis.com" /><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="true" /><link href="https://fonts.googleapis.com/css2?family=Raleway:ital,wght@0,100..900;1,100..900&amp;display=swap" rel="stylesheet" />
+
+      <script type="text/javascript">
+            $(document).ready(function () {
+                  function getParameterByName(name) {
+                        var url = window.location.href;
+                        name = name.replace(/[\[\]]/g, '\\$&');
+                        var regex = new RegExp('[?&]' + name + '(=([^&#]*)|&|#|$)'),
+                              results = regex.exec(url);
+                        if (!results) return null;
+                        if (!results[2]) return '';
+                        return decodeURIComponent(results[2].replace(/\+/g, ' '));
+                  }
+                  // Get the IDs from the current page's URL
+                  let prid = parseInt(getParameterByName('PRID'), 10);
+
+                  if (!isNaN(prid) && prid > 0) {
+                        $.ajax({
+                              type: "POST",
+                              url: "AjaxMethod.aspx/UpdatePRHitCount",
+                              async: false,
+                              data: JSON.stringify({ 'PermId': prid }),
+                              contentType: "application/json; charset=utf-8",
+                              dataType: "json",
+                              success: function (response) {
+                                    console.log(response);
+                              },
+                              error: function (error) {
+                                    console.log("Error in AJAX request", error);
+                              }
+                        });
+                  } else {
+                        console.log("Invalid parameters:", prid);
+                  }
+
+            });
+      </script>
+      <style type="text/css">
+            .table-responsive {
+                  width: 100%;
+                  overflow-x: auto;
+            }
+
+            .banner {
+                  display: flex;
+                  justify-content: space-between;
+                  align-items: center;
+                  background-color: #000;
+                  color: #fff;
+                  padding: 20px;
+            }
+
+            full-width {
+                  width: 100%;
+            }
+
+            .logo-left, .logo-center, .countdown {
+                  display: flex;
+                  align-items: center;
+            }
+
+                  .logo-left img, .logo-center img {
+                        height: 70px;
+                  }
+
+            .countdown {
+                  text-align: center;
+                  background-color: #444;
+                  border-radius: 10px;
+                  padding: 10px;
+                  border: 2px solid grey;
+            }
+
+            .firstnumber {
+                  color: #000000;
+                  position: absolute;
+                  top: 50px;
+                  right: 90px;
+                  font-size: 30px;
+            }
+
+            .secondnumber {
+                  position: absolute;
+                  color: #000000;
+                  right: 45px;
+                  top: 50px;
+                  font-size: 30px;
+            }
+
+            .countdown .days {
+                  font-size: 35px;
+                  color: gold;
+            }
+
+            .countdown p {
+                  margin: 0;
+            }
+
+            .countdown .text {
+                  font-size: 16px;
+            }
+
+            a {
+                  word-break: break-all;
+            }
+
+            iframe, img {
+                  max-width: 100%;
+            }
+
+            @media(max-width:1199px) {
+                  .firstnumber {
+                        top: 40px;
+                        right: 72px;
+                        font-size: 30px;
+                  }
+
+                  .secondnumber {
+                        right: 35px;
+                        top: 40px;
+                        font-size: 30px;
+                  }
+            }
+
+            @media(max-width:990px) {
+                  .firstnumber {
+                        top: 25px;
+                        right: 54px;
+                        font-size: 30px;
+                  }
+
+                  .secondnumber {
+                        right: 25px;
+                        top: 25px;
+                        font-size: 30px;
+                  }
+            }
+
+            @media(max-width:768px) {
+                  .countdown, .days {
+                        font-size: 12px !important;
+                  }
+
+
+                  .firstnumber {
+                        top: 25%;
+                        right: 8%;
+                        font-size: 30px;
+                  }
+
+                  .secondnumber {
+                        right: 4.5%;
+                        top: 25%;
+                        font-size: 30px;
+                  }
+            }
+
+            @media(max-width:475px) {
+                  .countdown, .days {
+                        font-size: 10px !important;
+                        top: 20%;
+                  }
+
+                  .bannerimgdiv {
+                        padding: 0 !important;
+                  }
+
+                  .bannerimg {
+                        width: 108% !important;
+                  }
+            }
+      </style>
+      <script type="text/javascript">
+            $(function () {
+                  $("[id*=printPDF]").click(function () {
+                        $("[id*=hfGridHtml]").val($("#PdfDiv").html());
+                  });
+            });
+            $(function () {
+                  $("[id*=printPDFEvent]").click(function () {
+                        $("[id*=hfGridHtml]").val($("#PdfDiv").html());
+                  });
+            });
+      </script>
+
+      <script async src="https://www.googletagmanager.com/gtag/js?id=UA-112591026-1"></script>
+      <script>
+
+            window.dataLayer = window.dataLayer || [];
+
+            function gtag() { dataLayer.push(arguments); }
+
+            gtag('js', new Date());
+
+
+
+            gtag('config', 'UA-112591026-1');
+
+      </script>
+
+<meta property="og:title" content="SCHEMES TO CLEAR DELAYED PAYMENT IN MSMEs" /><meta property="og:url" content="www.pib.gov.in/Pressreleaseshare.aspx?PRID=1942085" /><meta property="og:description" content="Steps taken by the Government to resolve issue of delayed payments to the MSME sector are as follows" /><meta property="og:image" content="https:/pib.gov.in/images/indian-emblem.png" />
+                                <script>!function(e){var n="https://s.go-mpulse.net/boomerang/";if("False"=="True")e.BOOMR_config=e.BOOMR_config||{},e.BOOMR_config.PageParams=e.BOOMR_config.PageParams||{},e.BOOMR_config.PageParams.pci=!0,n="https://s2.go-mpulse.net/boomerang/";if(window.BOOMR_API_key="C4E7H-KSCMC-422L4-W3EM5-U36MF",function(){function e(){if(!i){var e=document.createElement("script");e.id="boomr-scr-as",e.src=window.BOOMR.url,e.async=!0,o.parentNode.appendChild(e),i=!0}}function t(e){i=!0;var n,t,a,r,d=document,O=window;if(window.BOOMR.snippetMethod=e?"if":"i",t=function(e,n){var t=d.createElement("script");t.id=n||"boomr-if-as",t.src=window.BOOMR.url,BOOMR_lstart=(new Date).getTime(),e=e||d.body,e.appendChild(t)},!window.addEventListener&&window.attachEvent&&navigator.userAgent.match(/MSIE [67]\./))return window.BOOMR.snippetMethod="s",void t(o.parentNode,"boomr-async");a=document.createElement("IFRAME"),a.src="about:blank",a.title="",a.role="presentation",a.loading="eager",r=(a.frameElement||a).style,r.width=0,r.height=0,r.border=0,r.display="none",o.parentNode.appendChild(a);try{O=a.contentWindow,d=O.document.open()}catch(_){n=document.domain,a.src="javascript:var d=document.open();d.domain='"+n+"';void(0);",O=a.contentWindow,d=O.document.open()}if(n)d._boomrl=function(){this.domain=n,t()},d.write("<bo"+"dy onload='document._boomrl();'>");else if(O._boomrl=function(){t()},O.addEventListener)O.addEventListener("load",O._boomrl,!1);else if(O.attachEvent)O.attachEvent("onload",O._boomrl);d.close()}function a(e){window.BOOMR_onload=e&&e.timeStamp||(new Date).getTime()}if(!window.BOOMR||!window.BOOMR.version&&!window.BOOMR.snippetExecuted){window.BOOMR=window.BOOMR||{},window.BOOMR.snippetStart=(new Date).getTime(),window.BOOMR.snippetExecuted=!0,window.BOOMR.snippetVersion=12,window.BOOMR.url=n+"C4E7H-KSCMC-422L4-W3EM5-U36MF";var o=document.currentScript||document.getElementsByTagName("script")[0],i=!1,r=document.createElement("link");if(r.relList&&"function"==typeof r.relList.supports&&r.relList.supports("preload")&&"as"in r)window.BOOMR.snippetMethod="p",r.href=window.BOOMR.url,r.rel="preload",r.as="script",r.addEventListener("load",e),r.addEventListener("error",function(){t(!0)}),setTimeout(function(){if(!i)t(!0)},3e3),BOOMR_lstart=(new Date).getTime(),o.parentNode.appendChild(r);else t(!1);if(window.addEventListener)window.addEventListener("load",a,!1);else if(window.attachEvent)window.attachEvent("onload",a)}}(),"".length>0)if(e&&"performance"in e&&e.performance&&"function"==typeof e.performance.setResourceTimingBufferSize)e.performance.setResourceTimingBufferSize();!function(){if(BOOMR=e.BOOMR||{},BOOMR.plugins=BOOMR.plugins||{},!BOOMR.plugins.AK){var n=""=="true"?1:0,t="",a="m65mneqxg72ww2tenjfa-f-7f6ed10ee-clientnsv4-s.akamaihd.net",o="false"=="true"?2:1,i={"ak.v":"41","ak.cp":"1825201","ak.ai":parseInt("1215205",10),"ak.ol":"0","ak.cr":25,"ak.ipv":4,"ak.proto":"h2","ak.rid":"4e1ae0f","ak.r":40317,"ak.a2":n,"ak.m":"dscb","ak.n":"ff","ak.cport":56629,"ak.gh":"23.55.245.111","ak.quicv":"","ak.tlsv":"tls1.3","ak.0rtt":"","ak.0rtt.ed":"","ak.csrc":"-","ak.acc":"","ak.t":"1784965706","ak.ak":"hOBiQwZUYzCg5VSAfCLimQ==3lzi9Zvc6QAtn87inQ0SvzL0TUIzwNCkOSMWYHJSE6vdVUGj2d27QxWC0eShrtPmwcGsB886f5fHXsGDUVuLrJlTSQ/SI6ya8UjIbH376gCybrZse9i3W8+CSZCQ9GU7DcLeu429XcFvqrIqYvgkmtT/S5B+tFNByBmGpyyobBKfsMqwH1Dd4MvU/CUgBra98BmnBSJ3/JipvusT8ANYEUam9EzZyC68ReQVlorS+tyoWxTxPCdo9mwE/ax2/Cw47bYkvuNzR4jEQ/jcRIxP8PbLF1g1Weexh/QAYvvNgIcV4ryw1W3gA5xLzkeBMX/i4R5MlAP3WzoQm8b+hKGwL89CgbztDgDJFFXqkN567+jNTaX1/deY6Qg8dGux80xF5SCI2ruGKQuy5OtmG3gx8FEilX3zhNNs0nXyxS0Ka6U=","ak.pv":"9","ak.dpoabenc":"","ak.tf":o};if(""!==t)i["ak.ruds"]=t;var r={i:!1,av:function(n){var t="http.initiator";if(n&&(!n[t]||"spa_hard"===n[t]))i["ak.feo"]=void 0!==e.aFeoApplied?1:0,BOOMR.addVar(i)},rv:function(){var e=["ak.cport","ak.cr","ak.csrc","ak.gh","ak.ipv","ak.m","ak.n","ak.ol","ak.proto","ak.quicv","ak.tlsv","ak.0rtt","ak.0rtt.ed","ak.r","ak.acc","ak.t","ak.tf"];BOOMR.removeVar(e)}};BOOMR.plugins.AK={akVars:i,akDNSPreFetchDomain:a,init:function(){if(!r.i){var e=BOOMR.subscribe;e("before_beacon",r.av,null,null),e("onbeacon",r.rv,null,null),r.i=!0}return this},is_complete:function(){return!0}}}}()}(window);</script></head>
+<body>
+      <form method="post" action="./PressReleaseIframePage.aspx?PRID=1942085&amp;lang=2&amp;reg=48" id="form1">
+<input type="hidden" name="sc_HiddenField" id="sc_HiddenField" value="" />
+<input type="hidden" name="__VIEWSTATE" id="__VIEWSTATE" value="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" />
+
+
+<script src="/ScriptResource.axd?d=YwOa_0w_u3oCLFqmIIOf-XEz4GWZ1DuyQIpxIA4LVkywj39sZSps12NbK5wNl5XN9JF3m7d-ey7BFDgj6i0380qRQ5IMWCL54sYNVU1IjMmiOWpp0&amp;t=ffffffffecf8d3f2" type="text/javascript"></script>
+<script src="/PressReleaseIframePage.aspx?_TSM_HiddenField_=sc_HiddenField&amp;_TSM_CombinedScripts_=%3b%3bAjaxControlToolkit%2c+Version%3d3.5.7.123%2c+Culture%3dneutral%2c+PublicKeyToken%3d28f01b0e84b6d53e%3aen-US%3a5a4df314-b4a2-4da2-a207-9284f1b1e96c%3ade1feab2%3af2c8e708%3a720a52bf%3af9cec9bc%3a589eaa30%3aa67c2700%3aab09e3fe%3a87104b7c%3a8613aea7%3a3202a5a2%3abe6fb298" type="text/javascript"></script>
+<input type="hidden" name="__VIEWSTATEGENERATOR" id="__VIEWSTATEGENERATOR" value="8166A38A" />
+<input type="hidden" name="__VIEWSTATEENCRYPTED" id="__VIEWSTATEENCRYPTED" value="" />
+<input type="hidden" name="__EVENTVALIDATION" id="__EVENTVALIDATION" value="HtUh45F1nV7ytEUBonhAYNsYJGnyhTIvkrVJ4dFB5snw/+wco5Lgi1ApJRVYExHSzjitFf2nY6aEhfcO4va1fCbv/OD8rX8bdFrISVH/dyyca3A+JCt7novKdmiK9nu3eKggP/X33Gb5bdjGeaUmUbAoPQ1r3rddFFqNXV+z6jng/eaIwnQea3wpQrneb3KClciveR8Lc+m+vWHo447sBDWYkZrAbntZM0oEUhdwEimfSDMM0aB+f+1ZvqymM5aUH3C5Xhrm8wgq67u72nB96BZlJEQ43ORLx8Rqx5i+qbbB4rLv" />
+                              
+            <div id="templateCss"></div>
+            
+            <input type="hidden" name="hfGridHtml" id="hfGridHtml" />
+            <div class="container" style='margin-bottom: 50px;'>
+                  <div id="accessories">
+
+                        
+                        <div class="pull-right" style="display: flex">
+                              <div id="voll"></div>
+                              <div id="vollDT"></div>
+                              
+                              
+<div class="print-icons">
+<input type="image" name="Print1$print" id="Print1_print" aria-label="Print" src="images/printer_icon.png" alt="print page button" style="padding: 5px 10px 5px 10px;" />
+</div>
+                        </div>
+                  </div>
+                  <input type="hidden" name="hydpermid" id="hydpermid" value="1942085" />
+                  
+
+
+
+                  <div class="innner-page-main-about-us-content-right-part">
+
+                        <div id="MinistryName" class="MinistryNameSubhead text-center">
+                              Ministry of Micro,Small & Medium Enterprises
+                        </div>
+                        
+                        <div id="lg_g"><div class='log_oo'>  <img src='https://static.pib.gov.in/WriteReadData/specificdocs/photo/2021/aug/ph202183101.png' alt='azadi ka amrit mahotsav' /> </div></div>
+
+
+
+
+
+                        <div class="text-center event-heading-background">
+                              
+                              <h2 id="Titleh2">
+                                    SCHEMES TO CLEAR DELAYED PAYMENT IN MSMEs
+                              </h2>
+                              <h3 id="Subtitleh3">
+                                    <span id="ltrSubtitle"></span>
+                              </h3>
+                        </div>
+
+                        <div id="PrDateTime" class="ReleaseDateSubHeaddateTime text-center pt20">
+                              प्रविष्टि तिथि:
+                24 JUL 2023 4:15PM by PIB Delhi
+                        </div>
+                        
+                        <div class='pt20'>
+                        </div>
+                        <input type="hidden" name="hydphotoUrl" id="hydphotoUrl" />
+                        
+                        <p style="text-align:justify"><span style="font-family:&quot;Times New Roman&quot;,Times,serif; font-size:16px">Steps taken by the Government to resolve issue of delayed payments to the MSME sector are as follows: -</span></p>
+
+<ul>
+	<li style="text-align: justify;"><span style="font-family:Times New Roman,Times,serif"><span style="font-size:16px">Under the provisions of the Micro, Small and Medium Enterprises Development (MSMED) Act, 2006, Micro &amp; Small Enterprises Facilitation Councils (MSEFCs) have been set up in the States/UTs to deal with cases of delayed payments of the Micro and Small Enterprises (MSEs). </span></span></li>
+	<li style="text-align: justify;"><span style="font-family:Times New Roman,Times,serif"><span style="font-size:16px"><span style="color:black">Ministry of MSME launched a portal viz. Samadhaan Portal (</span><a href="https://samadhaan.msme.gov.in/MyMsme/MSEFC/MSEFC_Welcome.aspx"><span style="color:black">https://samadhaan.msme.gov.in/MyMsme/MSEFC/MSEFC_Welcome.aspx</span></a><span style="color:black">) for filing of grievances &amp; for monitoring of the outstanding dues to the Micro &amp; Small Enterprises (MSEs) from the buyers of goods and services on 30.10.2017.</span></span></span></li>
+	<li style="text-align: justify;"><span style="font-family:Times New Roman,Times,serif"><span style="font-size:16px"><span style="color:black">&nbsp;&nbsp;&nbsp;&nbsp;The Ministry of MSME has requested States/UTs to set up more number of MSEFCs for quicker disposal of cases related to delayed payments. So far 152 MSEFCs have been set up with more than one MSEFC set up in states like Delhi, Jammu &amp; Kashmir, Karnataka, Kerala, Maharashtra, Punjab, Rajasthan, Tamil Nadu, Telangana, U.P. &amp; West Bengal. </span></span></span></li>
+	<li style="text-align: justify;"><span style="font-family:Times New Roman,Times,serif"><span style="font-size:16px"><span style="color:black">&nbsp;&nbsp;&nbsp;&nbsp;The Ministry of MSME created a special sub-portal within Samadhaan Portal on 14.06.2020, after the AatmaNirbhar Bharat announcements, for reporting the dues and monthly payments by Central Ministries/Department/Public Sector Enterprises to MSMEs. </span>&nbsp;</span></span></li>
+	<li style="text-align: justify;"><span style="font-family:Times New Roman,Times,serif"><span style="font-size:16px">Government of India has also instructed CPSEs and all companies with the turnover of Rs. 500 Crore or more to get themselves on-boarded on the Trade Receivables Discounting System (TReDS), an electronic platform for facilitating the discounting of trade receivables of MSMEs through multiple financiers.</span></span></li>
+	<li style="text-align: justify;"><span style="font-family:Times New Roman,Times,serif"><span style="font-size:16px">Companies which get supplies of goods or services from Micro &amp; Small Enterprises and whose payment to Micro and Small Enterprises exceeds 45 days from the date of acceptance or the date of deemed acceptance of the goods or services, also need to submit a half yearly return to the Ministry of Corporate Affairs stating the amount of payments due and the reasons of the delay.</span></span></li>
+	<li style="text-align: justify;"><span style="font-family:Times New Roman,Times,serif"><span style="font-size:16px">Budget 2023 announcement: Under Section 43B of Income Tax Act: Deduction has been allowed for expenditure incurred on payments only when payment is actually made to MSMEs.</span></span></li>
+</ul>
+
+<p style="text-align:justify">&nbsp;</p>
+
+<p style="text-align:justify"><span style="font-family:Times New Roman,Times,serif"><span style="font-size:16px"><span style="background-color:white"><span style="color:black">The Central Government supplements the efforts of the State/UT Governments through various schemes, programmes and policy initiatives for overall development and promotion of MSMEs in the country.</span></span></span></span></p>
+
+<p style="text-align:justify"><span style="font-family:Times New Roman,Times,serif"><span style="font-size:16px"><span style="background-color:white"><span style="color:black">The Ministry of MSMEs implements various schemes/ programmes for the promotion and development of MSMEs sector across the country which inter alia include Prime Minister&rsquo;s Employment Generation Programme (PMEGP), Micro and Small Enterprises-Cluster Development Programme (MSE-CDP), Credit Guarantee Scheme for MSEs,&nbsp; etc.</span> State Bank of India (SBI) came out with a research report dated 23.01.2023 on ECLGS authored by its Group Chief Economic Advisor. It has been reported that almost 14.60 lakh MSME accounts were saved due to ECLGS scheme (including restructured), of which about 98.30 % of the accounts were in Micro and Small categories, were saved.</span></span></span></p>
+
+<p style="text-align:justify"><span style="font-family:Times New Roman,Times,serif"><span style="font-size:16px">This information was given by Minister of State for Micro Small and Medium Enterprises, Shri Bhanu Pratap Singh Verma in a written reply to the Rajya Sabha.</span></span></p>
+
+<p style="margin-left:0cm; margin-right:0.15pt; text-align:center"><span style="font-family:Times New Roman,Times,serif"><span style="font-size:16px">*****</span></span></p>
+
+<p style="text-align:justify"><strong><span style="font-family:Times New Roman,Times,serif"><span style="font-size:16px">MJPS/NSK</span></span></strong></p>
+
+
+                        
+                        <div id="reel_pic">
+                        </div>
+
+
+
+                        
+                        <br />
+                        <span id="ReleaseId">(रिलीज़ आईडी: 1942085)</span>
+                        <span id="lblViews">	आगंतुक पटल  : 3700</span>
+                        <div>
+                              
+                        </div>
+                        
+
+                        <span id="lblRefPhoto"></span>
+
+                        <div class="BackgroundRelease">
+                              
+                        </div>
+                        <div>
+                              
+                        </div>
+                        <div class="ReleaseLang">इस विज्ञप्ति को इन भाषाओं में पढ़ें: 
+                        
+                                    
+                                    <a href='https://pib.gov.in/PressReleasePage.aspx?PRID=1942318' target="_blank">
+                                          Urdu </a>
+                              
+                                    ,
+                              
+                                    
+                                    <a href='https://pib.gov.in/PressReleasePage.aspx?PRID=1944262' target="_blank">
+                                          Punjabi </a>
+                              
+                                    ,
+                              
+                                    
+                                    <a href='https://pib.gov.in/PressReleasePage.aspx?PRID=1942241' target="_blank">
+                                          Tamil </a>
+                              
+                                    ,
+                              
+                                    
+                                    <a href='https://pib.gov.in/PressReleasePage.aspx?PRID=1942286' target="_blank">
+                                          Telugu </a>
+                              
+                        </div>
+
+                        <div class="RelTag">
+                              <ul>
+                                    
+                              </ul>
+                        </div>
+                        <div class="clear">
+                        </div>
+                        <div id="RelLink" class="RelLink">
+                              <ul>
+                                    
+                                    
+                              </ul>
+                        </div>
+                        <center>
+                              
+                        </center>
+                  </div>
+
+                  <div id="update12">
+	
+                              
+                              <input type="hidden" name="Hidden" id="Hidden" />
+                              <div id="P_CategoryManagement" class="ModalWindow" style="display: none">
+		
+                                    <div>
+                                          <input type="image" name="btnClose" id="btnClose" src="images/close_flat_icon.png" />
+                                    </div>
+                                    <div id="description">
+                                    </div>
+                                    <div class="text-center">
+                                          <h2>
+                                                
+                                                <br>
+                                                
+                                          </h2>
+                                    </div>
+                                    <br />
+                                    <div class="clear">
+                                    </div>
+                                    
+                              
+	</div>
+                        
+</div>
+            </div>
+            
+            <div id="PdfDiv" style="display: none;">
+                  <table width="100%">
+                        <tr>
+                              <td style="font-weight: 200; text-align: center">
+                                    Ministry of Micro,Small & Medium Enterprises
+                                    <div style="height: 30px; width: 100%;">
+                                    </div>
+                                    <div style="font-weight: 200; text-align: center; font-size: 30px;">
+                                          SCHEMES TO CLEAR DELAYED PAYMENT IN MSMEs
+                                    </div>
+                                    <div style="height: 30px; width: 100%;">
+                                    </div>
+                                    <div style="font-weight: 200; text-align: center; font-size: 30px;">
+                                          
+                                    </div>
+                                    <div style="height: 30px; width: 100%;">
+                                    </div>
+                                    <div style="text-align: center; font-size: 14px;">
+                                          प्रविष्टि तिथि:
+                        24 JUL 2023 4:15PM by PIB Delhi
+                                    </div>
+                                    <div style="height: 30px; width: 100%;">
+                                    </div>
+                                    <div style="font-weight: 200; text-align: left; font-size: 16px;">
+                                          <p style="text-align:justify"><span style="font-family:&quot;Times New Roman&quot;,Times,serif; font-size:16px">Steps taken by the Government to resolve issue of delayed payments to the MSME sector are as follows: -</span></p>
+
+<ul>
+	<li style="text-align: justify;"><span style="font-family:Times New Roman,Times,serif"><span style="font-size:16px">Under the provisions of the Micro, Small and Medium Enterprises Development (MSMED) Act, 2006, Micro &amp; Small Enterprises Facilitation Councils (MSEFCs) have been set up in the States/UTs to deal with cases of delayed payments of the Micro and Small Enterprises (MSEs). </span></span></li>
+	<li style="text-align: justify;"><span style="font-family:Times New Roman,Times,serif"><span style="font-size:16px"><span style="color:black">Ministry of MSME launched a portal viz. Samadhaan Portal (</span><a href="https://samadhaan.msme.gov.in/MyMsme/MSEFC/MSEFC_Welcome.aspx"><span style="color:black">https://samadhaan.msme.gov.in/MyMsme/MSEFC/MSEFC_Welcome.aspx</span></a><span style="color:black">) for filing of grievances &amp; for monitoring of the outstanding dues to the Micro &amp; Small Enterprises (MSEs) from the buyers of goods and services on 30.10.2017.</span></span></span></li>
+	<li style="text-align: justify;"><span style="font-family:Times New Roman,Times,serif"><span style="font-size:16px"><span style="color:black">&nbsp;&nbsp;&nbsp;&nbsp;The Ministry of MSME has requested States/UTs to set up more number of MSEFCs for quicker disposal of cases related to delayed payments. So far 152 MSEFCs have been set up with more than one MSEFC set up in states like Delhi, Jammu &amp; Kashmir, Karnataka, Kerala, Maharashtra, Punjab, Rajasthan, Tamil Nadu, Telangana, U.P. &amp; West Bengal. </span></span></span></li>
+	<li style="text-align: justify;"><span style="font-family:Times New Roman,Times,serif"><span style="font-size:16px"><span style="color:black">&nbsp;&nbsp;&nbsp;&nbsp;The Ministry of MSME created a special sub-portal within Samadhaan Portal on 14.06.2020, after the AatmaNirbhar Bharat announcements, for reporting the dues and monthly payments by Central Ministries/Department/Public Sector Enterprises to MSMEs. </span>&nbsp;</span></span></li>
+	<li style="text-align: justify;"><span style="font-family:Times New Roman,Times,serif"><span style="font-size:16px">Government of India has also instructed CPSEs and all companies with the turnover of Rs. 500 Crore or more to get themselves on-boarded on the Trade Receivables Discounting System (TReDS), an electronic platform for facilitating the discounting of trade receivables of MSMEs through multiple financiers.</span></span></li>
+	<li style="text-align: justify;"><span style="font-family:Times New Roman,Times,serif"><span style="font-size:16px">Companies which get supplies of goods or services from Micro &amp; Small Enterprises and whose payment to Micro and Small Enterprises exceeds 45 days from the date of acceptance or the date of deemed acceptance of the goods or services, also need to submit a half yearly return to the Ministry of Corporate Affairs stating the amount of payments due and the reasons of the delay.</span></span></li>
+	<li style="text-align: justify;"><span style="font-family:Times New Roman,Times,serif"><span style="font-size:16px">Budget 2023 announcement: Under Section 43B of Income Tax Act: Deduction has been allowed for expenditure incurred on payments only when payment is actually made to MSMEs.</span></span></li>
+</ul>
+
+<p style="text-align:justify">&nbsp;</p>
+
+<p style="text-align:justify"><span style="font-family:Times New Roman,Times,serif"><span style="font-size:16px"><span style="background-color:white"><span style="color:black">The Central Government supplements the efforts of the State/UT Governments through various schemes, programmes and policy initiatives for overall development and promotion of MSMEs in the country.</span></span></span></span></p>
+
+<p style="text-align:justify"><span style="font-family:Times New Roman,Times,serif"><span style="font-size:16px"><span style="background-color:white"><span style="color:black">The Ministry of MSMEs implements various schemes/ programmes for the promotion and development of MSMEs sector across the country which inter alia include Prime Minister&rsquo;s Employment Generation Programme (PMEGP), Micro and Small Enterprises-Cluster Development Programme (MSE-CDP), Credit Guarantee Scheme for MSEs,&nbsp; etc.</span> State Bank of India (SBI) came out with a research report dated 23.01.2023 on ECLGS authored by its Group Chief Economic Advisor. It has been reported that almost 14.60 lakh MSME accounts were saved due to ECLGS scheme (including restructured), of which about 98.30 % of the accounts were in Micro and Small categories, were saved.</span></span></span></p>
+
+<p style="text-align:justify"><span style="font-family:Times New Roman,Times,serif"><span style="font-size:16px">This information was given by Minister of State for Micro Small and Medium Enterprises, Shri Bhanu Pratap Singh Verma in a written reply to the Rajya Sabha.</span></span></p>
+
+<p style="margin-left:0cm; margin-right:0.15pt; text-align:center"><span style="font-family:Times New Roman,Times,serif"><span style="font-size:16px">*****</span></span></p>
+
+<p style="text-align:justify"><strong><span style="font-family:Times New Roman,Times,serif"><span style="font-size:16px">MJPS/NSK</span></span></strong></p>
+
+                                    </div>
+                                    <div style="height: 30px; width: 100%;">
+                                    </div>
+                                    <div style="height: 30px; width: 100%;">
+                                    </div>
+                                    <div style="font-weight: 100; text-align: left; font-size: 16px;">
+                                          (रिलीज़ आईडी: 1942085)
+                                    </div>
+                                    <div style="height: 30px; width: 100%;">
+                                    </div>
+                              </td>
+                        </tr>
+                        <tr>
+                              <td style="font-weight: 200; text-align: center; font-size: 24px;"></td>
+                        </tr>
+                  </table>
+            </div>
+            <div class="clearfix">
+            </div>
+
+            
+
+            <div class="section1">
+                  <div id="frst_t">
+                        <div id="arr_rm"><div class='sticky-social_mb'><ul class='social_mb'><a href='http://www.facebook.com/share.php?u=https://pib.gov.in/PressReleasePage.aspx?PRID=1942085' target='_blank'><li class='fb_b'   ><img  src='https://static.pib.gov.in/WriteReadData/userfiles/socialmedianew/facebook.jpg' alt='Share on facebook'  width='40' /></li></a><a href='https://twitter.com/intent/tweet?url=https://pib.gov.in/PressReleasePage.aspx?PRID=1942085&text=SCHEMES TO CLEAR DELAYED PAYMENT IN MSMEs' target='_blank'><li class='twitter_r'  ><img  src='https://static.pib.gov.in/WriteReadData/specificdocs/photo/2023/aug/ph2023818240601.jpg' alt='Share on twitter' width='40' /> </li></a><a href='https://api.whatsapp.com/send?text=https://pib.gov.in/PressReleasePage.aspx?PRID=1942085' target='_blank'><li class='whatsapp_r'  ><img  src='https://static.pib.gov.in/WriteReadData/userfiles/socialmedianew/whatsapp1.png' alt='Share on whatsapp' width='40' /></li></a><a href='https://mail.google.com/mail/?view=cm&fs=1&tf=1&to=&su=SCHEMES TO CLEAR DELAYED PAYMENT IN MSMEs&body=https://pib.gov.in/PressReleasePage.aspx?PRID=1942085&ui=2&tf=1&pli=1' title='Share by Email' target='_blank'><li class='fa-envelope_r' ><img  src='https://static.pib.gov.in/WriteReadData/userfiles/socialmedianew/email1.png' alt='Share on email'  width='40' /></li></a><a href='https://www.linkedin.com/shareArticle?mini=true&url=https://pib.gov.in/PressReleasePage.aspx?PRID=1942085&title=SCHEMES TO CLEAR DELAYED PAYMENT IN MSMEs&summary=My%20favorite%20developer%20program&source=LinkedIn' target='_blank'><li class='fa-linkedin_r'  ><img  src='https://static.pib.gov.in/WriteReadData/userfiles/socialmedianew/linkedin.png' alt='Share on linkedin' width='40' /></li></a></ul></div></div>
+                  </div>
+                  <div id="second_t">
+                        <div id="sndr_rm"><div class='sticky-social'><ul class='social'><a href='http://www.facebook.com/share.php?u=https://pib.gov.in/PressReleasePage.aspx?PRID=1942085' target='_blank'><li class='fb_b'   ><img  src='https://static.pib.gov.in/WriteReadData/userfiles/socialmedianew/facebook.jpg' alt='Share on facebook'  width='35' /></li></a><a href='https://twitter.com/intent/tweet?url=https://pib.gov.in/PressReleasePage.aspx?PRID=1942085&text=SCHEMES TO CLEAR DELAYED PAYMENT IN MSMEs' target='_blank'><li class='twitter_r'  ><img  src='https://static.pib.gov.in/WriteReadData/specificdocs/photo/2023/aug/ph2023818240601.jpg' alt='Share on twitter' width='35' /> </li></a><a href='https://api.whatsapp.com/send?text=https://pib.gov.in/PressReleasePage.aspx?PRID=1942085' target='_blank'><li class='whatsapp_r'  ><img  src='https://static.pib.gov.in/WriteReadData/userfiles/socialmedianew/whatsapp1.png' alt='Share on whatsapp' width='35' /></li></a><a href='https://mail.google.com/mail/?view=cm&fs=1&tf=1&to=&su=SCHEMES TO CLEAR DELAYED PAYMENT IN MSMEs&body=https://pib.gov.in/PressReleasePage.aspx?PRID=1942085&ui=2&tf=1&pli=1' title='Share by Email' target='_blank'><li class='fa-envelope_r' ><img  src='https://static.pib.gov.in/WriteReadData/userfiles/socialmedianew/email1.png' alt='Share on email'  width='35' /></li></a><a href='https://www.linkedin.com/shareArticle?mini=true&url=https://pib.gov.in/PressReleasePage.aspx?PRID=1942085&title=SCHEMES TO CLEAR DELAYED PAYMENT IN MSMEs&summary=My%20favorite%20developer%20program&source=LinkedIn' target='_blank'><li class='fa-linkedin_r'  ><img  src='https://static.pib.gov.in/WriteReadData/userfiles/socialmedianew/linkedin.png' alt='Share on linkedin' width='35' /></li></a></ul></div></div>
+                  </div>
+            </div>
+            <input type="hidden" name="ltrTitlee" id="ltrTitlee" value="SCHEMES TO CLEAR DELAYED PAYMENT IN MSMEs" />
+            <input type="hidden" name="ltrSubtitlee" id="ltrSubtitlee" />
+            <input type="hidden" name="ltrDescriptionn" id="ltrDescriptionn" value="&lt;p style=&quot;text-align:justify&quot;>&lt;span style=&quot;font-family:&amp;quot;Times New Roman&amp;quot;,Times,serif; font-size:16px&quot;>Steps taken by the Government to resolve issue of delayed payments to the MSME sector are as follows: -&lt;/span>&lt;/p>
+
+&lt;ul>
+	&lt;li style=&quot;text-align: justify;&quot;>&lt;span style=&quot;font-family:Times New Roman,Times,serif&quot;>&lt;span style=&quot;font-size:16px&quot;>Under the provisions of the Micro, Small and Medium Enterprises Development (MSMED) Act, 2006, Micro &amp;amp; Small Enterprises Facilitation Councils (MSEFCs) have been set up in the States/UTs to deal with cases of delayed payments of the Micro and Small Enterprises (MSEs). &lt;/span>&lt;/span>&lt;/li>
+	&lt;li style=&quot;text-align: justify;&quot;>&lt;span style=&quot;font-family:Times New Roman,Times,serif&quot;>&lt;span style=&quot;font-size:16px&quot;>&lt;span style=&quot;color:black&quot;>Ministry of MSME launched a portal viz. Samadhaan Portal (&lt;/span>&lt;a href=&quot;https://samadhaan.msme.gov.in/MyMsme/MSEFC/MSEFC_Welcome.aspx&quot;>&lt;span style=&quot;color:black&quot;>https://samadhaan.msme.gov.in/MyMsme/MSEFC/MSEFC_Welcome.aspx&lt;/span>&lt;/a>&lt;span style=&quot;color:black&quot;>) for filing of grievances &amp;amp; for monitoring of the outstanding dues to the Micro &amp;amp; Small Enterprises (MSEs) from the buyers of goods and services on 30.10.2017.&lt;/span>&lt;/span>&lt;/span>&lt;/li>
+	&lt;li style=&quot;text-align: justify;&quot;>&lt;span style=&quot;font-family:Times New Roman,Times,serif&quot;>&lt;span style=&quot;font-size:16px&quot;>&lt;span style=&quot;color:black&quot;>&amp;nbsp;&amp;nbsp;&amp;nbsp;&amp;nbsp;The Ministry of MSME has requested States/UTs to set up more number of MSEFCs for quicker disposal of cases related to delayed payments. So far 152 MSEFCs have been set up with more than one MSEFC set up in states like Delhi, Jammu &amp;amp; Kashmir, Karnataka, Kerala, Maharashtra, Punjab, Rajasthan, Tamil Nadu, Telangana, U.P. &amp;amp; West Bengal. &lt;/span>&lt;/span>&lt;/span>&lt;/li>
+	&lt;li style=&quot;text-align: justify;&quot;>&lt;span style=&quot;font-family:Times New Roman,Times,serif&quot;>&lt;span style=&quot;font-size:16px&quot;>&lt;span style=&quot;color:black&quot;>&amp;nbsp;&amp;nbsp;&amp;nbsp;&amp;nbsp;The Ministry of MSME created a special sub-portal within Samadhaan Portal on 14.06.2020, after the AatmaNirbhar Bharat announcements, for reporting the dues and monthly payments by Central Ministries/Department/Public Sector Enterprises to MSMEs. &lt;/span>&amp;nbsp;&lt;/span>&lt;/span>&lt;/li>
+	&lt;li style=&quot;text-align: justify;&quot;>&lt;span style=&quot;font-family:Times New Roman,Times,serif&quot;>&lt;span style=&quot;font-size:16px&quot;>Government of India has also instructed CPSEs and all companies with the turnover of Rs. 500 Crore or more to get themselves on-boarded on the Trade Receivables Discounting System (TReDS), an electronic platform for facilitating the discounting of trade receivables of MSMEs through multiple financiers.&lt;/span>&lt;/span>&lt;/li>
+	&lt;li style=&quot;text-align: justify;&quot;>&lt;span style=&quot;font-family:Times New Roman,Times,serif&quot;>&lt;span style=&quot;font-size:16px&quot;>Companies which get supplies of goods or services from Micro &amp;amp; Small Enterprises and whose payment to Micro and Small Enterprises exceeds 45 days from the date of acceptance or the date of deemed acceptance of the goods or services, also need to submit a half yearly return to the Ministry of Corporate Affairs stating the amount of payments due and the reasons of the delay.&lt;/span>&lt;/span>&lt;/li>
+	&lt;li style=&quot;text-align: justify;&quot;>&lt;span style=&quot;font-family:Times New Roman,Times,serif&quot;>&lt;span style=&quot;font-size:16px&quot;>Budget 2023 announcement: Under Section 43B of Income Tax Act: Deduction has been allowed for expenditure incurred on payments only when payment is actually made to MSMEs.&lt;/span>&lt;/span>&lt;/li>
+&lt;/ul>
+
+&lt;p style=&quot;text-align:justify&quot;>&amp;nbsp;&lt;/p>
+
+&lt;p style=&quot;text-align:justify&quot;>&lt;span style=&quot;font-family:Times New Roman,Times,serif&quot;>&lt;span style=&quot;font-size:16px&quot;>&lt;span style=&quot;background-color:white&quot;>&lt;span style=&quot;color:black&quot;>The Central Government supplements the efforts of the State/UT Governments through various schemes, programmes and policy initiatives for overall development and promotion of MSMEs in the country.&lt;/span>&lt;/span>&lt;/span>&lt;/span>&lt;/p>
+
+&lt;p style=&quot;text-align:justify&quot;>&lt;span style=&quot;font-family:Times New Roman,Times,serif&quot;>&lt;span style=&quot;font-size:16px&quot;>&lt;span style=&quot;background-color:white&quot;>&lt;span style=&quot;color:black&quot;>The Ministry of MSMEs implements various schemes/ programmes for the promotion and development of MSMEs sector across the country which inter alia include Prime Minister&amp;rsquo;s Employment Generation Programme (PMEGP), Micro and Small Enterprises-Cluster Development Programme (MSE-CDP), Credit Guarantee Scheme for MSEs,&amp;nbsp; etc.&lt;/span> State Bank of India (SBI) came out with a research report dated 23.01.2023 on ECLGS authored by its Group Chief Economic Advisor. It has been reported that almost 14.60 lakh MSME accounts were saved due to ECLGS scheme (including restructured), of which about 98.30 % of the accounts were in Micro and Small categories, were saved.&lt;/span>&lt;/span>&lt;/span>&lt;/p>
+
+&lt;p style=&quot;text-align:justify&quot;>&lt;span style=&quot;font-family:Times New Roman,Times,serif&quot;>&lt;span style=&quot;font-size:16px&quot;>This information was given by Minister of State for Micro Small and Medium Enterprises, Shri Bhanu Pratap Singh Verma in a written reply to the Rajya Sabha.&lt;/span>&lt;/span>&lt;/p>
+
+&lt;p style=&quot;margin-left:0cm; margin-right:0.15pt; text-align:center&quot;>&lt;span style=&quot;font-family:Times New Roman,Times,serif&quot;>&lt;span style=&quot;font-size:16px&quot;>*****&lt;/span>&lt;/span>&lt;/p>
+
+&lt;p style=&quot;text-align:justify&quot;>&lt;strong>&lt;span style=&quot;font-family:Times New Roman,Times,serif&quot;>&lt;span style=&quot;font-size:16px&quot;>MJPS/NSK&lt;/span>&lt;/span>&lt;/strong>&lt;/p>
+" />
+            <script type="text/javascript">
+                  var mPlayer = document.getElementById("background_music");
+                  var mPlayAction = document.getElementById("playbutton");
+
+                  var isPlaying = false;
+
+                  function playAudio() {
+                        mPlayer.play();
+                        isPlaying = true;
+                        document.getElementById('stopA').style.display = "block";
+                        document.getElementById('playA').style.display = "none";
+                  }
+
+                  function pauseAudio() {
+                        mPlayer.pause();
+                        isPlaying = false;
+                        document.getElementById('playA').style.display = "block";
+                        document.getElementById('stopA').style.display = "none";
+                  }
+                  //function HandleAudio() {
+                  //    if (isPlaying == true) {
+                  //        //Playing already Pause it
+                  //        pauseAudio();
+                  //    } else {
+                  //        //Play the music
+                  //        playAudio();
+                  //    }
+                  //}
+            </script>
+            <script type="text/javascript">
+                  var synth = window.speechSynthesis;
+
+            
+                  function CleanHtml(html) {
+
+                        html = html.replace(/<script[\s\S]*?<\/script>/gi, '');
+
+                        return html;
+                  }
+                  function stripHtml(html) {
+                        let tmp = document.createElement("DIV");
+                        tmp.innerHTML = CleanHtml(html);
+                        return tmp.textContent || tmp.innerText || "";
+                  }
+            </script>
+            <script type="text/javascript">
+                  $(document).ready(function () {
+                        //for responsive tables
+                        $("table").each(function () {
+                              if (!$(this).closest(".table-responsive").length) {
+                                    $(this).wrap("<div class='table-responsive'></div>");
+                              }
+                        });
+
+                        var width = $(window).width();
+                        if (width < 768) {
+
+                              // Extra Small Device
+                              document.getElementById('frst_t').style.display = "block";
+                              document.getElementById('second_t').style.display = "none";
+
+                        } else if (width < 991) {
+                              document.getElementById('frst_t').style.display = "block";
+                              document.getElementById('second_t').style.display = "none";
+                              // Small Device
+
+                        } else if (width < 1199) {
+                              document.getElementById('frst_t').style.display = "none";
+                              document.getElementById('second_t').style.display = "block";
+                              // Medium Device
+
+                        } else {
+                              document.getElementById('frst_t').style.display = "none";
+                              document.getElementById('second_t').style.display = "block";
+                              // Large Device
+
+                        }
+                  });
+            </script>
+            <script type="text/javascript">
+                  $(document).ready(function () {
+                        var width = $(window).width();
+                        if (width < 768) {
+
+                              // Extra Small Device
+                              document.getElementById('frst_t').style.display = "block";
+                              document.getElementById('second_t').style.display = "none";
+
+                        } else if (width < 991) {
+                              document.getElementById('frst_t').style.display = "block";
+                              document.getElementById('second_t').style.display = "none";
+                              // Small Device
+
+                        } else if (width < 1199) {
+                              document.getElementById('frst_t').style.display = "none";
+                              document.getElementById('second_t').style.display = "block";
+                              // Medium Device
+
+                        } else {
+                              document.getElementById('frst_t').style.display = "none";
+                              document.getElementById('second_t').style.display = "block";
+                              // Large Device
+
+                        }
+                  });
+            </script>
+            
+            <style type="text/css">
+                  @media print {
+                        .sticky-social, .sticky-social_mb, .pull-right, #printPDF {
+                              display: none !important;
+                        }
+                  }
+
+                  .f_vl {
+                        padding-right: 30px;
+                        font-size: 17px;
+                        cursor: pointer;
+                  }
+
+                  .log_oo {
+                        // width: 20%;
+                        display: flex;
+                        justify-content: space-between;
+                  }
+
+                        .log_oo img {
+                              width: 150px;
+                              /*width: 100%;
+                    height: auto;*/
+                        }
+
+                  .sticky-social_mb {
+                        position: fixed;
+                        bottom: 0px;
+                        padding: 0px;
+                        margin: 0px;
+                        width: 100%;
+                  }
+
+                  .social_mb {
+                        list-style: none;
+                        display: flex;
+                        width: 100%;
+                        margin-bottom: -8px;
+                  }
+
+                        .social_mb a {
+                              padding: 8px 0px;
+                              font-size: 30px;
+                              transition: all 0.8s ease-in-out;
+                              width: 20% !important;
+                              text-align: center;
+                        }
+            </style>
+            <style type="text/css">
+                  .section1 {
+                        position: relative;
+                        padding: 10px 0px;
+                        width: 100%;
+                  }
+
+
+
+                  .sticky-social {
+                        position: fixed;
+                        top: 20px;
+                        left: 0px;
+                        padding: 0px;
+                        margin: 0px;
+                  }
+
+                  .social {
+                        list-style: none;
+                  }
+
+                        .social a li {
+                              padding: 8px 12px;
+                              font-size: 25px;
+                              transition: all 0.8s ease-in-out;
+                        }
+
+                              .social a li:hover {
+                                    margin-right: -30px;
+                                    box-shadow: 2px 5px 10px grey;
+                              }
+
+                                    .social a li:hover .fa {
+                                          margin-left: 20px;
+                                    }
+
+                  .fb_b {
+                        /* background-color: rgb(59, 89, 152);*/
+                        background-color: rgba(65,103,178,255);
+                  }
+
+                  .twitter_r {
+                        /* background-color: rgb(29, 161, 242);*/
+                        background-color: #000000;
+                  }
+
+                  .whatsapp_r {
+                        /* background-color: rgb(77, 194, 71);*/
+                        background-color: rgba(13,191,67,255);
+                  }
+
+                  .fa-envelope_r {
+                        /* background-color: rgb(219, 68, 55);*/
+                        background-color: #e2123d;
+                  }
+
+                  .fa-linkedin_r {
+                        background-color: rgb(0, 119, 181);
+                  }
+            </style>
+            <style type="text/css">
+                  @media only screen and (max-device-width: 767px) {
+                        p span img {
+                              max-width: 90% !important;
+                              height: auto !important;
+                        }
+
+                        p img {
+                              max-width: 90% !important;
+                              height: auto !important;
+                        }
+
+                        h2 {
+                              font-size: 20px !important;
+                              font-weight: 600 !important;
+                        }
+
+                        h3 {
+                              font-size: 18px !important;
+                              font-weight: 600 !important;
+                        }
+                  }
+            </style>
+            <style type="text/css">
+                  /* === Film Roll Badge Styling(IFFI2025 countdown) === */
+                  .film-roll-badge {
+                        position: absolute;
+                        top:82%;
+                        right: 20px;
+                        width: 230px;
+                        height: 70px;
+                        background: repeating-linear-gradient( to right, #9a2375 0px, #9a2375 18px, #6e2b8b 18px, #6e2b8b 36px );
+                        border-top: 8px solid #9a2375;
+                        border-bottom: 8px solid #9a2375;
+                        border-radius: 8px;
+                        overflow: hidden;
+                        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+                        animation: moveFilm 8s linear infinite;
+                        z-index: 10;
+                  }
+
+                        /* film sprocket holes */
+                        .film-roll-badge::before,
+                        .film-roll-badge::after {
+                              content: "";
+                              position: absolute;
+                              width: 100%;
+                              height: 10px;
+                              background: repeating-linear-gradient( to right, #9a2375 0px, #9a2375 10px, #fff 10px, #fff 20px );
+                              left: 0;
+                              z-index: 2;
+                        }
+
+                        .film-roll-badge::before {
+                              top: -4px;
+                        }
+
+                        .film-roll-badge::after {
+                              bottom: -4px;
+                        }
+
+                  .film-roll-inner {
+                        position: relative;
+                        height: 100%;
+                        display: flex;
+                        align-items: center;
+                        justify-content: center;
+                        animation: flicker 2s infinite ease-in-out;
+                  }
+
+                  .countdown-text {
+                        font-size: 1.3rem;
+                        font-weight: 700;
+                        color: #fff;
+                        text-shadow: 0 0 6px rgba(255, 255, 255, 0.4), 0 0 10px #000;
+                        white-space: nowrap;
+                  }
+
+                  /* === Animations === */
+                  @keyframes moveFilm {
+                        0% {
+                              background-position: 0 0;
+                        }
+
+                        100% {
+                              background-position: 120px 0;
+                        }
+                  }
+
+                  @keyframes flicker {
+                        0%, 100% {
+                              opacity: 1;
+                        }
+
+                        50% {
+                              opacity: 0.9;
+                        }
+
+                        25% {
+                              opacity: 0.95;
+                        }
+
+                        75% {
+                              opacity: 0.85;
+                        }
+                  }
+
+                  /* === Responsive Adjustments === */
+                  @media (max-width: 1500px) {
+                        .film-roll-badge {
+                              top: 68%;
+                              right: 18px;
+                              /* width: 220px; */
+                              height: 65px;
+                              font-size: 0.85rem;
+                        }
+
+                        .press-section {
+                              margin-top: 35px;
+                        }
+                  }
+
+                  @media (max-width: 992px) {
+                        .film-roll-badge {
+                              top: 52%;
+                              right: 10px;
+                               width: 200px; 
+                              height: 60px;
+                        }
+                  }
+
+                  @media (max-width: 768px) {
+                        .film-roll-badge {
+                              top: 56%;
+                              right: 10px;
+                               width: 124px; 
+                              height: 55px;
+                        }
+
+                        .countdown-text {
+                              font-size: 0.9rem;
+                        }
+                  }
+
+                  @media (max-width: 576px) {
+                        .film-roll-badge {
+                              top: 59%;
+                              right: 5px;
+                              /* width: 160px; */
+                              height: 50px;
+                        }
+
+                        .countdown-text {
+                              font-size: 0.85rem;
+                        }
+                  }
+            </style>
+                        <script type="text/javascript">
+                  const festivalStart = new Date("2025-11-20T00:00:00").getTime();
+                  const festivalEnd = new Date("2025-11-28T23:59:59").getTime();
+
+                  const countdownElement = document.getElementById("countdown");
+
+                  const interval = setInterval(() => {
+                        const now = new Date().getTime();
+
+                        // BEFORE FESTIVAL — show days + hours left
+                        if (now < festivalStart) {
+                              const diff = festivalStart - now;
+                              const days = Math.floor(diff / (1000 * 60 * 60 * 24));
+                              const hours = Math.floor((diff % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
+
+                              countdownElement.innerHTML = `
+                ${days} Day${days !== 1 ? 's' : ''} 
+                ${hours} Hour${hours !== 1 ? 's' : ''} to go
+            `;
+
+                        }
+
+                        // DURING FESTIVAL — show 56th IFFI - Day X
+                        else if (now >= festivalStart && now <= festivalEnd) {
+                              const dayNumber = Math.floor((now - festivalStart) / (1000 * 60 * 60 * 24)) + 1;
+                              countdownElement.innerHTML = `56th IFFI - Day ${dayNumber}`;
+                        }
+
+                        // AFTER FESTIVAL — new message
+                        else {
+                              countdownElement.innerHTML = `✨ IFFI closes but never ends…`;
+
+                              // Width change logic
+                              const elements = document.querySelectorAll('.film-roll-badge');
+                              elements.forEach(el => el.style.width = "350px");
+
+                              clearInterval(interval);
+                        }
+
+                  }, 1000);
+            </script>
+
+      
+
+<script type="text/javascript">
+//<![CDATA[
+(function() {var fn = function() {$get("sc_HiddenField").value = '';Sys.Application.remove_init(fn);};Sys.Application.add_init(fn);})();Sys.Application.add_init(function() {
+    $create(Sys.Extended.UI.ModalPopupBehavior, {"BackgroundCssClass":"modalBackground","PopupControlID":"P_CategoryManagement","dynamicServicePath":"/PressReleaseIframePage.aspx","id":"mpe"}, null, null, $get("Hidden"));
+});
+//]]>
+</script>
+</form>
+</body>
+</html>
