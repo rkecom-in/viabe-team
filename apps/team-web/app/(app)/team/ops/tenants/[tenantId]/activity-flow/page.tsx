@@ -29,6 +29,33 @@ interface PageProps {
   params: Promise<{ tenantId: string }>
 }
 
+// VT-704 polish (Fazal): URLs in message/card text render as real links, and long unbroken
+// tokens (OAuth URLs) wrap inside the bubble instead of overflowing it.
+const _URL_RE = /(https?:\/\/[^\s]+)/g
+
+function Linkified({ text }: { text: string }) {
+  const parts = text.split(_URL_RE)
+  return (
+    <>
+      {parts.map((part, i) =>
+        /^https?:\/\//.test(part) ? (
+          <a
+            key={i}
+            href={part}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-[#0E7A5F] underline decoration-[#9dbfae] underline-offset-2 hover:decoration-[#0E7A5F]"
+          >
+            {part}
+          </a>
+        ) : (
+          <span key={i}>{part}</span>
+        ),
+      )}
+    </>
+  )
+}
+
 const KIND_CHIP: Record<FlowEvent['kind'], string> = {
   message: 'MESSAGE',
   decision: 'MANAGER DECISION',
@@ -80,10 +107,12 @@ function SystemCard({ e }: { e: FlowEvent }) {
           </span>
         </div>
         {e.body ? (
-          <p className="mt-1 text-xs whitespace-pre-wrap text-[#5C6B63]">{e.body}</p>
+          <p className="mt-1 text-xs whitespace-pre-wrap [overflow-wrap:anywhere] text-[#5C6B63]">
+            <Linkified text={e.body} />
+          </p>
         ) : null}
         {Object.entries(e.meta).filter(([, v]) => v).length > 0 ? (
-          <p className="mt-1 font-mono text-[10px] text-[#93A399]">
+          <p className="mt-1 font-mono text-[10px] [overflow-wrap:anywhere] text-[#93A399]">
             {Object.entries(e.meta)
               .filter(([, v]) => v)
               .map(([k, v]) => `${k}=${v}`)
@@ -112,7 +141,9 @@ function MessageBubble({ e }: { e: FlowEvent }) {
             {String(e.ts).slice(11, 16)}Z
           </span>
         </div>
-        <p className="mt-0.5 whitespace-pre-wrap">{e.body}</p>
+        <p className="mt-0.5 whitespace-pre-wrap [overflow-wrap:anywhere]">
+          <Linkified text={e.body} />
+        </p>
       </div>
     </div>
   )
