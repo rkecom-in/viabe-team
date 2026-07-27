@@ -72,6 +72,13 @@ def test_cards_are_immutable_and_lifecycle_is_append_only() -> None:
     assert "CREATE TRIGGER knowledge_lifecycle_events_no_row_mutate" in sql
     assert "BEFORE UPDATE OR DELETE ON public.knowledge_lifecycle_events" in sql
     assert "CREATE TRIGGER knowledge_lifecycle_events_no_truncate" in sql
+    # The only permitted row change is PostgreSQL's nested FK action for the explicit
+    # rights-removal hard-delete path.  Direct UPDATE remains depth 1 and blocked.
+    assert "pg_trigger_depth() > 1" in sql
+    assert "OLD.card_id IS NOT NULL" in sql
+    assert "NEW.card_id IS NULL" in sql
+    assert "to_jsonb(NEW) - 'card_id'" in sql
+    assert "to_jsonb(OLD) - 'card_id'" in sql
 
 
 def test_retention_and_rights_removal_contract_is_present() -> None:

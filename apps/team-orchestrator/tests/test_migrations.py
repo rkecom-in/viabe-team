@@ -276,6 +276,13 @@ def test_vt709_card_versions_immutable_lifecycle_append_only_and_rights_removal_
                 "UPDATE knowledge_lifecycle_events SET reason = 'tampered' WHERE id = %s",
                 (event_id,),
             )
+        # The FK exception is nesting-sensitive: a caller cannot imitate it with a direct
+        # card_id-only tombstone.  Only PostgreSQL's ON DELETE SET NULL trigger may do this.
+        with pytest.raises(psycopg.errors.RaiseException, match="append-only"):
+            conn.execute(
+                "UPDATE knowledge_lifecycle_events SET card_id = NULL WHERE id = %s",
+                (event_id,),
+            )
         with pytest.raises(psycopg.errors.RaiseException, match="append-only"):
             conn.execute("DELETE FROM knowledge_lifecycle_events WHERE id = %s", (event_id,))
 

@@ -299,6 +299,22 @@ CREATE TRIGGER knowledge_cards_rights_delete_guard
 CREATE OR REPLACE FUNCTION public.knowledge_lifecycle_events_append_only()
     RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
+    -- ``knowledge_lifecycle_events.card_id`` is deliberately nullable so a rights-required hard
+    -- delete can preserve the immutable ``card_version_ref`` audit tombstone.  PostgreSQL performs
+    -- ON DELETE SET NULL as a nested UPDATE; allow ONLY that FK action and ONLY when card_id is the
+    -- sole changed column.  A direct UPDATE has trigger depth 1 and remains blocked.  Comparing the
+    -- complete JSON row minus card_id keeps this fail-closed if columns are added later.
+    IF TG_OP = 'UPDATE' THEN
+        IF pg_trigger_depth() > 1
+           AND OLD.card_id IS NOT NULL
+           AND NEW.card_id IS NULL
+           AND (to_jsonb(NEW) - 'card_id') IS NOT DISTINCT FROM
+               (to_jsonb(OLD) - 'card_id')
+        THEN
+            RETURN NEW;
+        END IF;
+    END IF;
+
     RAISE EXCEPTION
         'knowledge_lifecycle_events is append-only (VT-709); % blocked',
         TG_OP;
