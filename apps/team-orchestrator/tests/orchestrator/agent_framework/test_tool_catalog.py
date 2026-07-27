@@ -198,7 +198,7 @@ def test_required_tools_reachable_passes_for_launch_specialists():
     from orchestrator.agent_framework.modules.sales_recovery_module import SalesRecoveryModule
 
     for module in (SalesRecoveryModule(), OnboardingConductorModule()):
-        report = assert_conforms(module)  # all 10 checks green
+        report = assert_conforms(module)  # all 11 checks green
         assert report.result("required_tools_reachable").passed, str(report)
 
 

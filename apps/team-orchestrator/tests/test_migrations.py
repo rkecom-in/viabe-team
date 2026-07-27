@@ -139,6 +139,188 @@ def test_rls_blocks_cross_tenant(migrated):
             )
 
 
+def test_vt709_o8_tenant_tables_cross_tenant_read_returns_zero(migrated):
+    """VT-709 §3: an RLS mismatch is a real zero-row result, not an exception swallowed by code."""
+
+    dsn = migrated["dsn"]
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        tenant_a = conn.execute(
+            "INSERT INTO tenants (business_name, plan_tier, phase) "
+            "VALUES ('O8 RLS A', 'founding', 'onboarding') RETURNING id"
+        ).fetchone()[0]
+        tenant_b = conn.execute(
+            "INSERT INTO tenants (business_name, plan_tier, phase) "
+            "VALUES ('O8 RLS B', 'standard', 'onboarding') RETURNING id"
+        ).fetchone()[0]
+        card_ref_a, card_ref_b = uuid4(), uuid4()
+        conn.execute(
+            "INSERT INTO decision_evidence_links "
+            "(tenant_id, run_id, decision_id, corpus_version_ref, card_version_ref, "
+            " retrieval_stage, disposition) VALUES "
+            "(%s, %s, 'a', %s, %s, 'review', 'selected'), "
+            "(%s, %s, 'b', %s, %s, 'review', 'selected')",
+            (
+                tenant_a, uuid4(), uuid4(), card_ref_a,
+                tenant_b, uuid4(), uuid4(), card_ref_b,
+            ),
+        )
+        conn.execute(
+            "INSERT INTO knowledge_incidents "
+            "(tenant_id, incident_class, card_version_ref) VALUES "
+            "(%s, 'decision_quality', %s), (%s, 'decision_quality', %s)",
+            (tenant_a, card_ref_a, tenant_b, card_ref_b),
+        )
+        conn.execute("GRANT SELECT ON decision_evidence_links, knowledge_incidents TO rls_tester")
+
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute("SET ROLE rls_tester")
+        conn.execute("SELECT set_config('app.current_tenant', %s, false)", (str(tenant_a),))
+        assert conn.execute("SELECT count(*) FROM decision_evidence_links").fetchone()[0] == 1
+        assert conn.execute("SELECT count(*) FROM knowledge_incidents").fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT count(*) FROM decision_evidence_links WHERE tenant_id = %s", (tenant_b,)
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT count(*) FROM knowledge_incidents WHERE tenant_id = %s", (tenant_b,)
+        ).fetchone()[0] == 0
+
+
+def _insert_o8_card(conn):  # type: ignore[no-untyped-def]
+    """Seed one rights-reviewed global card version; returns (card_id, card_key)."""
+
+    source_id = conn.execute(
+        "INSERT INTO knowledge_sources "
+        "(canonical_url, publisher, source_class, content_hash, acquired_at, usage_rights, "
+        " retention_class, tainted) "
+        "VALUES (%s, 'VT-709 test', 't2', %s, now(), "
+        " '{\"status\":\"public_domain\"}'::jsonb, 'lifecycle_managed', true) RETURNING id",
+        (f"https://example.invalid/{uuid4()}", uuid4().hex + uuid4().hex),
+    ).fetchone()[0]
+    card_key = uuid4()
+    card_id = conn.execute(
+        "INSERT INTO knowledge_cards "
+        "(card_key, version, claim, claim_key, claim_value, distillation_note, jurisdictions, "
+        " effective_from, authority, confidence, scope, status, retention_class, tainted) "
+        "VALUES (%s, 1, 'A test operating claim', 'test|improves|in|smb|all', "
+        " '{\"value_type\":\"boolean\",\"value\":true}'::jsonb, 'Test distillation', "
+        " ARRAY['IN'], now(), 'verified_system', 'medium', 'global', 'candidate', "
+        " 'lifecycle_managed', true) RETURNING id",
+        (card_key,),
+    ).fetchone()[0]
+    conn.execute(
+        "INSERT INTO knowledge_card_sources (card_id, source_id, independence_cluster_id) "
+        "VALUES (%s, %s, %s)",
+        (card_id, source_id, f"cluster:{uuid4()}"),
+    )
+    return card_id, card_key
+
+
+def test_vt709_global_registry_is_service_write_only(migrated):
+    dsn = migrated["dsn"]
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute("SET ROLE app_role")
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            conn.execute(
+                "INSERT INTO knowledge_sources "
+                "(canonical_url, publisher, source_class, content_hash, acquired_at, "
+                " usage_rights, retention_class) VALUES "
+                "('https://example.invalid/app-role', 'forbidden', 't2', %s, now(), "
+                " '{\"status\":\"public_domain\"}'::jsonb, 'lifecycle_managed')",
+                (uuid4().hex + uuid4().hex,),
+            )
+
+
+def test_vt709_card_versions_immutable_lifecycle_append_only_and_rights_removal_preserved(
+    migrated,
+):
+    dsn = migrated["dsn"]
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        card_id, card_key = _insert_o8_card(conn)
+
+        with pytest.raises(psycopg.errors.RaiseException, match="immutable"):
+            conn.execute(
+                "UPDATE knowledge_cards SET status = 'validated' WHERE id = %s", (card_id,)
+            )
+
+        # State changes append a new immutable version instead of mutating v1.
+        version_2 = conn.execute(
+            "INSERT INTO knowledge_cards "
+            "(card_key, version, claim, claim_key, claim_value, distillation_note, jurisdictions, "
+            " effective_from, authority, confidence, scope, status, retention_class, tainted, "
+            " supersedes_card_id) VALUES "
+            "(%s, 2, 'A test operating claim', 'test|improves|in|smb|all', "
+            " '{\"value_type\":\"boolean\",\"value\":true}'::jsonb, 'Validated after review', "
+            " ARRAY['IN'], now(), 'verified_system', 'high', 'global', 'validated', "
+            " 'lifecycle_managed', true, %s) RETURNING id",
+            (card_key, card_id),
+        ).fetchone()[0]
+        event_id = conn.execute(
+            "INSERT INTO knowledge_lifecycle_events "
+            "(card_id, card_version_ref, event_type, from_status, to_status, actor_id, reason, "
+            " idempotency_key) VALUES "
+            "(%s, %s, 'promotion', 'candidate', 'validated', 'test-validator', "
+            " 'test admission passed', %s) RETURNING id",
+            (version_2, version_2, f"promote:{version_2}"),
+        ).fetchone()[0]
+
+        with pytest.raises(psycopg.errors.UniqueViolation):
+            conn.execute(
+                "INSERT INTO knowledge_lifecycle_events "
+                "(card_id, card_version_ref, event_type, from_status, to_status, actor_id, reason, "
+                " idempotency_key) VALUES "
+                "(%s, %s, 'promotion', 'candidate', 'validated', 'test-validator', 'duplicate', %s)",
+                (version_2, version_2, f"promote:{version_2}"),
+            )
+        with pytest.raises(psycopg.errors.RaiseException, match="append-only"):
+            conn.execute(
+                "UPDATE knowledge_lifecycle_events SET reason = 'tampered' WHERE id = %s",
+                (event_id,),
+            )
+        with pytest.raises(psycopg.errors.RaiseException, match="append-only"):
+            conn.execute("DELETE FROM knowledge_lifecycle_events WHERE id = %s", (event_id,))
+
+        # Explicit usage-rights removal is the one hard-delete exception.  The event survives and
+        # retains card_version_ref even though its FK is nulled.  A delete without that attributable
+        # event is rejected, so privileged service access cannot silently bypass lifecycle history.
+        with pytest.raises(psycopg.errors.RaiseException, match="rights_removal"):
+            conn.execute("DELETE FROM knowledge_cards WHERE id = %s", (version_2,))
+        rights_event_id = conn.execute(
+            "INSERT INTO knowledge_lifecycle_events "
+            "(card_id, card_version_ref, event_type, from_status, to_status, actor_id, reason, "
+            " idempotency_key) VALUES "
+            "(%s, %s, 'rights_removal', 'validated', 'expired', 'rights-reviewer', "
+            " 'source rights withdrawn; hard delete required', %s) RETURNING id",
+            (version_2, version_2, f"rights-removal:{version_2}"),
+        ).fetchone()[0]
+        conn.execute("DELETE FROM knowledge_cards WHERE id = %s", (version_2,))
+        retained = conn.execute(
+            "SELECT id, card_id, card_version_ref FROM knowledge_lifecycle_events "
+            "WHERE id IN (%s, %s) ORDER BY id",
+            (event_id, rights_event_id),
+        ).fetchall()
+        assert len(retained) == 2
+        assert all(card_id is None and card_ref == version_2 for _, card_id, card_ref in retained)
+
+
+def test_vt709_corpus_rollback_is_a_version_verdict_not_a_card_status(migrated):
+    dsn = migrated["dsn"]
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        version = conn.execute(
+            "SELECT COALESCE(MAX(version), 0) + 1 FROM knowledge_corpus_versions"
+        ).fetchone()[0]
+        corpus_id = conn.execute(
+            "INSERT INTO knowledge_corpus_versions "
+            "(version, content_digest, status, admission_verdict, created_by) "
+            "VALUES (%s, %s, 'rolled_back', 'rolled_back', 'vt709-test') RETURNING id",
+            (version, uuid4().hex + uuid4().hex),
+        ).fetchone()[0]
+        row = conn.execute(
+            "SELECT status, admission_verdict FROM knowledge_corpus_versions WHERE id = %s",
+            (corpus_id,),
+        ).fetchone()
+        assert row == ("rolled_back", "rolled_back")
+
+
 # --- Migration 014: schema hardening (VT-Foundation-fix-1, CL-70 DC2/H3) ------
 
 

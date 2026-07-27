@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+from collections.abc import Callable
 from typing import Literal
 
 logger = logging.getLogger(__name__)
@@ -81,6 +82,41 @@ def embed_text(text: str, *, input_type: InputType | None = None) -> list[float]
     return embed_texts([text], input_type=input_type)[0]
 
 
+def redact_for_embedding(
+    texts: list[str], *, name_registry: Callable[[str], bool] | None = None
+) -> list[str]:
+    """Return semantic-preserving, PII-redacted text for an embedding provider.
+
+    O8 document ingestion MUST call this before any external embedding request.  Long bodies are
+    retained (rather than replaced by a body hash) because the embedding would otherwise be
+    meaningless; the canonical redactor still removes structured PII patterns and registry-known
+    customer names.  Raw source text remains in its separate quarantine store.
+    """
+
+    from orchestrator.privacy.pii_redactor import redact
+
+    redacted: list[str] = []
+    for text in texts:
+        safe = redact(text, name_registry=name_registry, hash_long_body=False)
+        if not isinstance(safe, str):  # defensive: this public function accepts strings only
+            raise TypeError("redact_for_embedding produced a non-string value")
+        redacted.append(safe)
+    return redacted
+
+
+def embed_redacted_texts(
+    texts: list[str],
+    *,
+    input_type: InputType = "document",
+    name_registry: Callable[[str], bool] | None = None,
+) -> list[list[float]]:
+    """Redact first, then make the external embedding call; the ordering is structural."""
+
+    return embed_texts(
+        redact_for_embedding(texts, name_registry=name_registry), input_type=input_type
+    )
+
+
 def to_pgvector_literal(vec: list[float]) -> str:
     """Format a float vector as pgvector's text literal ``[v1,v2,...]`` for an
     ``::vector`` cast — mirrors l1.py's approach (avoids per-conn register_vector
@@ -90,5 +126,6 @@ def to_pgvector_literal(vec: list[float]) -> str:
 
 __all__ = [
     "EMBED_DIM", "EMBED_MODEL", "EmbeddingKeyMissingError",
-    "embed_text", "embed_texts", "to_pgvector_literal",
+    "embed_redacted_texts", "embed_text", "embed_texts", "redact_for_embedding",
+    "to_pgvector_literal",
 ]

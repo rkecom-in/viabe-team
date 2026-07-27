@@ -50,6 +50,10 @@ THE CHECKS (each a named result in the report):
                                        ``AgentManifest`` dataclass itself defaults them empty for
                                        back-compat during the retrofit — registration is the ratchet,
                                        not the dataclass.
+  - ``retrieval_profile_declared``    — O8: every conformant module declares bounded domains,
+                                       layers, stages, depth, top-k/token budget, dispute permission,
+                                       grounding behavior, and no-result behavior. Identity mismatch
+                                       or an invalid/unbounded profile fails registration conformance.
 
 Heavy imports are LAZY (the deny-list guard pulls langchain via ``orchestrator.agent`` at RUNTIME)
 so this module stays dep-less-smoke safe. A test that exercises the register()/facade paths should
@@ -317,6 +321,26 @@ def _check_brief_complete(module: Any, manifest: AgentManifest) -> tuple[bool, s
     return True, ""
 
 
+def _check_retrieval_profile_declared(
+    module: Any, manifest: AgentManifest
+) -> tuple[bool, str]:
+    """O8 — retrieval is a declared capability, never an implicit unlimited broker call."""
+
+    profile = manifest.retrieval_profile
+    if profile is None:
+        return False, "retrieval_profile is required for every conformant registered agent"
+    try:
+        profile.validate()
+    except ValueError as exc:
+        return False, str(exc)
+    if profile.identity != manifest.name:
+        return False, (
+            f"retrieval_profile.identity={profile.identity!r} must equal manifest.name="
+            f"{manifest.name!r}"
+        )
+    return True, ""
+
+
 def _check_name_registerable(module: Any, manifest: AgentManifest) -> tuple[bool, str]:
     if not manifest.name or not manifest.name.strip():
         return False, "manifest.name is empty/whitespace"
@@ -346,6 +370,7 @@ _CHECKS: tuple[tuple[str, Callable[[Any, AgentManifest], tuple[bool, str]]], ...
     ("name_registerable", _check_name_registerable),
     ("required_tools_reachable", _check_required_tools_reachable),
     ("brief_complete", _check_brief_complete),
+    ("retrieval_profile_declared", _check_retrieval_profile_declared),
 )
 
 #: The complete ordered set of check names a report carries (has_manifest + the manifest-dependent

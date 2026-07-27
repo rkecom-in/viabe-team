@@ -5,7 +5,7 @@ WHAT THIS IS
 The FIRST Codex-built specialist target named in ``docs/agent-framework/CODEX-ONBOARDING.md``: an
 independent, framework-conforming module for GST return-filing READINESS (Phase 1) and, later,
 ROC/AOC/balance-sheet readiness (Phase 2, MCA-gated — see the hard boundary below). This file is a
-SKELETON: it registers, it conforms (``assert_conforms`` passes all 10 checks, VT-686's
+SKELETON: it registers, it conforms (``assert_conforms`` passes all 11 checks, VT-686's
 ``brief_complete`` included — see the manifest's ``category``/``tags``/``brief`` below), and it carries ONE
 real, working, read-only example tool — ``gstr_filing_readiness_snapshot`` — so Codex has a proven
 seam to extend rather than a blank page. Every extension point is marked ``TODO(Codex)``.
@@ -114,6 +114,8 @@ from orchestrator.agent_framework.capabilities import AgentRole, Capability
 from orchestrator.agent_framework.context import ModuleContext, ModuleResult
 from orchestrator.agent_framework.gate_facade import GateFacade
 from orchestrator.agent_framework.manifest import AgentBrief, AgentManifest
+from orchestrator.agent_framework.retrieval_profiles import specialist_retrieval_profile
+from orchestrator.knowledge_contracts import KnowledgeDomain, NoResultBehavior
 
 logger = logging.getLogger("orchestrator.agent_framework.modules.compliance_tools")
 
@@ -312,6 +314,15 @@ class ComplianceToolsModule:
             # MCA/ROC BOUNDARY sections verbatim).
             category="Compliance",
             tags=frozenset({"gst", "gstr1", "gstr3b", "returns", "filing-readiness"}),
+            retrieval_profile=specialist_retrieval_profile(
+                identity=MODULE_NAME,
+                domains=frozenset(
+                    {KnowledgeDomain.COMPLIANCE, KnowledgeDomain.FINANCE, KnowledgeDomain.ACCOUNTING}
+                ),
+                top_k=10,
+                token_budget=4_000,
+                no_result_behavior=NoResultBehavior.DECLINE,
+            ),
             brief=AgentBrief(
                 what_it_does=(
                     "Reads the tenant's GST verification status and sales ledger and reports a "
