@@ -11,4 +11,4 @@ useDefault = true
 
 [allowlist]
 description = "Clau research corpus — saved third-party public webpages"
-paths = ['''archives/business-knowledge/.*''']
+paths = ['''^archives/business-knowledge/.*$''']
