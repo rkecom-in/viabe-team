@@ -292,6 +292,12 @@ Per CL-432: CC NEVER merges to `main` without an explicit Fazal `type: task` pro
 
 Note: `main` merge triggers Railway prod native auto-deploy (branch binding confirmed in Step 2.2). No `railway up` in CI — Railway's "Wait for CI" gates on `deploy-dev.yml` green.
 
+**[Fazal-authorized] Step 4.2 — Promote the agent-framework routing flags (Fazal ruling 2026-07-17 ~19:10 IST, Cowork 20260717T1339Z)**
+Set on Railway PROD env at cutover (dev-validated 2026-07-17, VT-101 delta gates held; flag-OFF = byte-identical legacy rollback):
+- `TEAM_SR_VIA_FRAMEWORK=1` — SR proposer + coordinator executor via the agent_framework contract.
+- `TEAM_INTEGRATION_VIA_FRAMEWORK=1` — integration sub-graph dissolved; Manager holds the connector tools.
+Per CL-431 both are PROD env-var changes → explicit Fazal authorization at execution time; until then prod stays unset/flag-OFF.
+
 ### PHASE 5 — Launch gates (must clear BEFORE first real customer)
 
 These are NOT VT-231 acceptance, but VT-231 CANNOT be called done if any of these are unresolved:

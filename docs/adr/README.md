@@ -3,7 +3,7 @@
 > **📖 Canonical document** (VT-119)
 >
 > Authoritative for: **architectural decision rationale** (the *why* — context, options, decision, consequences).
-> NOT authoritative for: current architecture state (→ `docs/Viabe_Team_Technical_Reference_v1_0.md`).
+> NOT authoritative for: current architecture state (→ `docs/archive/Viabe_Team_Technical_Reference_v1_0.md`).
 > Source-of-truth hierarchy: **under** the Technical Reference — ADRs are *why*, the Reference is *what*.
 > Update protocol: one ADR per load-bearing decision (MADR-lite); cite the originating CL from `docs/clau/decisions-ledger.md`. ADRs are immutable once accepted (supersede, don't edit).
 > Last reviewed: 2026-06-06 · Next review: on the next ADR or a Technical-Reference refresh.

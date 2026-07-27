@@ -20,7 +20,7 @@
 ## Resolution
 
 1. If Drive API quota: request increase (Fazal authorization); wait for cron
-2. If scope missing: opt-in re-OAuth per `docs/clau/sheet-integration-runbook.md`
+2. If scope missing: opt-in re-OAuth per `docs/runbooks/sheet-integration-runbook.md`
 3. If single channel stalled: force renew via admin endpoint `POST /api/orchestrator/admin/connector/drive_channels/<channel_id>/renew`
 4. If pervasive stall: investigate the scheduler itself (see dbos-workflow-stuck.md)
 

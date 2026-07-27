@@ -66,3 +66,7 @@ cowork_sessions/session-export-*/
 apps/team-web/test-results/
 pm_dashboard.html
 .vercel
+
+# Harness/sim run artifacts (VT-702 e2e sim + gate-run bundles) — machine outputs, never committed
+apps/team-orchestrator/canaries/_reports/
+apps/team-orchestrator/canaries/reports/

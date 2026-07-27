@@ -1,3 +1,5 @@
+> **HISTORICAL (archived 2026-07-25, docs-reorg-2)** — superseded; kept for record.
+
 # VT-101 agent-framework migration — morning report (single source of truth)
 
 **Author:** Claude Code (autonomous, overnight 2026-07-16→17)
@@ -86,6 +88,11 @@ Not attempted — you said explicitly: LAST, not required tonight.
 - **Track B tenant UUID `861a56a8`** for the deferred #3-empirical approval-binding audit — priority BELOW the migration.
 
 ---
+
+## Parallel read-only results (while 3(c) built — Fazal-asked parallelization)
+
+- **861a56a8 approval-binding audit (the deferred #3-empirical): chain INTACT, but VACUOUSLY.** All 4 binding checks pass (send→prior-approval, approved-without-send, idempotency dups, consent-at-send) — because **zero customer sends have ever occurred** on the tenant. The one campaign is parked at the Pillar-7 gate: `proposed` + armed `campaign_send` approval, decision=NULL, within its 48h TTL (to 2026-07-18 16:41Z); the owner approval ask WAS delivered (owner_message_sid present). Same-run binding confirmed (campaign.run_id == approval.run_id; approval.campaign_id == campaign.id). **The positive approved→sent leg is unexercised — your live approve on that pending ask would prove it end-to-end.** §7D nit: `manager_review_decision.reasoning_ref` → a run id that doesn't resolve in pipeline_runs + NULL run_id on plan_created/manager_review_decision (observability, not money-path). SQL artifacts in scratchpad audit861/.
+- **VT-666 root-cause (both symptoms nailed, fix designed):** (A) j02 "You haven't run a campaign in 30 days" = deterministic — `status_query.py:668` via the UNGATED send-token route at `:375` on the DF5 pre-brain path (`triage_seam` answers "?"-shaped turns directly; brain never runs). VT-653's status-question veto was wired only onto the campaign-token route (`:383`), never the send-token route; the ":366 send imperatives never reach here" comment is false on the DF5 path. FIX: gate `:375` behind the existing `_has_send_status_marker` (finite closed marker set — no-lists-compliant, mirrors landed VT-653). (B) j09 generic menu = LLM-composed via the prompt's "vague-non-onboarding" fallback (`orchestrator_agent_system.md:308-314`) — replace menu-for-specific-asks with honest-decline. (C) j02 >180s draft turn = genuinely slow multi-LLM-call marketing turn, not a hang. Fix build queued behind 3(c) validation (separate push, own j02+j09 ×3 gate).
 
 ## Open threads (post-migration queue, unchanged priority)
 

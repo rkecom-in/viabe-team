@@ -451,6 +451,9 @@ Run these from `apps/team-orchestrator/` unless noted:
 - **PR review + merge:** open your PR against `dev`. CC reviews it against this doc + the
   acceptance checklist in §5. Merge requires Pillar-7 sign-off (Fazal-authorized) — this is not a
   step you or CC skip for expedience.
+- **Who reviews:** the architecture + audit-after seat is **Clau** (the renamed Cowork seat) — it
+  audits what lands against this contract; **ratification is always Fazal** (Pillar-7). "Clau" is a
+  seat name, not a separate approver you contact.
 
 ---
 

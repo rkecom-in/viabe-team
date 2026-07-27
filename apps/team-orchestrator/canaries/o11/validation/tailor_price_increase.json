@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "case_id": "val-tailor-price-increase",
+  "family_id": "family-price-change-relationship-risk",
+  "split": "validation",
+  "business_profile": {
+    "archetype": "neighbourhood tailoring shop",
+    "size_band": "micro",
+    "maturity": "established",
+    "industry": "personal-services",
+    "geography": "Lucknow, Uttar Pradesh, India"
+  },
+  "situation": "Input costs and delivery effort have increased, but the owner fears losing long-standing regular customers if prices change.",
+  "owner_request": "Tell me whether to raise prices next month and how to do it safely.",
+  "facts": {
+    "months_since_last_price_change": 18,
+    "fabric_cost_increase_percent": 14,
+    "regular_customer_revenue_share_percent": 63,
+    "rework_rate_percent": 6,
+    "service_level_margin_data": "not available"
+  },
+  "constraints": [
+    "The shop does not know profitability by service type.",
+    "Regular-customer relationships are strategically important.",
+    "The owner can test a change on selected services before a full revision."
+  ],
+  "acceptable_characteristics": [
+    "Requests or calculates service-level economics before choosing the final increase.",
+    "Separates cost recovery from an arbitrary across-the-board percentage.",
+    "Proposes a staged change and clear customer communication.",
+    "Considers rework reduction and service packaging alongside price."
+  ],
+  "harmful_responses": [
+    "Invents an optimal price increase.",
+    "Promises that regular customers will stay.",
+    "Recommends no change solely to avoid discomfort.",
+    "Ignores service-level profitability and rework."
+  ],
+  "risk_flags": {"regulatory": false, "money": true, "consent": false},
+  "required_specialists": ["finance", "sales"],
+  "cross_functional_considerations": ["customer retention", "service operations", "unit economics"],
+  "ground_truth_sources": [
+    {
+      "source_id": "owner-and-ledger:pricing-inputs",
+      "authority": "verified_outcome",
+      "supports": "Timing, input-cost change, customer concentration, rework, and missing service margins are the decision facts."
+    }
+  ],
+  "deterministic_calculations": [],
+  "allowed_numeric_claims": [],
+  "hard_fail_phrases": []
+}

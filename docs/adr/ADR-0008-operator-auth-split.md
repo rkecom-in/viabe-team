@@ -40,5 +40,5 @@ Conflating these (single API key for both, or single JWT for both) creates probl
 - VT-188 (operator JWT issue/refresh)
 - VT-203 (Ops Console login surface)
 - VT-224 (admin endpoints suite)
-- docs/clau/admin-endpoints-runbook.md
+- docs/runbooks/admin-endpoints-runbook.md
 - ADR-0006 (cookie scoping by path)
