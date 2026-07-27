@@ -1,0 +1,11 @@
+# CLI-deploy upload trim (native Git builds clone from GitHub and ignore this).
+archives/
+docs/
+.viabe/
+apps/team-orchestrator/
+scripts/
+cowork_sessions/
+.playwright-mcp/
+*.png
+*.pdf
+*.docx
