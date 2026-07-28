@@ -168,6 +168,11 @@ _PURGE_ORDER: tuple[str, ...] = (
     # anonymized, not deleted), so a tenant DSR-delete MUST sweep it here or the policy grant survives
     # the purge (the tenant_business_autonomy lesson, on the new single-row-per-tenant table).
     "tenant_business_policy",
+    # VT-719 (mig 187): the Manager's asserted-facts ledger — what the Manager has TOLD the owner
+    # (fact values + the said sentences). Leaf-ish (self-ref superseded_by is SET NULL; FK tenants
+    # CASCADE never fires — tenant anonymized, not deleted), so a tenant DSR-delete MUST sweep it
+    # here or "what we told you" survives the purge (the onboarding_journey lesson).
+    "manager_asserted_facts",
     # VT-323: L2 episodic memory. Leaf (references tenants — anonymized, NOT
     # deleted — and no child tables point at it), so order-insensitive. payload
     # CAN carry PII at rest, and there is NO ON DELETE CASCADE + no other
