@@ -161,3 +161,69 @@ review only; regulatory cards reference-only until counsel-grade validation; (2)
 priors now, serve after k-gate passes — never weaken the gate for small cohorts; (3) no seed
 budget number — O11's weak slices define what to seed. Plus the §6 gate numbers (sample
 sizes, margins, thresholds) are set at build-brief time under your review.
+
+---
+
+## 12. LIVING KNOWLEDGE (Fazal ruling 2026-07-28/29 — CL-2026-07-28-o8-living-knowledge)
+
+**Binding reframing. The corpus is the Manager's ACTIVE knowledge and it is ALIVE.** Verbatim:
+*"this knowledge will keep increasing, will change, will get affected basis on the experience
+the manager has, the response the tenant gives, the outcome the business gets, the diversions
+the VTR adds, and also basis on the current affairs, business news, etc."*
+
+### 12.1 Mutation sources are first-class (amends §8)
+The learning loop must treat these as knowledge-MUTATION sources with full provenance, not
+merely as evaluation signal:
+- the Manager's own experience (what it tried, what happened),
+- **tenant responses** (owner corrections, approvals, rejections, silence),
+- **business outcomes** (the measured result of an executed action),
+- **VTR diversions** (where the human reviewer overrode or redirected — high-value signal:
+  a human disagreed with the machine and the reason is the lesson).
+Each carries its own source class and confidence; each flows through the §8 scope triage
+(tenant → L1/L2 · k-gated aggregate → L3 · general → candidate) unchanged. Nothing here
+weakens admission: mutation sources still enter as candidates and still face §6.
+
+### 12.2 NEW ingestion class — current affairs / business news (rostered, out of WP scope)
+Recurring, freshness-dated, rapidly decaying content (policy changes, market events, seasonal
+demand shifts, platform announcements). Needs: its own source class + TTL, a rights/retention
+posture distinct from research material, and a recurring-fetch design. **Not in VT-710's
+scope** — a separate row, sequenced after the base engine proves out.
+
+### 12.3 Changing knowledge ↔ single voice (ONE system, not two)
+When a card supersedes, expires, or flips, the Manager may have ALREADY told the owner the old
+version. Per CL-2026-07-28-single-voice-manager, it must OWN the change in conversation
+("earlier I said X — that's now Y because…"), never silently contradict itself. Therefore:
+**the S3 asserted-facts ledger (VT-719) and O8 card versioning are designed as one system.**
+Concretely: a card supersession must be able to identify the asserted facts derived from the
+old version, and the composer must surface the correction rather than quietly serving the new
+answer. Design the join now (card_version ↔ asserted_fact provenance); build it when S3 lands.
+
+## 13. MEMORY OWNERSHIP + CARD ASSIGNMENT (Fazal ruling 2026-07-29 — CL-2026-07-29-manager-owns-memory)
+
+### 13.1 Who owns memory (binding)
+- **The Manager owns the knowledge estate**: the global curated corpus AND the tenant's learned
+  history are the MANAGER's memory. It is the knowledge-holding entity.
+- **Specialists hold THIN, task-specific memory only** — agent-specific customisation (SR's copy
+  conventions, cohort heuristics, what worked for this tenant on this lane), never a parallel
+  general-knowledge estate.
+- Reconciles with §5.7 (Codex R3): that rule governs **per-turn context budget** (don't flood
+  the Manager with deep corpora every turn) — NOT where knowledge lives. Ownership = Manager;
+  depth-per-turn = scoped retrieval. Both hold simultaneously.
+
+### 13.2 Card assignment is a runtime flip, not a schema decision
+Every card carries an **assignment** across scopes:
+`manager_global` · `manager_tenant` (this tenant's estate) · `specialist:<agent>` · `disabled`.
+Requirements:
+- Changeable **per card, per scope, at runtime** — an operation, not a migration or rebuild.
+- Every flip writes a `knowledge_lifecycle_events` row (append-only, attributable, reversible).
+- Flips are **situational**: a card may be global for one tenant cohort and tenant-scoped or
+  disabled for another; assignment is evaluated at retrieval alongside applicability (§5.1).
+- Emergency flip-out (a harmful card) is immediate and does NOT require ablation — ablation
+  governs PERMANENT demotion (§6), not operational removal from a memory scope.
+
+### 13.3 Launch posture (Fazal, supersedes shadow-first)
+The 118 curated cards are INCLUDED at launch under observation, not shadowed. This is safe to
+operate because: assignment is flippable (13.2), every influencing card is logged via
+`decision_evidence_links` (§5 attribution), and the effect gates are untouched — knowledge
+informs reasoning, it never performs an action. O11 still governs formal graduation; inclusion
+is an observation posture, not a validation claim.

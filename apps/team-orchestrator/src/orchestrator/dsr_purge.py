@@ -123,6 +123,12 @@ _TENANT_ANONYMIZE = {
 # campaigns / owner_inputs all FK to pipeline_runs(id); l1_relationships
 # FK to l1_entities(id). Order is read top-to-bottom by the purge loop.
 _PURGE_ORDER: tuple[str, ...] = (
+    # VT-711 / mig 186: tenant-scoped card assignment + specialist thin memory. Events are the
+    # child of both parents, so delete them first. The tenant row is anonymized (not deleted),
+    # therefore FK cascades are not the erasure path and all three must remain explicit here.
+    "specialist_memory_events",
+    "specialist_memory_cards",
+    "knowledge_card_assignments",
     # VT-709 / mig 183: O8's two TENANT-SCOPED knowledge tables.  They MUST be explicitly
     # hard-deleted because DSR anonymizes (does not delete) the tenants row, so their ON DELETE
     # CASCADE never fires.  Canonical O8 §3 pins this exact order: decision attribution first,
@@ -168,6 +174,11 @@ _PURGE_ORDER: tuple[str, ...] = (
     # anonymized, not deleted), so a tenant DSR-delete MUST sweep it here or the policy grant survives
     # the purge (the tenant_business_autonomy lesson, on the new single-row-per-tenant table).
     "tenant_business_policy",
+    # VT-719 (mig 187): the Manager's asserted-facts ledger — what the Manager has TOLD the owner
+    # (fact values + the said sentences). Leaf-ish (self-ref superseded_by is SET NULL; FK tenants
+    # CASCADE never fires — tenant anonymized, not deleted), so a tenant DSR-delete MUST sweep it
+    # here or "what we told you" survives the purge (the onboarding_journey lesson).
+    "manager_asserted_facts",
     # VT-323: L2 episodic memory. Leaf (references tenants — anonymized, NOT
     # deleted — and no child tables point at it), so order-insensitive. payload
     # CAN carry PII at rest, and there is NO ON DELETE CASCADE + no other
@@ -339,6 +350,11 @@ def purge_tenant_data(ticket_id: UUID) -> PurgeResult:
                 )
 
             _append_audit_event(conn, tenant_id, ticket_id)
+
+            # Migration 186 makes specialist_memory_events append-only in normal operation.
+            # This transaction-local marker is the sole trigger-authorized hard-delete exception;
+            # tenant roles still have a fail-closed DELETE RLS policy on the event table.
+            conn.execute("SELECT set_config('app.dsr_purge', 'on', true)")
 
             for table in _PURGE_ORDER:
                 rows_deleted = _delete_where_tenant(conn, table, tenant_id)

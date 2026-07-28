@@ -123,6 +123,12 @@ if [ "$ORCH_CHANGED" = 1 ]; then
   say "no-direct-tenant-db-access (VT-72/306 — enforced)"
   python3 scripts/check_no_direct_tenant_db_access.py \
     || { err "no-direct-tenant-db-access"; FAIL=1; }
+
+  # VT-718 S2 (single-voice): every owner-bound send must flow through the choked transport
+  # funnel; a Twilio egress outside utils/twilio_send.py (or a dropped guard) aborts the push.
+  say "owner-emission-choke (VT-718 — enforced)"
+  python3 scripts/check_owner_emission_choke.py \
+    || { err "owner-emission-choke"; FAIL=1; }
 fi
 
 # --- 2. team-web: tsc + vitest + lint ---------------------------------

@@ -292,6 +292,14 @@ _CONSENT_DECLINE = {
     "no", "nope", "nah", "naa", "later", "cancel", "skip", "nahi", "nahin", "abhi", "baad",
     "नहीं", "नही", "बाद", "अभी",
 }
+# VT-718 run-6 fix (single-voice review): the BARE negation tokens only read as a consent
+# decline when the reply essentially IS the negation (≤3 tokens). "No changes, looks good"
+# carries "no" but is a status confirmation, not a decline — misreading it as decline made the
+# Manager re-prompt consent mid-conversation (the split-personality class Fazal flagged). The
+# explicit deferral/cancel words + phrases ("no thanks"/"not now"/"nahi chahiye") are unchanged,
+# and the AFFIRM side is untouched — a consent grant stays strictly deterministic.
+_CONSENT_DECLINE_BARE_NEG = {"no", "nope", "nah", "naa", "nahi", "nahin", "नहीं", "नही"}
+_CONSENT_DECLINE_MAX_BARE_TOKENS = 3
 
 
 def classify_consent_intent(body: str) -> str | None:
@@ -303,8 +311,14 @@ def classify_consent_intent(body: str) -> str | None:
         return None  # a question is not a decision
     tokens = {t for t in re.split(r"[\s,.!?;:।/\\-]+", norm) if t}
     has_affirm = bool(tokens & _CONSENT_AFFIRM)
+    # Bare negations ("no"/"nahi") decline only when the reply IS the negation (≤3 tokens);
+    # inside a longer sentence ("No changes, looks good") they are content, not a decision.
+    _bare_neg_declines = bool(tokens & _CONSENT_DECLINE_BARE_NEG) and (
+        len(tokens) <= _CONSENT_DECLINE_MAX_BARE_TOKENS
+    )
     has_decline = (
-        bool(tokens & _CONSENT_DECLINE)
+        bool(tokens & (_CONSENT_DECLINE - _CONSENT_DECLINE_BARE_NEG))
+        or _bare_neg_declines
         or "not now" in norm
         or "not yet" in norm
         or "no thanks" in norm

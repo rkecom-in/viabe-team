@@ -67,6 +67,10 @@ def _record_owner_inbound_turn(tenant_id: str, event: WebhookEvent) -> None:
         return
     if not (event.body or "").strip():
         return
+    # VT-718 S2: mark the inbound for the emission choke's no-inbound-between rule (fail-soft, cheap).
+    from orchestrator.utils.twilio_send import note_owner_inbound
+
+    note_owner_inbound(event.sender_phone)
     try:
         from orchestrator.conversation_log import record_turn
 

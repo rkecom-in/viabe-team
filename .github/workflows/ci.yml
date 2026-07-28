@@ -344,6 +344,22 @@ jobs:
       - name: no-raw-railway-variables (enforced — hard-fail)
         run: python3 scripts/check_no_raw_railway_variables.py
 
+  gate-owner-emission-choke:
+    name: gate-owner-emission-choke
+    needs: changes
+    if: needs.changes.outputs.orchestrator == 'true' || needs.changes.outputs.ci == 'true'
+    runs-on: ubuntu-latest
+    # VT-718 S2 (CL-2026-07-28-single-voice-manager): every owner-bound send flows through the one
+    # choked transport funnel (utils/twilio_send.py). A Twilio egress outside it — or a transport
+    # refactor that drops _owner_emission_guard — fails CI, not review.
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: owner-emission-choke (enforced — hard-fail)
+        run: python3 scripts/check_owner_emission_choke.py
+
   gate-sr-agent-prompt-token-cap:
     name: gate-sr-agent-prompt-token-cap
     needs: changes
@@ -892,6 +908,7 @@ jobs:
       - gate-no-langsmith-imports
       - gate-no-direct-tenant-db-access
       - gate-no-raw-railway-variables
+      - gate-owner-emission-choke
       - gate-sr-agent-prompt-token-cap
       - gate-vt39-tools-harness-import
       - gate-connector-registry-schema

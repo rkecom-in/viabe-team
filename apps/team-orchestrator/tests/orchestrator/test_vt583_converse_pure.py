@@ -61,6 +61,24 @@ def test_consent_ambiguous_is_none_never_guesses(body):
     assert classify_consent_intent(body) is None
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        "No changes, looks good",          # the run-6 misfire: status confirmation, not a decline
+        "no changes needed everything is fine",
+        "no idea what my turnover was last year",
+        "nahi koi badlav sab theek hai",   # (theek is an affirm token → both-signals None anyway)
+    ],
+)
+def test_consent_bare_negation_in_longer_sentence_is_not_decline(body):
+    """VT-718 run-6 fix: a bare negation token INSIDE a longer sentence is content, not a consent
+    decision — it must never read as 'decline' (the Manager re-prompting consent mid-conversation
+    is the split-personality class). Short pure negations ("no", "nahi") still decline."""
+    from orchestrator.pre_filter_gate import classify_consent_intent
+
+    assert classify_consent_intent(body) != "decline"
+
+
 # --- C: SUBSTANCE-RAIL — the disclosure substance is present in the consent ask --------------------
 
 

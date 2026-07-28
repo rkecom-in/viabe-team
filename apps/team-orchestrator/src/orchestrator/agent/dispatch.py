@@ -318,6 +318,39 @@ def _build_manager_conversation_block(
     return "\n".join(lines)
 
 
+def _build_commitments_block(tenant_id: UUID) -> str | None:
+    """VT-719 S3 — the asserted-facts COMMITMENTS block (CL-2026-07-28-single-voice-manager).
+
+    What the Manager has already TOLD this owner (trial terms, limits, active agent…), read from
+    the tenant-scoped ledger. The rule it carries is OWNED CHANGES ONLY: the brain may never
+    state anything contradicting a listed commitment; a genuine change must be owned explicitly
+    ("earlier I said X — that's now Y because…"), never flipped silently. Best-effort like the
+    conversation block (a read miss → None, dispatch proceeds); per-turn SystemMessage so the
+    VT-194 cached prefix still holds. None when the ledger is empty (most tenants pre-VT-719)."""
+    try:
+        import json as _json
+
+        from orchestrator.manager.asserted_facts import active_assertions
+
+        facts = active_assertions(tenant_id)
+    except Exception:  # noqa: BLE001 — advisory context, never a gate on dispatch
+        logger.warning(
+            "dispatch: commitments-block assembly failed (tenant=%s); proceeding without", tenant_id
+        )
+        return None
+    if not facts:
+        return None
+    lines = [
+        "## Commitments already made to this owner",
+        "You have already TOLD the owner each line below. NEVER contradict one. If a commitment "
+        "has genuinely changed, OWN the change in the same message — 'earlier I said X — that's "
+        "now Y because…' — never flip silently.",
+    ]
+    for f in facts:
+        lines.append(f"- {f.get('fact_key')}: {_json.dumps(f.get('fact_value'), default=str)}")
+    return "\n".join(lines)
+
+
 def _build_onboarding_state_block(tenant_id: UUID) -> str | None:
     """VT-588 — surface the LIVE onboarding step so the Team-Manager knows it is mid-setup and can
     field an OFF-SCRIPT owner message without losing the thread. The integration resume gate now falls
@@ -795,6 +828,18 @@ def dispatch_brain(
             0,
             SystemMessage(
                 content=conversation_block, id=_initial_turn_msg_id(run_id, "conversation_block")
+            ),
+        )
+
+    # VT-719: the COMMITMENTS block — the asserted-facts ledger (what the Manager has already told
+    # this owner) with the OWNED-CHANGES-ONLY rule. Best-effort + per-turn SystemMessage (cache
+    # holds); None while the tenant's ledger is empty, so pre-VT-719 tenants are byte-identical.
+    commitments_block = _build_commitments_block(tenant_id)
+    if commitments_block:
+        _messages.insert(
+            0,
+            SystemMessage(
+                content=commitments_block, id=_initial_turn_msg_id(run_id, "commitments_block")
             ),
         )
 

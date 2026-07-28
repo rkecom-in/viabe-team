@@ -21,6 +21,43 @@ including every third-party integration — and all data exchange flows through 
 gate is the sole effect authority, no matter which brain is asking.** Intelligence is wide and
 distributed; authority over effects is narrow and central. That split is the whole design.
 
+## 0.1 The two roles in BUSINESS terms (CANONICAL — Fazal 2026-07-29, CL-2026-07-29-manager-is-coo)
+
+The structural model below (§1) says how the system is *shaped*. This says what the roles ARE.
+Where any doc disagrees with this section, this section wins.
+
+**THE MANAGER IS THE COO of the tenant's business — the one running it.** It must:
+- **(a)** have full knowledge of how to run a business;
+- **(b)** have a good understanding of THIS tenant's business;
+- **(c)** define a roadmap AND a next-7-day plan, **revising that plan every day** factoring the
+  previous results and the coming 7 days;
+- **(d)** identify the right action/tool/agent and feed them the right **directive, input and
+  objective**;
+- **(e)** evaluate the specialist's **implementation plan** — validate, correct, auto-approve,
+  or send to the owner for approval;
+- **(f)** evaluate the **outcome** against the expected outcome and the objective;
+- **(g)** **self-learn** from that outcome.
+
+**THE SPECIALIST AGENT** has complete knowledge and capability for its specialised task. It
+receives directive + inputs + objective from the Manager, produces its **own implementation
+plan**, and holds a **THIN memory of its own** — used only to track the diversions, changes and
+customisations THIS tenant needs in that specialised action. Those are conveyed to it **as
+cards, by the VTR or by the Manager**. It is never a general-knowledge estate (§13 of the O8
+spec: the Manager owns the knowledge; specialists hold task customisation).
+
+### 0.1.1 The two approval layers — NEVER blur these
+- **PLAN approval** (§0.1e): the Manager judging a specialist's implementation plan.
+  Auto-approval here is legitimate and is **earned per capability** (C4 graduation).
+- **EFFECT approval**: customer sends, money, consent. These pass the deterministic gates and
+  Pillar-7 owner approval **always** — no amount of Manager confidence, plan quality, or earned
+  autonomy bypasses them. A Manager-approved plan whose execution touches an effect still stops
+  at the gate.
+
+### 0.1.2 Specialist-memory write path (governed)
+VTR and Manager WRITE customisation cards into specialist thin memory. That write is governed
+like any other: provenance recorded (who wrote it — VTR or Manager — and why), a lifecycle
+event on every change, tenant-scoped + RLS + DSR-purgeable, and bounded to task customisation.
+
 ## 1. The three roles
 
 ### 1.1 Manager (the embedded agent)

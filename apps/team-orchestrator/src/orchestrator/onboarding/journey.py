@@ -1572,6 +1572,7 @@ def _send_gst_card(
     lang: str,
     *,
     tenant_id: UUID | str | None = None,
+    record_turn: bool = True,
 ) -> bool:
     """VT-695 (Fazal: in-session, so use a real card, not a semicolon blob) — send the GST
     identity confirm as the formatted ``journey_gst_card`` Content object. Layout lives in the
@@ -1591,7 +1592,7 @@ def _send_gst_card(
         send_interactive_message(
             content_sid, recipient,
             content_variables={k: str(card_vars.get(k) or "—") for k in ("1", "2", "3", "4", "5")},
-            tenant_id=tenant_id, surface="journey",
+            tenant_id=tenant_id, surface="journey", record_turn=record_turn,
         )
         return True
     except Exception:  # noqa: BLE001 — the card is an enhancement; the caller falls back
@@ -1688,6 +1689,7 @@ def _send_suggestion_buttons(
     suggestions: list[str] | None,
     *,
     tenant_id: UUID | str | None = None,
+    record_turn: bool = True,
 ) -> bool:
     """VT-694 (Fazal: every question ships with suggested answers as buttons) — send ``text``
     with up to 3 suggestions as tappable quick-reply buttons via the generic variable-titled
@@ -1710,7 +1712,7 @@ def _send_suggestion_buttons(
         send_interactive_message(
             content_sid, recipient,
             content_variables={"1": text, "2": sugg[0], "3": sugg[1], "4": sugg[2]},
-            tenant_id=tenant_id, surface="journey",
+            tenant_id=tenant_id, surface="journey", record_turn=record_turn,
         )
         return True
     except Exception:  # noqa: BLE001 — buttons are an enhancement; the caller falls back
@@ -1726,6 +1728,7 @@ def _send_turn(
     *,
     tenant_id: UUID | str | None = None,
     card_vars: dict[str, str] | None = None,
+    record: bool = True,
 ) -> None:
     """Send a turn-brain reply: ``text`` free-form, with quick-reply buttons when they help. A Yes/No/
     Skip button set reuses the registered interactive Content object (parity with the confirm-question
@@ -1733,18 +1736,20 @@ def _send_turn(
     so its options are appended inline as text — the owner can still reply with the option. Best-effort:
     any transport failure degrades to plain free-form; the journey state has already advanced.
 
-    ``tenant_id`` — when supplied, the sent line is recorded to the LIFETIME conversation_log (the
-    'assistant' leg). The PACED-FLOW beats pass it (they have no other record path — the fix for the
-    2026-07-03 harness finding: flow-beat replies reached the owner's phone but were absent from the
-    24h window, re-fragmenting the context substrate). The turn-brain reply path does NOT pass it —
-    it records via ``_append_recent_turns`` (which mirrors to conversation_log) — so no double-log."""
+    Recording (VT-718): ``tenant_id`` is now ALWAYS passed through to the transport so the S2
+    emission choke can run its wire-history dedup — with ``record_turn=False``, because this
+    function owns its own single recorder. ``record`` picks it: the PACED-FLOW beats pass True
+    (``_record_flow_turn`` is their only record path — the 2026-07-03 harness fix); the turn-brain
+    reply path passes False (it records via ``_append_recent_turns``, which mirrors to
+    conversation_log) — one recorder per path, never two."""
     if not recipient or not text:
         return
     body = text
     # VT-695 — a turn carrying GST-card fields (the card-priority injection) goes out as the
     # formatted card object; failure falls through to the confirm-button / freeform ladder.
-    if card_vars and _send_gst_card(recipient, card_vars, lang):
-        _record_flow_turn(tenant_id, text)
+    if card_vars and _send_gst_card(recipient, card_vars, lang, tenant_id=tenant_id, record_turn=False):
+        if record:
+            _record_flow_turn(tenant_id, text)
         return
     if buttons and _is_confirm_button_set(buttons):
         try:
@@ -1753,23 +1758,31 @@ def _send_turn(
 
             content_sid = content_sid_for(_CONFIRM_BUTTONS_TEMPLATE, "en")
             if content_sid:
-                send_interactive_message(content_sid, recipient, content_variables={"1": text})
-                _record_flow_turn(tenant_id, text)
+                send_interactive_message(
+                    content_sid, recipient, content_variables={"1": text},
+                    tenant_id=tenant_id, surface="journey", record_turn=False,
+                )
+                if record:
+                    _record_flow_turn(tenant_id, text)
                 return
         except Exception:  # noqa: BLE001 — buttons are an enhancement; fall through to plain text
             logger.warning("journey: turn-brain interactive confirm send failed — freeform fallback")
     if buttons and not _is_confirm_button_set(buttons):
         # VT-694 — dynamically-titled buttons ARE deliverable now (the variable-titled
         # journey_suggest_3 object); inline "(A / B / C)" text is only the fallback.
-        if _send_suggestion_buttons(recipient, text, buttons, tenant_id=tenant_id):
-            _record_flow_turn(tenant_id, text)
+        if _send_suggestion_buttons(recipient, text, buttons, tenant_id=tenant_id, record_turn=False):
+            if record:
+                _record_flow_turn(tenant_id, text)
             return
         body = f"{text}\n\n({' / '.join(buttons[:3])})"
     try:
         from orchestrator.utils.twilio_send import send_freeform_message
 
-        send_freeform_message(body, recipient)
-        _record_flow_turn(tenant_id, body)
+        send_freeform_message(
+            body, recipient, tenant_id=tenant_id, surface="journey", record_turn=False
+        )
+        if record:
+            _record_flow_turn(tenant_id, body)
     except Exception:  # noqa: BLE001 — send is WABA-gated; the journey state advances regardless
         logger.warning("journey: turn-brain owner send failed (recipient hashed) — state advanced")
 
@@ -2183,6 +2196,15 @@ def _handle_reply_with_turn_brain(
     # VT-716 — the brain composes against the WIRE-TRUTH history (see _merged_recent_history).
     g_aware = dict(g)
     g_aware["recent_turns"] = _merged_recent_history(tenant_id, g, message_sid)
+    # VT-719 — the brain also composes against what it has already TOLD this owner (the
+    # asserted-facts ledger): a stated commitment may only change as an OWNED change, never a
+    # silent flip. Fail-soft [] keeps the turn alive on any read miss.
+    try:
+        from orchestrator.manager.asserted_facts import active_assertions
+
+        g_aware["asserted_facts"] = active_assertions(tenant_id)
+    except Exception:  # noqa: BLE001 — advisory context, never a gate on the turn
+        g_aware["asserted_facts"] = []
     plan = turn_brain.compose_turn(
         g_aware, draft_attrs, body, locale=lang, provenance=provenance, is_start=is_start,
         tenant_id=tenant_id, profile_card=(card or None),
@@ -2692,6 +2714,24 @@ def _maybe_handle_post_profile_flow(
             key = "hi" if lang == "hi" else "en"
             text = _AGENT_CHOSEN[key].format(agent=(body or "").strip())
             _send_turn(recipient, text, ["Yes", "Later"], lang, tenant_id=tenant_id)
+            # VT-719: the confirm the owner just received IS a commitment — record what was said
+            # (which agent is active + the trial terms) so the Manager can never contradict it.
+            try:
+                from orchestrator.manager.asserted_facts import record_assertion
+
+                record_assertion(
+                    tenant_id, "active_agent", choice,
+                    statement_text=text, surface="journey", message_sid=message_sid,
+                    derived_from={"site": "flow_agent_chosen"},
+                )
+                record_assertion(
+                    tenant_id, "trial_terms",
+                    {"months": 1, "auto_charge": False, "cancel_anytime": True},
+                    statement_text=text, surface="journey", message_sid=message_sid,
+                    derived_from={"site": "flow_agent_chosen"},
+                )
+            except Exception:  # noqa: BLE001 — the ledger never breaks the beat
+                logger.warning("journey flow: assertion record failed tenant=%s", tenant_id)
             _set_flow(tenant_id, _FLOW_READY_ASKED, message_sid=message_sid)
             return {"done": False, "routed": "flow_agent_chosen", "agent": choice,
                     "flow": _FLOW_READY_ASKED}
@@ -2747,9 +2787,11 @@ def _run_turn_brain_and_send(
     )
     if not r.get("already_presented"):
         if r.get("turn_brain"):
+            # VT-718: tenant_id rides to the transport for the emission choke's dedup; record=False
+            # because this path records via _append_recent_turns (one recorder, never two).
             _send_turn(
                 recipient, r.get("reply_text", ""), r.get("buttons") or [], lang,
-                card_vars=r.get("card_vars"),
+                tenant_id=tenant_id, card_vars=r.get("card_vars"), record=False,
             )
         else:
             # VT-697 — a fast-path result carries the FULL next question (kind / suggestions /
