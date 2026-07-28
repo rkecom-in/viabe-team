@@ -24,7 +24,10 @@ from orchestrator.agent_framework import (
     AgentManifest,
     AgentRole,
     ManifestError,
+    RetrievalProfile,
 )
+from orchestrator.agent_framework.retrieval_profiles import specialist_retrieval_profile
+from orchestrator.knowledge_contracts import KnowledgeDomain
 
 
 def _manifest(**overrides):
@@ -77,6 +80,7 @@ def test_defaults_are_back_compat_safe():
     assert m.category == ""
     assert m.tags == frozenset()
     assert m.brief is None
+    assert m.retrieval_profile is None
     m.validate()  # must not raise
 
 
@@ -142,6 +146,18 @@ def test_brief_wrong_type_rejected():
 def test_brief_none_is_the_default_and_valid():
     m = _manifest(brief=None)
     m.validate()  # must not raise — None is the back-compat default
+
+
+def test_retrieval_profile_must_match_manifest_identity():
+    profile = specialist_retrieval_profile(
+        identity="different_agent",
+        domains=frozenset({KnowledgeDomain.SALES}),
+        top_k=4,
+        token_budget=1_500,
+    )
+    assert isinstance(profile, RetrievalProfile)
+    with pytest.raises(ManifestError, match="identity"):
+        _manifest(retrieval_profile=profile).validate()
 
 
 # --- AgentBrief itself: a plain, frozen, structured value object ----------------------------------

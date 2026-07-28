@@ -41,6 +41,13 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from orchestrator.agents.business_policy import PolicyActionClass
+from orchestrator.knowledge_contracts import (
+    ConflictManifestEntry,
+    EvidenceManifestEntry,
+    GroundingStatus,
+    KnowledgeVersion,
+    validate_grounding_envelope,
+)
 
 _STRICT: ConfigDict = {"extra": "forbid"}
 
@@ -195,6 +202,10 @@ class PlanSpecialistReturn(BaseModel):
     owner_question: str | None = None
     proposed_outcome: str | None = None
     reason_code: str | None = None
+    evidence_manifest: list[EvidenceManifestEntry] = Field(default_factory=list)
+    conflict_manifest: list[ConflictManifestEntry] = Field(default_factory=list)
+    knowledge_version: KnowledgeVersion | None = None
+    grounding_status: GroundingStatus = GroundingStatus.NOT_APPLICABLE
 
     @model_validator(mode="after")
     def _status_requires_fields(self) -> "PlanSpecialistReturn":
@@ -202,6 +213,12 @@ class PlanSpecialistReturn(BaseModel):
             raise ValueError("status='needs_owner_input' requires owner_question")
         if self.status == "blocked" and not self.reason_code:
             raise ValueError("status='blocked' requires reason_code")
+        validate_grounding_envelope(
+            evidence_manifest=tuple(self.evidence_manifest),
+            conflict_manifest=tuple(self.conflict_manifest),
+            knowledge_version=self.knowledge_version,
+            grounding_status=self.grounding_status,
+        )
         return self
 
 

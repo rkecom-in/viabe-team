@@ -32,6 +32,8 @@ from orchestrator.agent_framework.capabilities import AgentRole, Capability
 from orchestrator.agent_framework.context import ModuleContext, ModuleResult
 from orchestrator.agent_framework.gate_facade import GateFacade
 from orchestrator.agent_framework.manifest import AgentBrief, AgentManifest
+from orchestrator.agent_framework.retrieval_profiles import specialist_retrieval_profile
+from orchestrator.knowledge_contracts import KnowledgeDomain, NoResultBehavior
 
 logger = logging.getLogger("orchestrator.agent_framework.reference_plugin")
 
@@ -61,6 +63,14 @@ class BusinessContextReader:
         # too, written from its own docstring above (accurate, no invention).
         category="Tech",
         tags=frozenset({"reference", "business-context"}),
+        retrieval_profile=specialist_retrieval_profile(
+            identity="business_context_reader",
+            domains=frozenset({KnowledgeDomain.CROSS_FUNCTIONAL}),
+            top_k=4,
+            token_budget=1_500,
+            no_result_behavior=NoResultBehavior.CONTINUE_WITHOUT_KNOWLEDGE,
+            allow_disputed=False,
+        ),
         brief=AgentBrief(
             what_it_does=(
                 "Reads the tenant's manager-held business objective and identity slice and "

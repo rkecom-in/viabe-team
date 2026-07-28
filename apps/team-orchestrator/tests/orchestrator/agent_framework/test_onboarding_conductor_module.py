@@ -1,6 +1,6 @@
 """VT-669 — unit tests for the Onboarding-Conductor connector-tools agent_framework MODULE.
 
-Proves the module CONFORMS to the framework contract (``assert_conforms`` — all 9 checks, esp.
+Proves the module CONFORMS to the framework contract (``assert_conforms`` — all 11 checks, esp.
 ``tool_surface_safe`` over the ten conductor tools + the new ``required_tools_reachable``) and that
 its PROPOSER lane is a thin, side-effect-free read that reports the onboarding state + the conductor
 tool surface WITHOUT touching a DB (the state reader is injected). Pins the additive-shape invariants:
@@ -58,7 +58,7 @@ _EXPECTED_TOOL_NAMES = [
 ]
 
 
-# --- 1. conformance (the required gate, now 10 checks) ------------------------------------------
+# --- 1. conformance (the required gate, now 11 checks) ------------------------------------------
 
 
 def test_module_conforms():

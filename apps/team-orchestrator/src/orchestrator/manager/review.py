@@ -45,10 +45,12 @@ from orchestrator.manager.decision import ManagerDecision, ManagerDecisionKind, 
 from orchestrator.manager.plan_models import EffectIntent, EvidenceRef, PlanSpecialistReturn
 from orchestrator.observability.incident_store import create_incident, escalate_incident
 from orchestrator.observability.tm_audit import emit_tm_audit
+from orchestrator.knowledge_contracts import grounding_audit_payload
 
 if TYPE_CHECKING:
     from orchestrator.agent.roster import SpecialistReturn
     from orchestrator.agent.schemas.campaign_plan import CampaignPlan
+    from orchestrator.agent_framework.context import ModuleResult
 
 logger = logging.getLogger("orchestrator.manager.review")
 
@@ -143,12 +145,50 @@ def to_legacy_specialist_return(ret: PlanSpecialistReturn) -> "SpecialistReturn"
             pushback=True,
             proposed_outcome=ret.proposed_outcome or "",
             reason=ret.reason_code or ret.outcome_summary or "",
+            evidence_manifest=tuple(ret.evidence_manifest),
+            conflict_manifest=tuple(ret.conflict_manifest),
+            knowledge_version=ret.knowledge_version,
+            grounding_status=ret.grounding_status,
         )
     if ret.status == "needs_owner_input":
-        return SpecialistReturn(pushback=False, action_taken="", outcome=ret.outcome_summary)
+        return SpecialistReturn(
+            pushback=False,
+            action_taken="",
+            outcome=ret.outcome_summary,
+            evidence_manifest=tuple(ret.evidence_manifest),
+            conflict_manifest=tuple(ret.conflict_manifest),
+            knowledge_version=ret.knowledge_version,
+            grounding_status=ret.grounding_status,
+        )
     return SpecialistReturn(
-        pushback=False, action_taken=ret.action_summary, outcome=ret.outcome_summary
+        pushback=False,
+        action_taken=ret.action_summary,
+        outcome=ret.outcome_summary,
+        evidence_manifest=tuple(ret.evidence_manifest),
+        conflict_manifest=tuple(ret.conflict_manifest),
+        knowledge_version=ret.knowledge_version,
+        grounding_status=ret.grounding_status,
     )
+
+
+def preserve_module_grounding(
+    ret: PlanSpecialistReturn, module_result: "ModuleResult"
+) -> PlanSpecialistReturn:
+    """Copy O8 provenance from the framework envelope into Manager synthesis input.
+
+    The business status/outcome remains the already-validated specialist return.  This adapter only
+    carries content-free provenance fields and reconstructs the Pydantic model so its grounding
+    invariants are re-run (``model_copy(update=...)`` would skip validation).
+    """
+
+    payload = ret.model_dump()
+    payload.update(
+        evidence_manifest=list(module_result.evidence_manifest),
+        conflict_manifest=list(module_result.conflict_manifest),
+        knowledge_version=module_result.knowledge_version,
+        grounding_status=module_result.grounding_status,
+    )
+    return PlanSpecialistReturn.model_validate(payload)
 
 
 def _cohort_ids_are_grounded(tenant_id: UUID | str, customer_ids: list[UUID]) -> bool:
@@ -321,6 +361,7 @@ def manager_review(
     client: Anthropic | None = None,
     campaign_plan: "CampaignPlan | None" = None,
     run_id: UUID | str | None = None,
+    module_result: "ModuleResult | None" = None,
 ) -> ManagerReviewResult:
     """The manager_review node (Package 3): extract -> decide -> persist the plan_store effect +
     tm_audit + (escalate only) a VTR incident. Never silent: an extraction failure itself is
@@ -364,6 +405,9 @@ def manager_review(
                 outcome_summary="manager_review could not extract a structured result",
                 reason_code="extraction_failed",
             )
+
+    if module_result is not None:
+        ret = preserve_module_grounding(ret, module_result)
 
     legacy_ret = to_legacy_specialist_return(ret)
     decision = decide_next_action(legacy_ret, has_next_step=has_next_step)
@@ -458,6 +502,12 @@ def manager_review(
             "outcome": outcome,
             "decision_kind": decision.kind.value,
             "reason": decision.reason,
+            **grounding_audit_payload(
+                evidence_manifest=tuple(ret.evidence_manifest),
+                conflict_manifest=tuple(ret.conflict_manifest),
+                knowledge_version=ret.knowledge_version,
+                grounding_status=ret.grounding_status,
+            ),
         },
         # §7D — joins back to the SAME turn's orchestrator_agent_turn reasoning_turn row (the
         # extraction call above reads that turn's specialist output; decision.reason is the
@@ -479,5 +529,6 @@ __all__ = [
     "ManagerReviewResult",
     "extract_specialist_return",
     "manager_review",
+    "preserve_module_grounding",
     "to_legacy_specialist_return",
 ]

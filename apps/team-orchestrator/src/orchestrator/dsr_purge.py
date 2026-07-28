@@ -123,6 +123,13 @@ _TENANT_ANONYMIZE = {
 # campaigns / owner_inputs all FK to pipeline_runs(id); l1_relationships
 # FK to l1_entities(id). Order is read top-to-bottom by the purge loop.
 _PURGE_ORDER: tuple[str, ...] = (
+    # VT-709 / mig 183: O8's two TENANT-SCOPED knowledge tables.  They MUST be explicitly
+    # hard-deleted because DSR anonymizes (does not delete) the tenants row, so their ON DELETE
+    # CASCADE never fires.  Canonical O8 §3 pins this exact order: decision attribution first,
+    # then harmful-card incidents.  Global knowledge_* registry tables have no tenant_id and never
+    # enter this inventory.
+    "decision_evidence_links",
+    "knowledge_incidents",
     "l1_relationships",
     "l1_entities",
     # VT-366: the Auto-Discovery DRAFT business profile (tenant business data — public-sourced but

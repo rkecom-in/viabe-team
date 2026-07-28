@@ -22,6 +22,13 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from orchestrator.failures import HardLimitAxis
+from orchestrator.knowledge_contracts import (
+    ConflictManifestEntry,
+    EvidenceManifestEntry,
+    GroundingStatus,
+    KnowledgeVersion,
+    validate_grounding_envelope,
+)
 
 AgentStatus = Literal[
     "completed",
@@ -73,6 +80,18 @@ class AgentResult:
     cost_paise: int = 0
     raw_messages: list[dict[str, Any]] = field(default_factory=list)
     terminated_reason: str | None = None
+    evidence_manifest: tuple[EvidenceManifestEntry, ...] = ()
+    conflict_manifest: tuple[ConflictManifestEntry, ...] = ()
+    knowledge_version: KnowledgeVersion | None = None
+    grounding_status: GroundingStatus = GroundingStatus.NOT_APPLICABLE
+
+    def __post_init__(self) -> None:
+        validate_grounding_envelope(
+            evidence_manifest=self.evidence_manifest,
+            conflict_manifest=self.conflict_manifest,
+            knowledge_version=self.knowledge_version,
+            grounding_status=self.grounding_status,
+        )
 
 
 __all__ = ["AgentResult", "AgentStatus"]

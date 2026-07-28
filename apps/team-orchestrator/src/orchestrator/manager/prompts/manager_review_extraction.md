@@ -23,7 +23,11 @@ Produce ONLY a JSON object with these fields (no prose, no markdown fence):
   "effect_intents": [{"effect_class": "customer_send"|"spend"|"commitment"|"config", "summary": "<what effect is proposed>", "magnitude_minor": <int paise, or null>}],
   "owner_question": "<the exact question to ask the owner, REQUIRED if status is needs_owner_input, else null>",
   "proposed_outcome": "<a better outcome the specialist proposed instead, or null>",
-  "reason_code": "<a short snake_case reason, REQUIRED if status is blocked or failed, else null>"
+  "reason_code": "<a short snake_case reason, REQUIRED if status is blocked or failed, else null>",
+  "evidence_manifest": [],
+  "conflict_manifest": [],
+  "knowledge_version": null,
+  "grounding_status": "not_applicable"
 }
 ```
 
@@ -37,5 +41,8 @@ Rules:
 - `status='failed'` when the specialist's own output reports a hard failure.
 - `evidence_refs` / `effect_intents` are EMPTY ARRAYS when nothing applies — never fabricate an id
   or an effect the raw output does not show.
+- The four grounding fields are provenance supplied by a structured specialist envelope. Copy them
+  exactly when present. Otherwise emit the empty/null/`not_applicable` defaults shown above. Never
+  reconstruct, summarize, or invent provenance from prose.
 - Never restate customer PII (phone/name/email) in any field — reference counts/ids only.
 - Output raw JSON only. No markdown code fence, no commentary before or after.

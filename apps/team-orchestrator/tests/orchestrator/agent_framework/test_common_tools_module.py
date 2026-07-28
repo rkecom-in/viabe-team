@@ -1,6 +1,6 @@
 """Unit tests for the COMMON READ-tools agent_framework MODULE (``common_tools_module.py``).
 
-Proves the module CONFORMS to the framework contract (``assert_conforms`` — all 9 checks, esp.
+Proves the module CONFORMS to the framework contract (``assert_conforms`` — all 11 checks, esp.
 ``tool_surface_safe`` over the three common read tools) and that its PROPOSER lane is a thin,
 side-effect-free read that reports the common read-tool surface. Also pins the additive-shape
 invariants: the manifest carries the EXACT ``COMMON_READ_TOOLS`` objects, declares the three
@@ -76,7 +76,7 @@ def test_conformance_report_names_stable():
     report = check_module_conformance(CommonToolsModule())
     assert [r.name for r in report.results] == list(CHECK_NAMES)
     # VT-669 added required_tools_reachable (9th); VT-686 added brief_complete (10th).
-    assert len(CHECK_NAMES) == 10
+    assert len(CHECK_NAMES) == 11
     assert "brief_complete" in CHECK_NAMES
 
 

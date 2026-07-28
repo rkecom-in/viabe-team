@@ -1385,9 +1385,55 @@ class PlatformListingsWrapper(TenantScopedTable):
         return out
 
 
+class KnowledgeIncidentsWrapper(TenantScopedTable):
+    """VT-709 O8 harmful-card incident writer with mandatory PII redaction."""
+
+    _table = "knowledge_incidents"
+
+    def record_redacted(
+        self,
+        tenant_id: UUID | str,
+        *,
+        incident_class: str,
+        card_version_ref: UUID | str,
+        evidence_refs: list[UUID | str] | None = None,
+        detail: str | None = None,
+        resolution: str | None = None,
+        name_registry: Any = None,
+        conn: Any = None,
+    ) -> dict[str, Any]:
+        """Redact both free-text fields before the tenant-scoped insert.
+
+        Callers cannot pass ``detail_redacted``/``resolution_redacted`` directly through this
+        method.  IDs remain by-reference; the canonical redactor handles GSTIN/PAN/contact/body
+        patterns and optional registry-known customer names.
+        """
+
+        from orchestrator.privacy.pii_redactor import redact
+
+        return self.insert(
+            tenant_id,
+            {
+                "incident_class": incident_class,
+                "card_version_ref": str(card_version_ref),
+                "evidence_refs": [str(value) for value in (evidence_refs or [])],
+                "detail_redacted": (
+                    redact(detail, name_registry=name_registry) if detail is not None else None
+                ),
+                "resolution_redacted": (
+                    redact(resolution, name_registry=name_registry)
+                    if resolution is not None
+                    else None
+                ),
+            },
+            conn=conn,
+        )
+
+
 __all__ = [
     "CampaignsWrapper",
     "CustomersWrapper",
+    "KnowledgeIncidentsWrapper",
     "OwnerInputsWrapper",
     "PendingApprovalsWrapper",
     "PhoneTokenResolutionsWrapper",
