@@ -106,6 +106,12 @@ def _wire(monkeypatch, *, session, classify=None):
 
     monkeypatch.setattr(journey_mod, "maybe_handle_journey_reply", _kick)
 
+    def _present(tid, recipient, **k):
+        calls["presented"] = str(tid)
+        return True
+
+    monkeypatch.setattr(journey_mod, "present_first_question", _present, raising=False)
+
     def _start(tid, queue):
         calls["journey_started"] = {"tenant": str(tid), "queue_fields": [q["field"] for q in queue]}
 
@@ -145,8 +151,8 @@ def test_consent_reply_creates_tenant_and_kicks_journey(monkeypatch) -> None:
         "tenant": calls["tenant_id"],
         "queue_fields": ["business_name", "owner_name", "business_type", "city"],
     }
-    # … and the first question is kicked through the proven kickoff-token path.
-    assert calls["journey"] == {"tenant": calls["tenant_id"], "body": "complete setup"}
+    # VT-716b — the first question is PRESENTED deterministically (no synthetic owner turn).
+    assert calls["presented"] == calls["tenant_id"]
 
 
 def test_declined_reply_acks_once(monkeypatch) -> None:

@@ -70,6 +70,50 @@ _DONE = {
     "हाँ", "हां", "कर", "दिया", "जुड़", "गई",
 }
 
+# VT-712 (run-4 sim, the OAuth verbatim loop): the ``toks & _DONE`` set-intersection floor
+# treated bare Hinglish PARTICLES ("ho", "kar", "gaya", "ok") as completion — "kyu nahi HO
+# raha", "OK give me 10 min" all read as done → verify-fail → the same canned line, every
+# turn. Completion is now PHRASE-based; a bare affirmation counts ONLY as the whole message.
+_DONE_PHRASES = (
+    "ho gaya", "hogaya", "kar diya", "kardiya", "हो गया", "कर दिया", "जुड़ गई", "जुड़ गया",
+    "connected", "finished", "completed", "complete", "done",
+)
+_BARE_AFFIRM = {"done", "ok", "okay", "yes", "y", "haan", "ha", "हाँ", "हां"}
+
+
+def _is_done_reply(body: str) -> bool:
+    text = " ".join((body or "").lower().split())
+    if any(p in text for p in _DONE_PHRASES):
+        return True
+    return text in _BARE_AFFIRM
+
+
+def _auth_verify_attempts(pending: dict | None) -> int:
+    meta = pending.get("metadata") if isinstance(pending, dict) else None
+    try:
+        return int((meta or {}).get("verify_attempts") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _auth_wait_reply(attempts: int, walkthrough: str | None, page: str) -> str:
+    """VT-712 — never the same verify-fail line twice. Attempt 1 carries the link; later
+    attempts back off (no re-pasted link) and advertise the fresh-link path."""
+    if attempts <= 1:
+        return (
+            f"I don't see the connection yet — please finish approving on the {page} page, "
+            "then reply 'done'." + (f"\n{walkthrough}" if walkthrough else "")
+        )
+    if attempts == 2:
+        return (
+            f"Still not connected on my side. Take your time — approve on the {page} page, "
+            "then reply 'done'. If the link isn't working, just say 'new link'."
+        )
+    return (
+        "I'll wait here — reply 'done' once you've approved, or say 'new link' if you want "
+        "the link again."
+    )
+
 
 def _tokens(body: str) -> set[str]:
     norm = (body or "").strip().casefold().replace("'", "")
@@ -609,10 +653,9 @@ def maybe_resume_shopify_onboarding(
 
         # --- auth: owner signals done → re-check connector status (DB truth) -----------------
         if phase == PHASE_AUTH and awaiting == "oauth_completion":
-            toks = _tokens(body)
             walkthrough = pending.get("walkthrough_url") if isinstance(pending, dict) else None
-            # FAST FLOOR: an unambiguous token "done"/"ho gaya" short-circuits to the DB re-check.
-            is_done = bool(toks & _DONE)
+            # FAST FLOOR (VT-712): phrase-based done — bare particles never trip it.
+            is_done = _is_done_reply(body)
             if not is_done:
                 # VT-583: a NON-floor reply is intent-classified (done | link | other). The
                 # authoritative DB re-check below still gates any "done"; nothing here fabricates
@@ -652,11 +695,16 @@ def maybe_resume_shopify_onboarding(
                 # Owner said done but the callback hasn't persisted a token yet — DO NOT
                 # fabricate progress. Re-prompt, stay in phase_2_auth.
                 walkthrough = pending.get("walkthrough_url") if isinstance(pending, dict) else None
+                attempts = _auth_verify_attempts(pending) + 1
+                if isinstance(pending, dict):
+                    pending.setdefault("metadata", {})["verify_attempts"] = attempts
+                    _write_state(
+                        tenant_id, phase=phase,
+                        connector_id=state.get("current_connector_id"), pending=pending,
+                    )
                 _send(
                     recipient,
-                    "I don't see the connection yet — please finish approving on the Shopify "
-                    "page, then reply 'done'."
-                    + (f"\n{walkthrough}" if walkthrough else ""),
+                    _auth_wait_reply(attempts, walkthrough, "Shopify"),
                     tenant_id=tenant_id,
                 )
                 return {"done": False, "phase": phase, "routed": "shopify_auth_not_connected"}

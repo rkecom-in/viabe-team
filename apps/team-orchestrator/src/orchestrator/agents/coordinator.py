@@ -47,6 +47,13 @@ from uuid import UUID, uuid4, uuid5
 
 from dbos import DBOS
 
+from orchestrator.knowledge_contracts import (
+    ConflictManifestEntry,
+    EvidenceManifestEntry,
+    GroundingStatus,
+    KnowledgeVersion,
+    validate_grounding_envelope,
+)
 from orchestrator.business_plan.store import OWNING_AGENTS
 from orchestrator.observability.log import log_event
 
@@ -113,6 +120,18 @@ class ItemExecutionResult:
     work_item_status: str
     batch_id: str | None = None
     counters: dict[str, int] = field(default_factory=dict)
+    evidence_manifest: tuple[EvidenceManifestEntry, ...] = ()
+    conflict_manifest: tuple[ConflictManifestEntry, ...] = ()
+    knowledge_version: KnowledgeVersion | None = None
+    grounding_status: GroundingStatus = GroundingStatus.NOT_APPLICABLE
+
+    def __post_init__(self) -> None:
+        validate_grounding_envelope(
+            evidence_manifest=self.evidence_manifest,
+            conflict_manifest=self.conflict_manifest,
+            knowledge_version=self.knowledge_version,
+            grounding_status=self.grounding_status,
+        )
 
 
 @runtime_checkable

@@ -25,6 +25,13 @@ from typing import Any
 from uuid import UUID
 
 from orchestrator.agent_framework.capabilities import AgentRole
+from orchestrator.knowledge_contracts import (
+    ConflictManifestEntry,
+    EvidenceManifestEntry,
+    GroundingStatus,
+    KnowledgeVersion,
+    validate_grounding_envelope,
+)
 
 
 class TenantResolutionError(RuntimeError):
@@ -151,7 +158,9 @@ class ModuleResult:
     ``to_item_execution_result``.
 
     The adapters are what makes the generalization CONCRETE: a framework module's output flows into
-    the EXISTING dispatch/return seams unchanged.
+    the EXISTING dispatch/return seams unchanged.  O8's evidence/conflict manifests,
+    ``knowledge_version``, and ``grounding_status`` are content-free provenance metadata preserved
+    by both adapters; the result never carries raw retrieved text.
     """
 
     role: AgentRole
@@ -161,6 +170,18 @@ class ModuleResult:
     batch_id: str | None = None
     counters: Mapping[str, int] = field(default_factory=dict)
     reason: str = ""
+    evidence_manifest: tuple[EvidenceManifestEntry, ...] = ()
+    conflict_manifest: tuple[ConflictManifestEntry, ...] = ()
+    knowledge_version: KnowledgeVersion | None = None
+    grounding_status: GroundingStatus = GroundingStatus.NOT_APPLICABLE
+
+    def __post_init__(self) -> None:
+        validate_grounding_envelope(
+            evidence_manifest=self.evidence_manifest,
+            conflict_manifest=self.conflict_manifest,
+            knowledge_version=self.knowledge_version,
+            grounding_status=self.grounding_status,
+        )
 
     def to_agent_result(self) -> Any:
         """Adapt a PROPOSER result to the existing ``agent.types.AgentResult`` envelope.
@@ -171,7 +192,14 @@ class ModuleResult:
         from orchestrator.agent.types import AgentResult
 
         status = self.status if self.status in _AGENT_RESULT_STATUSES else "completed"
-        return AgentResult(status=status, output=dict(self.proposal or {}))
+        return AgentResult(
+            status=status,
+            output=dict(self.proposal or {}),
+            evidence_manifest=self.evidence_manifest,
+            conflict_manifest=self.conflict_manifest,
+            knowledge_version=self.knowledge_version,
+            grounding_status=self.grounding_status,
+        )
 
     def to_item_execution_result(self) -> Any:
         """Adapt an EXECUTOR result to the existing ``coordinator.ItemExecutionResult``.
@@ -186,6 +214,10 @@ class ModuleResult:
             work_item_status=self.work_item_status or self.status,
             batch_id=self.batch_id,
             counters=dict(self.counters),
+            evidence_manifest=self.evidence_manifest,
+            conflict_manifest=self.conflict_manifest,
+            knowledge_version=self.knowledge_version,
+            grounding_status=self.grounding_status,
         )
 
 

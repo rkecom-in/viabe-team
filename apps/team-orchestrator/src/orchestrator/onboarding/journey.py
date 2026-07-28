@@ -1978,6 +1978,34 @@ def _maybe_refresh_owner_website(
         logger.warning("journey: owner-website refresh failed (fail-soft)", exc_info=True)
 
 
+def _merged_recent_history(
+    tenant_id: UUID | str, g: dict[str, Any], message_sid: str | None, *, cap: int = 12
+) -> list[dict[str, Any]]:
+    """VT-716 (Fazal: 'the manager cannot just forget what he sent 2 mins back') — the
+    Manager's SELF-AWARE view: the journey's own recent_turns UNIONED with the lifetime
+    conversation_log window (welcome, signup-phase and system/template sends included),
+    deduped, chronological, capped. The brain composes against what was ACTUALLY sent on the
+    wire, not just its own private memory."""
+    recent = list(g.get("recent_turns") or [])
+    try:
+        from orchestrator.conversation_log import active_window
+
+        win = active_window(tenant_id, max_turns=cap, exclude_message_sid=message_sid)
+    except Exception:  # noqa: BLE001 — self-awareness must never block the turn
+        win = []
+    merged: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for t in [*win, *recent]:
+        role = "owner" if t.get("role") == "owner" else "bot"
+        text = str(t.get("text") or "")
+        key = (role, " ".join(text.split())[:200])
+        if not key[1] or key in seen:
+            continue
+        seen.add(key)
+        merged.append({"role": role, "text": text})
+    return merged[-cap:]
+
+
 def _handle_reply_with_turn_brain(
     tenant_id: UUID | str, body: str, message_sid: str | None, *, lang: str = "en", is_start: bool = False,
     profile_card: dict[str, Any] | None = None,
@@ -1999,6 +2027,49 @@ def _handle_reply_with_turn_brain(
     # walker — signal already_presented so the intercept does NOT re-send (the first delivery sent it).
     if message_sid and message_sid == g.get("last_message_sid"):
         return {"already_presented": True, "done": _current(g) is None}
+
+    # VT-716 — TYPED-TWICE guard (run-5: a repeated business name re-ran discovery and sent
+    # the found-online card twice). A NEW sid whose normalized body equals the owner's LAST
+    # recorded turn within 3 minutes is a human repeat: acknowledge + re-present the pending
+    # question — never re-process (no re-extraction, no discovery re-kick, no duplicate card).
+    try:
+        from datetime import UTC, datetime
+
+        from orchestrator.conversation_log import active_window
+
+        _win = active_window(tenant_id, max_turns=6, exclude_message_sid=message_sid)
+        _last_owner = next((t for t in reversed(_win) if t.get("role") == "owner"), None)
+        if _last_owner is not None:
+            _same = " ".join((body or "").lower().split()) == " ".join(
+                str(_last_owner.get("text") or "").lower().split()
+            )
+            _ts = _last_owner.get("created_at")
+            _age_ok = False
+            if _ts is not None:
+                try:
+                    _age_ok = (datetime.now(UTC) - _ts).total_seconds() < 180
+                except TypeError:
+                    _age_ok = False
+            if _same and _age_ok and (body or "").strip():
+                _cur = _current(g)
+                if _cur is not None:
+                    _append_recent_turns(
+                        tenant_id, {"role": "owner", "text": body},
+                        {"role": "bot", "text": _cur.get("prompt_en", "")}, message_sid=message_sid,
+                    )
+                    return {
+                        "next_q": _cur,
+                        "reply_en": f"Got it — already noted. {_cur.get('prompt_en', '')}",
+                        "reply_hi": f"मिल गया — नोट हो चुका है। {_cur.get('prompt_hi', '')}",
+                        "done": False,
+                    }
+                _append_recent_turns(
+                    tenant_id, {"role": "owner", "text": body},
+                    {"role": "bot", "text": "Noted!"}, message_sid=message_sid,
+                )
+                return {"turn_brain": True, "reply_text": "Noted!", "buttons": [], "done": False}
+    except Exception:  # noqa: BLE001 — the guard is an enhancement, never a gate
+        logger.warning("journey: typed-twice guard failed (fail-open)")
 
     # VT-693 (live-proven, the "This is mine, but…" turn): when the PRESENTED question is the
     # GST identity card, the decision is handled DETERMINISTICALLY before any LLM turn —
@@ -2109,9 +2180,12 @@ def _handle_reply_with_turn_brain(
 
     # VT-570 — pass tenant_id so the brain's tool belt (refresh_discovery / read_journey_history) has a
     # tenant context; its presence is also what engages the bounded agentic loop (see compose_turn).
+    # VT-716 — the brain composes against the WIRE-TRUTH history (see _merged_recent_history).
+    g_aware = dict(g)
+    g_aware["recent_turns"] = _merged_recent_history(tenant_id, g, message_sid)
     plan = turn_brain.compose_turn(
-        g, draft_attrs, body, locale=lang, provenance=provenance, is_start=is_start, tenant_id=tenant_id,
-        profile_card=(card or None),
+        g_aware, draft_attrs, body, locale=lang, provenance=provenance, is_start=is_start,
+        tenant_id=tenant_id, profile_card=(card or None),
     )
     if plan is None:
         # Fail-soft: the deterministic walker owns this turn (and applies the VT-569a bare-no re-prompt).
@@ -2689,6 +2763,26 @@ def _run_turn_brain_and_send(
     # message. ``_complete`` set ``__flow__ = profile_previewed``; the owner's NEXT message enters the
     # paced flow (readiness ask → one integration → data-landed plan) via _maybe_handle_post_profile_flow.
     return r
+
+
+def present_first_question(tenant_id: UUID | str, recipient: str | None, *, lang: str = "en") -> bool:
+    """VT-716b (Fazal, run-6 console review: the welcome and the first question must read as
+    ONE person) — present the seeded queue's first question DETERMINISTICALLY as a
+    continuation of the welcome. No LLM, no synthetic 'complete setup' owner turn (that fake
+    request is what made the brain open with 'Sure, let's get you set up!' and re-greet).
+    The welcome already says 'a few quick questions' — this just asks the first one."""
+    try:
+        g = get_journey(tenant_id)
+        if g is None or g.get("status") != "active":
+            return False
+        q = _current(g)
+        if q is None:
+            return False
+        _send(recipient, q, lang, tenant_id=tenant_id)
+        return True
+    except Exception:  # noqa: BLE001 — the next owner reply re-enters the journey gate anyway
+        logger.warning("journey: present_first_question failed (fail-soft) tenant=%s", tenant_id)
+        return False
 
 
 def maybe_handle_journey_reply(

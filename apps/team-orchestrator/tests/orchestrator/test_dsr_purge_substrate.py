@@ -102,6 +102,24 @@ def _seed_full_tenant_data(dsn: str, tenant_id: UUID) -> dict[str, UUID]:
     run_id = uuid4()
 
     with psycopg.connect(dsn, autocommit=True) as conn:
+        # VT-709 / mig 183: O8 tenant evidence + incident rows.  Both global FKs are deliberately
+        # NULL while immutable refs remain populated; this isolates the DSR contract under test
+        # from global-corpus setup and proves the tenants-row CASCADE is not being relied upon.
+        o8_card_ref = uuid4()
+        conn.execute(
+            "INSERT INTO decision_evidence_links "
+            "(tenant_id, run_id, decision_id, corpus_version_ref, card_version_ref, "
+            " retrieval_stage, disposition, combined_score) "
+            "VALUES (%s, %s, 'dsr-decision', %s, %s, 'review', 'selected', 0.8)",
+            (str(tenant_id), str(uuid4()), str(uuid4()), str(o8_card_ref)),
+        )
+        conn.execute(
+            "INSERT INTO knowledge_incidents "
+            "(tenant_id, incident_class, card_version_ref, evidence_refs, detail_redacted) "
+            "VALUES (%s, 'decision_quality', %s, %s, '<redacted:test>')",
+            (str(tenant_id), str(o8_card_ref), [uuid4()]),
+        )
+
         # pipeline_runs (parent of pipeline_steps / campaigns / owner_inputs)
         conn.execute(
             "INSERT INTO pipeline_runs (id, tenant_id, run_type, status) "
@@ -400,6 +418,8 @@ def _ticket_row(dsn: str, ticket_id: UUID) -> dict[str, Any]:
 
 # Tables that should be ZERO for the purged tenant after the sweep.
 _PURGED_TABLES = (
+    "decision_evidence_links",  # VT-709: O8 decision/outcome attribution, hard-delete on DSR
+    "knowledge_incidents",  # VT-709: harmful-card tenant incidents, hard-delete on DSR
     "l1_relationships",
     "l1_entities",
     "episodic_events",  # VT-323: L2 episodic memory must be swept by DSR purge
@@ -928,6 +948,37 @@ def test_purge_hard_deletes_episodic_events_l2(substrate):  # type: ignore[no-un
     assert _count_tenant_rows(substrate.dsn, "episodic_events", tenant_b) >= 1, (
         "VT-323: cross-tenant leak — purging A wiped B's L2 rows"
     )
+
+
+def test_vt709_o8_hard_delete_canary_asserts_physical_zero_rows(substrate):  # type: ignore[no-untyped-def]
+    """VT-709 §3 scar-tissue canary: do not trust the tenants FK/CASCADE.
+
+    DSR anonymizes the tenant row rather than deleting it, so only explicit _PURGE_ORDER deletes
+    can make these counts zero.  A co-resident tenant proves the delete remains tenant-scoped.
+    """
+    from orchestrator.dsr_purge import _PURGE_ORDER, purge_tenant_data
+
+    assert _PURGE_ORDER.index("decision_evidence_links") < _PURGE_ORDER.index(
+        "knowledge_incidents"
+    )
+    tenant_a = _new_tenant(substrate.dsn, name="Tenant A (O8 purgee)")
+    tenant_b = _new_tenant(substrate.dsn, name="Tenant B (O8 untouched)")
+    _seed_full_tenant_data(substrate.dsn, tenant_a)
+    _seed_full_tenant_data(substrate.dsn, tenant_b)
+
+    for table in ("decision_evidence_links", "knowledge_incidents"):
+        assert _count_tenant_rows(substrate.dsn, table, tenant_a) == 1
+        assert _count_tenant_rows(substrate.dsn, table, tenant_b) == 1
+
+    result = purge_tenant_data(_open_dsr_ticket(substrate.dsn, tenant_a))
+    for table in ("decision_evidence_links", "knowledge_incidents"):
+        assert result.deleted_counts[table] == 1
+        assert _count_tenant_rows(substrate.dsn, table, tenant_a) == 0, (
+            f"VT-709: DSR left physical rows in {table}; FK CASCADE was never the erasure path"
+        )
+        assert _count_tenant_rows(substrate.dsn, table, tenant_b) == 1, (
+            f"VT-709: cross-tenant purge touched tenant B's {table} rows"
+        )
 
 
 def test_purge_hard_deletes_tenant_oauth_tokens(substrate):  # type: ignore[no-untyped-def]

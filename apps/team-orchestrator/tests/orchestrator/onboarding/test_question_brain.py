@@ -162,3 +162,26 @@ def test_gap_suggestions_pass_through_clamped():
     assert len(q.suggestions_en) == 3, "clamped to 3"
     assert all(len(s) <= 20 for s in q.suggestions_en), "20-char button-title clamp"
     assert q.suggestions_hi == ("२४/७",)
+
+
+def test_website_wording_beats_taxonomy_confirm():
+    """VT-717 (Fazal): a website-derived category/about answers the business-type question —
+    the generic taxonomy confirm ("Local services (repair etc.)") must NOT fire against it."""
+    draft = {
+        "attributes": {"business_type": "services",
+                       "category": "AI-powered business intelligence for India's small businesses"},
+        "provenance": {"category": {"source": "website"}},
+    }
+    qs = compose_onboarding_questions("services", draft, answered=[], llm_fn=_gaps())
+    fields = [(q.kind, q.field) for q in qs]
+    assert ("confirm", "business_type") not in fields, "website wording wins — no taxonomy confirm"
+
+
+def test_taxonomy_confirm_survives_without_website_signal():
+    draft = {
+        "attributes": {"business_type": "services", "category": "Repair shop"},
+        "provenance": {"category": {"source": "gbp"}},
+    }
+    qs = compose_onboarding_questions("services", draft, answered=[], llm_fn=_gaps())
+    fields = [(q.kind, q.field) for q in qs]
+    assert ("confirm", "business_type") in fields, "GBP/GST-only discovery still confirms"

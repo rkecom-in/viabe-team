@@ -71,10 +71,11 @@ def maybe_resume_sheets_onboarding(
         from orchestrator.onboarding.shopify_onboarding import (
             PHASE_AUTH,
             PHASE_SAMPLE,
-            _DONE,
+            _auth_verify_attempts,
+            _auth_wait_reply,
+            _is_done_reply,
             _pending_is_unexpired,
             _send,
-            _tokens,
             _validated_pending,
             _write_state,
             read_integration_state,
@@ -118,20 +119,46 @@ def maybe_resume_sheets_onboarding(
             )
             return {"done": False, "phase": phase, "routed": "sheets_data_action_not_connected"}
 
-        toks = _tokens(body)
-        if not (toks & _DONE):
+        # VT-712 — a clear fresh-link ask regenerates the REAL authorize URL (the run-4 loop:
+        # 'Link phir se bhejo' got the same canned line). Narrow two-signal floor ("link" + a
+        # renewal word) — anything less clear falls to the brain, never a guess.
+        low = " ".join((body or "").lower().split())
+        if ("link" in low or "लिंक" in low) and any(
+            w in low for w in ("new", "fresh", "again", "resend", "naya", "phir", "fir",
+                               "dobara", "bhejo", "नया", "फिर", "भेजो")
+        ):
+            from orchestrator.integrations.sheets_oauth import start_sheets_oauth
+
+            fresh = start_sheets_oauth(tenant_id)
+            _send(
+                recipient,
+                "Here's a fresh link — approve on the Google page, then reply 'done':\n"
+                + fresh["authorize_url"],
+                tenant_id=tenant_id,
+            )
+            logger.info("VT-712 sheets_resume: fresh authorize link minted tenant=%s", tenant_id)
+            return {"done": False, "phase": phase, "routed": "sheets_auth_link_reminted"}
+
+        if not _is_done_reply(body):
             # No LLM auth-intent classifier reuse here (see module docstring) — a non-floor reply
             # falls through to the brain rather than risk a Shopify-worded misclassification.
+            # VT-712: with the particle false-floor gone, patience messages ("give me 10 min")
+            # now genuinely reach the brain instead of looping the canned verify-fail.
             return None
 
         from orchestrator.integrations.commit import is_connector_connected
 
         if not is_connector_connected(tenant_id, _CONNECTOR_ID):
             walkthrough = pending.get("walkthrough_url") if isinstance(pending, dict) else None
+            attempts = _auth_verify_attempts(pending) + 1
+            if isinstance(pending, dict):
+                pending.setdefault("metadata", {})["verify_attempts"] = attempts
+                _write_state(
+                    tenant_id, phase=phase, connector_id=_CONNECTOR_ID, pending=pending
+                )
             _send(
                 recipient,
-                "I don't see the connection yet — please finish approving on the Google page, "
-                "then reply 'done'." + (f"\n{walkthrough}" if walkthrough else ""),
+                _auth_wait_reply(attempts, walkthrough, "Google"),
                 tenant_id=tenant_id,
             )
             return {"done": False, "phase": phase, "routed": "sheets_auth_not_connected"}
