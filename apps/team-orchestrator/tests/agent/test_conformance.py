@@ -31,6 +31,10 @@ from orchestrator.agent_framework import (  # noqa: E402
 )
 from orchestrator.agent_framework.conformance import CHECK_NAMES  # noqa: E402
 from orchestrator.agent_framework.reference_plugin import BusinessContextReader  # noqa: E402
+from orchestrator.agent_framework.retrieval_profiles import (  # noqa: E402
+    specialist_retrieval_profile,
+)
+from orchestrator.knowledge_contracts import KnowledgeDomain  # noqa: E402
 
 
 def _fake_bc(_tid=None):
@@ -55,6 +59,12 @@ class _ConformingDualRole:
         # brief_complete included.
         category="Tech",
         tags=frozenset({"fixture"}),
+        retrieval_profile=specialist_retrieval_profile(
+            identity="conforming_dual_role",
+            domains=frozenset({KnowledgeDomain.TECHNOLOGY}),
+            top_k=4,
+            token_budget=1_500,
+        ),
         brief=AgentBrief(
             what_it_does="a conformance-harness test fixture",
             actions=("propose", "execute"),

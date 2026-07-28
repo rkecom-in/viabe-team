@@ -73,6 +73,13 @@ from orchestrator.handoffs import (
     _build_sales_recovery_update,
     make_spawn_tool,
 )
+from orchestrator.knowledge_contracts import (
+    ConflictManifestEntry,
+    EvidenceManifestEntry,
+    GroundingStatus,
+    KnowledgeVersion,
+    validate_grounding_envelope,
+)
 
 # ---------------------------------------------------------------------------
 # The standard manager <-> specialist handoff PROTOCOL (design §7)
@@ -171,6 +178,18 @@ class SpecialistReturn:
     outcome: str = ""
     proposed_outcome: str = ""
     reason: str = ""
+    evidence_manifest: tuple[EvidenceManifestEntry, ...] = ()
+    conflict_manifest: tuple[ConflictManifestEntry, ...] = ()
+    knowledge_version: KnowledgeVersion | None = None
+    grounding_status: GroundingStatus = GroundingStatus.NOT_APPLICABLE
+
+    def __post_init__(self) -> None:
+        validate_grounding_envelope(
+            evidence_manifest=self.evidence_manifest,
+            conflict_manifest=self.conflict_manifest,
+            knowledge_version=self.knowledge_version,
+            grounding_status=self.grounding_status,
+        )
 
 
 def _build_context_slice(

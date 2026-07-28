@@ -24,6 +24,10 @@ from orchestrator.agent_framework import (  # noqa: E402
     assert_conforms,
     check_module_conformance,
 )
+from orchestrator.agent_framework.retrieval_profiles import (  # noqa: E402
+    specialist_retrieval_profile,
+)
+from orchestrator.knowledge_contracts import KnowledgeDomain  # noqa: E402
 
 
 def _brief(**overrides):
@@ -48,6 +52,12 @@ class _CompleteModule:
         description="a fully taxonomy-complete module",
         category="Sales",
         tags=frozenset({"winback"}),
+        retrieval_profile=specialist_retrieval_profile(
+            identity="complete_module",
+            domains=frozenset({KnowledgeDomain.SALES}),
+            top_k=4,
+            token_budget=1_500,
+        ),
         brief=_brief(),
     )
 
@@ -63,6 +73,26 @@ def test_complete_module_passes_brief_complete():
 
 def test_complete_module_passes_assert_conforms():
     assert_conforms(_CompleteModule())  # must not raise/fail
+
+
+def test_retrieval_profile_is_a_required_conformance_check():
+    class _MissingProfile:
+        manifest = AgentManifest(
+            name="missing_profile",
+            version="1.0.0",
+            roles=frozenset({AgentRole.PROPOSER}),
+            description="otherwise complete",
+            category="Sales",
+            tags=frozenset({"sales"}),
+            brief=_brief(),
+        )
+
+        def propose(self, ctx, gate):  # pragma: no cover
+            ...
+
+    report = check_module_conformance(_MissingProfile())
+    assert report.result("brief_complete").passed is True
+    assert report.result("retrieval_profile_declared").passed is False
 
 
 # --- failure modes: one fixture per missing piece -------------------------------------------------

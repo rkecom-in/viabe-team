@@ -19,6 +19,7 @@ from orchestrator.agent_framework.capabilities import (
     Capability,
 )
 from orchestrator.agents.activation_registry import AgentPrerequisites
+from orchestrator.knowledge_contracts import RetrievalProfile
 
 
 class ManifestError(ValueError):
@@ -151,6 +152,11 @@ class AgentManifest:
                             ``render_agent_directory`` (``agent_framework.directory``) skips any
                             module whose ``category``/``tags``/``brief`` are still default — only a
                             VT-686-complete manifest gets a Manager-facing directory card.
+      - ``retrieval_profile`` — O8: the identity's declared knowledge domains/layers/stages,
+                            depth, result/token budgets, disputed-evidence permission, grounding
+                            rule, and no-result behavior. ``None`` remains a construction-safe
+                            retrofit default, but conformance requires a valid profile before a
+                            module can register as complete. The identity must equal ``name``.
     """
 
     name: str
@@ -165,6 +171,7 @@ class AgentManifest:
     category: str = ""
     tags: frozenset[str] = frozenset()
     brief: AgentBrief | None = None
+    retrieval_profile: RetrievalProfile | None = None
 
     @property
     def gated_capabilities(self) -> frozenset[Capability]:
@@ -276,6 +283,20 @@ class AgentManifest:
                 f"manifest {self.name!r}: brief must be an AgentBrief instance or None (got "
                 f"{type(self.brief).__name__}) — a structured brief, not a prose blob"
             )
+        if self.retrieval_profile is not None:
+            if not isinstance(self.retrieval_profile, RetrievalProfile):
+                raise ManifestError(
+                    f"manifest {self.name!r}: retrieval_profile must be a RetrievalProfile or None"
+                )
+            if self.retrieval_profile.identity != self.name:
+                raise ManifestError(
+                    f"manifest {self.name!r}: retrieval_profile.identity="
+                    f"{self.retrieval_profile.identity!r} must equal manifest.name"
+                )
+            try:
+                self.retrieval_profile.validate()
+            except ValueError as exc:
+                raise ManifestError(f"manifest {self.name!r}: invalid retrieval_profile: {exc}") from exc
 
 
 __all__ = ["AGENT_CATEGORIES", "AgentBrief", "AgentManifest", "ManifestError"]

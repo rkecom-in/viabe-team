@@ -89,6 +89,8 @@ from orchestrator.agent_framework.capabilities import AgentRole, Capability
 from orchestrator.agent_framework.context import ModuleContext, ModuleResult
 from orchestrator.agent_framework.gate_facade import GateFacade
 from orchestrator.agent_framework.manifest import AgentBrief, AgentManifest
+from orchestrator.agent_framework.retrieval_profiles import specialist_retrieval_profile
+from orchestrator.knowledge_contracts import KnowledgeDomain
 
 logger = logging.getLogger("orchestrator.agent_framework.modules.integration_tools")
 
@@ -175,6 +177,12 @@ class IntegrationToolsModule:
             # docstring above (accurate, no invention).
             category="Integration",
             tags=frozenset({"integration", "connectors", "oauth", "data-source", "ingestion"}),
+            retrieval_profile=specialist_retrieval_profile(
+                identity=MODULE_NAME,
+                domains=frozenset({KnowledgeDomain.INTEGRATION, KnowledgeDomain.TECHNOLOGY}),
+                top_k=8,
+                token_budget=3_000,
+            ),
             brief=AgentBrief(
                 what_it_does=(
                     "Reads the tenant's current integration/connector phase and exposes the "

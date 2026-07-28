@@ -52,6 +52,8 @@ from orchestrator.agent_framework.capabilities import AgentRole, Capability
 from orchestrator.agent_framework.context import ModuleContext, ModuleResult
 from orchestrator.agent_framework.gate_facade import GateFacade
 from orchestrator.agent_framework.manifest import AgentBrief, AgentManifest
+from orchestrator.agent_framework.retrieval_profiles import specialist_retrieval_profile
+from orchestrator.knowledge_contracts import KnowledgeDomain, NoResultBehavior
 
 logger = logging.getLogger("orchestrator.agent_framework.modules.common_tools")
 
@@ -118,6 +120,14 @@ class CommonToolsModule:
             category="Tech",
             tags=frozenset(
                 {"reads", "common", "ledger", "business-context", "integration-state"}
+            ),
+            retrieval_profile=specialist_retrieval_profile(
+                identity=MODULE_NAME,
+                domains=frozenset({KnowledgeDomain.CROSS_FUNCTIONAL, KnowledgeDomain.OPERATIONS}),
+                top_k=6,
+                token_budget=2_000,
+                no_result_behavior=NoResultBehavior.CONTINUE_WITHOUT_KNOWLEDGE,
+                allow_disputed=False,
             ),
             brief=AgentBrief(
                 what_it_does=(

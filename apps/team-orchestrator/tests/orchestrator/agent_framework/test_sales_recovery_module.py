@@ -1,6 +1,6 @@
 """VT-659 — unit tests for the Sales-Recovery agent_framework MODULE (the thin dual-role adapter).
 
-Proves the module CONFORMS to the framework contract (``assert_conforms`` — all 9 checks) and that
+Proves the module CONFORMS to the framework contract (``assert_conforms`` — all 11 checks) and that
 its two lanes DELEGATE to the existing SR proposer/executor and MAP their results onto the framework
 value objects WITHOUT touching a real LLM or DB (the delegates are injected). Also pins the two
 migration invariants the adapter must hold: the manifest name equals the coordinator
@@ -78,7 +78,7 @@ def test_conformance_report_names_stable():
     assert [r.name for r in report.results] == list(CHECK_NAMES)
     # VT-669 added the 9th check (``required_tools_reachable``); VT-686 added the 10th
     # (``brief_complete``).
-    assert len(CHECK_NAMES) == 10
+    assert len(CHECK_NAMES) == 11
     assert "required_tools_reachable" in CHECK_NAMES
     assert "brief_complete" in CHECK_NAMES
 

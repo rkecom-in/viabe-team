@@ -72,7 +72,9 @@ from orchestrator.agent_framework.capabilities import AgentRole, Capability
 from orchestrator.agent_framework.context import ModuleContext, ModuleResult
 from orchestrator.agent_framework.gate_facade import GateFacade
 from orchestrator.agent_framework.manifest import AgentBrief, AgentManifest
+from orchestrator.agent_framework.retrieval_profiles import specialist_retrieval_profile
 from orchestrator.agents.activation_registry import REGISTRY as _ACTIVATION_REGISTRY
+from orchestrator.knowledge_contracts import KnowledgeDomain
 
 logger = logging.getLogger("orchestrator.agent_framework.modules.sales_recovery")
 
@@ -167,6 +169,12 @@ class SalesRecoveryModule:
         # WHEN to delegate to it, instead of inferring both from a spawn-tool description.
         category="Sales",
         tags=frozenset({"winback", "lapsed", "campaigns", "sales-recovery"}),
+        retrieval_profile=specialist_retrieval_profile(
+            identity=MODULE_NAME,
+            domains=frozenset({KnowledgeDomain.SALES, KnowledgeDomain.MARKETING}),
+            top_k=12,
+            token_budget=4_500,
+        ),
         brief=AgentBrief(
             what_it_does=(
                 "Detects lapsed customers, drafts and grounds a win-back campaign, and ARMS the "
