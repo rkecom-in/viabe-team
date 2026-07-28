@@ -121,7 +121,12 @@ class CorpusVersionStatus(StrEnum):
 
 
 class UsageRights(BaseModel):
-    """Deterministic source-rights decision made before any extraction or embedding."""
+    """Recorded rights/access metadata for the source reproduction.
+
+    These fields govern handling of the source material itself.  They do not grant or deny use of
+    an independently authored knowledge claim: card admission is based on originality, accuracy,
+    value and measured impact (CL-2026-07-29b-knowledge-not-source).
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid", str_strip_whitespace=True)
 
@@ -228,7 +233,13 @@ class Applicability(BaseModel):
         if self.effective_from and self.effective_to and self.effective_to < self.effective_from:
             raise ValueError("effective_to must not precede effective_from")
         if self.universal and any(
-            (self.jurisdictions, self.size_bands, self.industries, self.maturity_stages, self.channels)
+            (
+                self.jurisdictions,
+                self.size_bands,
+                self.industries,
+                self.maturity_stages,
+                self.channels,
+            )
         ):
             raise ValueError("universal applicability cannot also declare explicit dimensions")
         return self
@@ -299,7 +310,9 @@ class KnowledgeCard(BaseModel):
             }
             and self.corroboration_cluster_count < 2
         ):
-            raise ValueError("T4 experiential cards cannot leave research-only without corroboration")
+            raise ValueError(
+                "T4 experiential cards cannot leave research-only without corroboration"
+            )
         if self.expires_at is not None and self.expires_at.utcoffset() is None:
             raise ValueError("expires_at must be timezone-aware")
         if self.source_class is SourceClass.T4_EXPERIENTIAL:
@@ -309,8 +322,6 @@ class KnowledgeCard(BaseModel):
         if self.retrieval_eligible:
             if self.status not in {CardStatus.VALIDATED, CardStatus.DISPUTED}:
                 raise ValueError("only validated/disputed cards may be retrieval eligible")
-            if not self.usage_rights.allows_retrieval:
-                raise ValueError("retrieval eligibility requires explicit retrieval rights")
         return self
 
 
@@ -451,9 +462,7 @@ class KnowledgeQuery(BaseModel):
     entity_refs: tuple[str, ...] = Field(default=(), max_length=50)
     time_horizon_days: int | None = Field(default=None, ge=1, le=3_650)
     token_budget: int = Field(default=2_500, ge=256, le=12_000)
-    layers: frozenset[KnowledgeLayer] = Field(
-        default=ALL_KNOWLEDGE_LAYERS, min_length=1
-    )
+    layers: frozenset[KnowledgeLayer] = Field(default=ALL_KNOWLEDGE_LAYERS, min_length=1)
     top_k_per_layer: int = Field(default=20, ge=1, le=20)
 
     @model_validator(mode="after")

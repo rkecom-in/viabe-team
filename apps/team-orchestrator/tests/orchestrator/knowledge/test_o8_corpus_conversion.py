@@ -1,4 +1,4 @@
-"""VT-710 deterministic rights-first conversion gates for the audited 118-card corpus."""
+"""VT-710 deterministic source-governance conversion gates for the 118-card corpus."""
 
 from __future__ import annotations
 
@@ -40,7 +40,7 @@ def test_derived_artifacts_live_in_the_scanned_application_tree() -> None:
     assert all(path.is_file() for path in (CANDIDATE_OUTPUT, RIGHTS_OUTPUT, REPORT_OUTPUT))
 
 
-def test_rights_pass_covers_104_sources_before_all_118_candidates() -> None:
+def test_source_governance_pass_covers_104_sources_before_all_118_candidates() -> None:
     # These derived artifacts are version-controlled and must remain fully verifiable in CI.
     # The raw archive used to regenerate them is intentionally local-only after the history purge.
     rights = _jsonl(RIGHTS_OUTPUT)
@@ -48,10 +48,14 @@ def test_rights_pass_covers_104_sources_before_all_118_candidates() -> None:
     assert len(rights) == 104
     assert len(candidates) == 118
     assert all(row["rights_pass_completed_before_conversion"] is True for row in rights)
+    assert all(row["source_governance_pass_completed_before_conversion"] is True for row in rights)
     assert {row["source_id"] for row in rights} == {row["source_id"] for row in candidates}
     assert len({row["content_hash"] for row in rights}) == 104
     assert all(re.fullmatch(r"[0-9a-f]{64}", row["content_hash"]) for row in rights)
     assert all(row["tainted"] is True for row in rights)
+    assert all(int(row["source_card_count"]) >= 1 for row in rights)
+    assert all(0.0 < float(row["source_card_share"]) <= 1.0 for row in rights)
+    assert not any(row["paywall_access_circumvented"] for row in rights)
 
     rights_statuses = Counter(row["usage_rights"]["status"] for row in rights)  # type: ignore[index]
     assert rights_statuses == {
@@ -106,12 +110,16 @@ def test_raw_content_and_legacy_trust_cannot_enter_candidate_card() -> None:
         assert "raw_text" not in card
         assert "trust_level" not in card
         assert "source_type" not in card
-        assert row["pipeline_steps"][0] == "rights_verified"
+        assert row["pipeline_steps"][0] == "source_governance_recorded"
+        assert any(
+            step in row["pipeline_steps"]
+            for step in ("expression_originality_checked", "expression_originality_attested")
+        )
         assert row["pipeline_steps"][-1] == "candidate_registered"
         assert row["quarantine_ref"].startswith("archive://")
 
 
-def test_five_live_link_cards_are_rights_blocked() -> None:
+def test_unknown_and_live_link_rights_do_not_block_embedding_eligibility() -> None:
     rights = {row["source_id"]: row for row in _jsonl(RIGHTS_OUTPUT)}
     candidates = _jsonl(CANDIDATE_OUTPUT)
     live = [
@@ -126,4 +134,38 @@ def test_five_live_link_cards_are_rights_blocked() -> None:
         "bk119-wework-duration-mismatch-governance",
         "bk121-southwest-recovery-is-product-capacity",
     }
-    assert all(row["embedding_state"] == "rights_blocked" for row in live)
+    unknown_or_live = [
+        row
+        for row in candidates
+        if rights[row["source_id"]]["usage_rights"]["status"] in {"unknown", "live_link_only"}
+    ]
+    assert unknown_or_live
+    assert all(row["embedding_state"] == "pending" for row in unknown_or_live)
+    assert all(row["embedding_state"] != "rights_blocked" for row in candidates)
+    assert all(
+        "rights_blocked_no_embedding_or_retrieval" not in row["conversion_warnings"]
+        for row in candidates
+    )
+    assert all("expression_originality_attested" in row["pipeline_steps"] for row in live)
+
+
+def test_expression_originality_and_review_flags_are_explicit() -> None:
+    candidates = _jsonl(CANDIDATE_OUTPUT)
+    assert all(
+        "expression_originality_checked" in row["pipeline_steps"]
+        or "expression_originality_attested" in row["pipeline_steps"]
+        for row in candidates
+    )
+    assert all(isinstance(row["review_flags"], list) for row in candidates)
+    evidence_modes = Counter(row["expression_originality"]["mode"] for row in candidates)
+    assert evidence_modes == {"checked": 105, "attested": 13}
+    attestors = Counter(
+        row["expression_originality"]["attested_by"]
+        for row in candidates
+        if row["expression_originality"]["mode"] == "attested"
+    )
+    assert attestors == {
+        "corpus-author:vt710-live-link-originality": 5,
+        "rkecom-source-owner:vt710-original-synthesis": 7,
+        "corpus-author:vt710-source-snapshot-unavailable": 1,
+    }

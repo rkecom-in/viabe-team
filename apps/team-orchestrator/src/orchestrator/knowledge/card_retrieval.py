@@ -190,7 +190,9 @@ class CardRetrievalEngine:
         effective_budget = min(token_budget or profile.token_budget, profile.token_budget)
         trusted_overrides = assignment_overrides or {}
         objective_tokens = _tokens(objective)
-        entity_tokens = set().union(*(_tokens(value) for value in entity_refs)) if entity_refs else set()
+        entity_tokens = (
+            set().union(*(_tokens(value) for value in entity_refs)) if entity_refs else set()
+        )
 
         scope_or_status_excluded = 0
         applicability_excluded = 0
@@ -208,9 +210,7 @@ class CardRetrievalEngine:
                         "assignment override tenant did not match retrieval context"
                     )
                 assignment = (
-                    override.scope
-                    if override.enabled
-                    else KnowledgeAssignmentScope.DISABLED.value
+                    override.scope if override.enabled else KnowledgeAssignmentScope.DISABLED.value
                 )
 
             # 1-2. Assignment, scope and lifecycle exclusions happen before ranking.
@@ -230,7 +230,6 @@ class CardRetrievalEngine:
                 or (card.status is CardStatus.DISPUTED and not profile.allow_disputed)
                 or (card.expires_at is not None and card.expires_at <= context.as_of)
                 or not card.retrieval_eligible
-                or not card.usage_rights.allows_retrieval
             ):
                 scope_or_status_excluded += 1
                 continue
@@ -541,14 +540,15 @@ def _applicability(
 
 def _recency(card: KnowledgeCard, as_of: datetime) -> float:
     if (
-        card.source_class
-        not in {SourceClass.T1_REGULATORY, SourceClass.T1_VENDOR_POLICY}
+        card.source_class not in {SourceClass.T1_REGULATORY, SourceClass.T1_VENDOR_POLICY}
         and card.applicability.effective_to is None
         and card.expires_at is None
     ):
         return 0.0
     reference = card.applicability.effective_from or card.provenance.retrieved_at
-    age_days = max(0.0, (as_of.astimezone(UTC) - reference.astimezone(UTC)).total_seconds() / 86_400)
+    age_days = max(
+        0.0, (as_of.astimezone(UTC) - reference.astimezone(UTC)).total_seconds() / 86_400
+    )
     return max(0.0, 1.0 - age_days / (5 * 365))
 
 
