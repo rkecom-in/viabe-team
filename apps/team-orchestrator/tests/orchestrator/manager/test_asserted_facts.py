@@ -149,6 +149,36 @@ def test_agent_pick_records_active_agent_and_trial_terms(monkeypatch):
     assert got.get("trial_terms") == {"months": 1, "auto_charge": False, "cancel_anytime": True}
 
 
+def test_dispatch_commitments_block_renders_and_empty_is_none(monkeypatch):
+    """VT-719 stage 3: the manager-dispatch COMMITMENTS block renders the ledger with the
+    owned-changes rule; an empty ledger yields None (pre-VT-719 tenants byte-identical)."""
+    from orchestrator.agent import dispatch as d
+
+    monkeypatch.setattr(
+        "orchestrator.manager.asserted_facts.active_assertions",
+        lambda t: [{"fact_key": "spend_ceiling", "fact_value": {"minor": 0}}],
+    )
+    block = d._build_commitments_block(uuid4())
+    assert block is not None
+    assert "## Commitments already made to this owner" in block
+    assert "spend_ceiling" in block and "OWN the change" in block
+
+    monkeypatch.setattr(
+        "orchestrator.manager.asserted_facts.active_assertions", lambda t: []
+    )
+    assert d._build_commitments_block(uuid4()) is None
+
+
+def test_dispatch_commitments_block_fail_soft(monkeypatch):
+    from orchestrator.agent import dispatch as d
+
+    def _boom(t):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr("orchestrator.manager.asserted_facts.active_assertions", _boom)
+    assert d._build_commitments_block(uuid4()) is None
+
+
 def test_purge_order_membership():
     """Migration 187's table must be swept on DSR (the tenants row is anonymized, never deleted —
     CASCADE is not the erasure path)."""
