@@ -592,6 +592,9 @@ def test_consent_records_is_pii_free_schema(pool):
     allowed = {
         "id", "tenant_id", "consent_dpdpa", "consent_residency",
         "dpdpa_version", "residency_version", "signed_up_at", "created_at",
+        # VT-715 (mig 185): when the DPDP consent-record email was sent — a timestamp, no PII
+        # (the owner_email itself lives on tenants, deliberately NOT here).
+        "record_email_sent_at",
     }
     with pool.connection() as c:
         cols = {
