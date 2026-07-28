@@ -208,6 +208,19 @@ def compose_onboarding_questions(
     ]
     if "business_type" in confirmable and "category" in confirmable:
         confirmable.remove("category")
+    # VT-717 (Fazal, run-7: "in case of ambiguity we must give preference to what their
+    # website denotes") — a WEBSITE-derived category/about already answers what the business
+    # does, in the business's OWN words. Never confirm the generic taxonomy label against it
+    # (the "Local services (repair etc.)" vs "AI-powered business intelligence" contradiction):
+    # the profile card presents the website wording, and the owner corrects by talking. The
+    # reconciled taxonomy key still promotes INTERNALLY — only the contradictory question dies.
+    prov = dict((draft or {}).get("provenance") or {})
+
+    def _web_sourced(f: str) -> bool:
+        return str((prov.get(f) or {}).get("source") or "") == "website"
+
+    if "business_type" in confirmable and (_web_sourced("category") or _web_sourced("about")):
+        confirmable.remove("business_type")
     confirms = [_confirm_question(f, draft_attrs[f]) for f in confirmable]
 
     # 2. Gaps — the LLM reasons which required fields THIS business_type still needs, excluding what's
