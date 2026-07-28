@@ -119,6 +119,36 @@ def test_policy_grant_records_limit_assertions(monkeypatch):
     assert dict(recorded)["spend_ceiling"] == {"minor": 0}
 
 
+def test_agent_pick_records_active_agent_and_trial_terms(monkeypatch):
+    """VT-719 stage 2: an exact catalog tap in the agent-choice beat records active_agent +
+    trial_terms with the sent confirm as statement_text."""
+    from orchestrator.manager import asserted_facts as af_mod
+    from orchestrator.onboarding import journey as j
+
+    recorded: list[tuple[str, object]] = []
+    monkeypatch.setattr(
+        af_mod, "record_assertion",
+        lambda tenant_id, key, value, **kw: recorded.append((key, value)) or True,
+    )
+    monkeypatch.setattr(j, "_send_turn", lambda *a, **k: None)
+    monkeypatch.setattr(j, "_set_flow", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "orchestrator.onboarding.draft_profile.get_draft", lambda t: {"attributes": {}}
+    )
+    monkeypatch.setattr(
+        "orchestrator.onboarding.draft_profile.write_draft", lambda *a, **k: None
+    )
+    g = {"status": "complete", "answers": {"__flow__": "agent_choice"}, "last_message_sid": None}
+    monkeypatch.setattr(j, "_flow_of", lambda g_: "agent_choice")
+    out = j._maybe_handle_post_profile_flow(
+        uuid4(), g, "Sales Recovery", "SMtest1", "+15551230001", lang="en"
+    )
+    assert out is not None and out.get("routed") == "flow_agent_chosen"
+    got = dict(recorded)
+    assert got.get("active_agent") == "sales_recovery"
+    assert got.get("trial_terms") == {"months": 1, "auto_charge": False, "cancel_anytime": True}
+
+
 def test_purge_order_membership():
     """Migration 187's table must be swept on DSR (the tenants row is anonymized, never deleted —
     CASCADE is not the erasure path)."""
