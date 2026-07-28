@@ -163,6 +163,35 @@ export async function fetchTenantFlow(
     grab(client, 'tenant_alerts', 'trigger_kind, severity, message_text, fired_at', 'fired_at', tenantId, since),
   ])
 
+  const events = normalizeSources({ convo, audit, tasks, stepErrs, approvals, comms, incidents, alerts })
+
+  events.sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0))
+  return {
+    events,
+    counts: {
+      conversation_log: { fetched: convo.length, cap: CAPS.conversation_log },
+      tm_audit_log: { fetched: audit.length, cap: CAPS.tm_audit_log },
+      manager_tasks: { fetched: tasks.length, cap: CAPS.manager_tasks },
+      pipeline_steps: { fetched: stepErrs.length, cap: CAPS.pipeline_steps },
+      pending_approvals: { fetched: approvals.length, cap: CAPS.pending_approvals },
+      owner_comms_queue: { fetched: comms.length, cap: CAPS.owner_comms_queue },
+      incidents: { fetched: incidents.length, cap: CAPS.incidents },
+      tenant_alerts: { fetched: alerts.length, cap: CAPS.tenant_alerts },
+    },
+  }
+}
+
+function normalizeSources(src: {
+  convo: any[]
+  audit: any[]
+  tasks: any[]
+  stepErrs: any[]
+  approvals: any[]
+  comms: any[]
+  incidents: any[]
+  alerts: any[]
+}): FlowEvent[] {
+  const { convo, audit, tasks, stepErrs, approvals, comms, incidents, alerts } = src
   const events: FlowEvent[] = []
 
   for (const r of convo) {
@@ -276,20 +305,121 @@ export async function fetchTenantFlow(
     })
   }
 
-  events.sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0))
-  return {
-    events,
-    counts: {
-      conversation_log: { fetched: convo.length, cap: CAPS.conversation_log },
-      tm_audit_log: { fetched: audit.length, cap: CAPS.tm_audit_log },
-      manager_tasks: { fetched: tasks.length, cap: CAPS.manager_tasks },
-      pipeline_steps: { fetched: stepErrs.length, cap: CAPS.pipeline_steps },
-      pending_approvals: { fetched: approvals.length, cap: CAPS.pending_approvals },
-      owner_comms_queue: { fetched: comms.length, cap: CAPS.owner_comms_queue },
-      incidents: { fetched: incidents.length, cap: CAPS.incidents },
-      tenant_alerts: { fetched: alerts.length, cap: CAPS.tenant_alerts },
-    },
+  return events
+}
+
+// --- VT-713: latest-first pagination + the date-jump index -----------------------------------
+
+export interface FlowPage {
+  events: FlowEvent[]
+  /** pass as `before` to fetch the next-older page; null = history exhausted */
+  nextBefore: string | null
+}
+
+const PAGE_SOURCE_LIMIT = 200
+
+/**
+ * One latest-first page of the tenant's FULL-history flow (no 30-day floor — the page is the
+ * unit now). Each source is queried DESC (optionally strictly-older-than `before`), merged,
+ * sorted DESC and sliced to `limit`. `nextBefore` is the oldest ts of the returned slice.
+ */
+export async function fetchFlowPage(
+  operator: OpsOperatorLike,
+  tenantId: string,
+  opts: { before?: string | null; limit?: number; client?: Client } = {},
+): Promise<FlowPage> {
+  const { assignedTenants } = operator
+  if (assignedTenants !== null && assignedTenants.length === 0) return { events: [], nextBefore: null }
+  if (!canAccessTenant(assignedTenants, tenantId)) return { events: [], nextBefore: null }
+  const client = opts.client ?? serverSecretClient()
+  const limit = Math.min(Math.max(opts.limit ?? 120, 20), 400)
+  const before = opts.before ?? null
+
+  const pull = async (table: keyof typeof CAPS, select: string, tsCol: string): Promise<any[]> => {
+    let q = client.from(table).select(select).eq('tenant_id', tenantId)
+    if (before) q = q.lt(tsCol, before)
+    const { data } = await q.order(tsCol, { ascending: false }).limit(Math.min(PAGE_SOURCE_LIMIT, limit))
+    return data ?? []
   }
+
+  const [convo, audit, tasks, stepErrs, approvals, comms, incidents, alerts] = await Promise.all([
+    pull('conversation_log', 'role, text, surface, created_at', 'created_at'),
+    pull(
+      'tm_audit_log',
+      'event_layer, event_kind, actor, summary, decision, action, result, severity, status, run_id, created_at',
+      'created_at',
+    ),
+    pull('manager_tasks', 'objective, assigned_function, status, terminal_outcome, created_at, completed_at', 'created_at'),
+    (async () => {
+      let q = client
+        .from('pipeline_steps')
+        .select('step_name, step_kind, error, status, started_at, run_id')
+        .eq('tenant_id', tenantId)
+        .not('error', 'is', null)
+      if (before) q = q.lt('started_at', before)
+      const { data } = await q.order('started_at', { ascending: false }).limit(Math.min(PAGE_SOURCE_LIMIT, limit))
+      return data ?? []
+    })(),
+    pull('pending_approvals', 'approval_type, summary, status, decision, requested_at, resolved_at', 'requested_at'),
+    pull('owner_comms_queue', 'kind, status, dropped_reason, queued_at, delivered_at, payload', 'queued_at'),
+    pull('incidents', 'incident_kind, severity, status, detail, created_at', 'created_at'),
+    pull('tenant_alerts', 'trigger_kind, severity, message_text, fired_at', 'fired_at'),
+  ])
+
+  const events = normalizeSources({ convo, audit, tasks, stepErrs, approvals, comms, incidents, alerts })
+  events.sort((a, b) => (a.ts > b.ts ? -1 : a.ts < b.ts ? 1 : 0)) // DESC — latest first
+  const page = events.slice(0, limit)
+  const last = page[page.length - 1]
+  const exhausted = events.length < limit
+  return { events: page, nextBefore: exhausted || !last ? null : String(last.ts) }
+}
+
+export interface FlowDayIndex {
+  /** year -> month(01-12) -> sorted-desc list of day strings (YYYY-MM-DD) */
+  years: Array<{ year: string; months: Array<{ month: string; days: string[] }> }>
+}
+
+/** The date-jump index — derived from the two dominant streams' timestamps (capped). */
+export async function fetchFlowDayIndex(
+  operator: OpsOperatorLike,
+  tenantId: string,
+  opts: { client?: Client } = {},
+): Promise<FlowDayIndex> {
+  const { assignedTenants } = operator
+  if (assignedTenants !== null && assignedTenants.length === 0) return { years: [] }
+  if (!canAccessTenant(assignedTenants, tenantId)) return { years: [] }
+  const client = opts.client ?? serverSecretClient()
+  const grabTs = async (table: string, tsCol: string): Promise<string[]> => {
+    const { data } = await client
+      .from(table)
+      .select(tsCol)
+      .eq('tenant_id', tenantId)
+      .order(tsCol, { ascending: false })
+      .limit(4000)
+    return (data ?? []).map((r: any) => String(r[tsCol]))
+  }
+  const [a, b] = await Promise.all([
+    grabTs('conversation_log', 'created_at'),
+    grabTs('tm_audit_log', 'created_at'),
+  ])
+  const days = [...new Set([...a, ...b].map((t) => t.slice(0, 10)))].sort().reverse()
+  const years: FlowDayIndex['years'] = []
+  for (const day of days) {
+    const y = day.slice(0, 4)
+    const m = day.slice(5, 7)
+    let yr = years[years.length - 1]
+    if (!yr || yr.year !== y) {
+      yr = { year: y, months: [] }
+      years.push(yr)
+    }
+    let mo = yr.months[yr.months.length - 1]
+    if (!mo || mo.month !== m) {
+      mo = { month: m, days: [] }
+      yr.months.push(mo)
+    }
+    mo.days.push(day)
+  }
+  return { years }
 }
 
 /** Group a sorted event list by UTC day for the day-header render. */

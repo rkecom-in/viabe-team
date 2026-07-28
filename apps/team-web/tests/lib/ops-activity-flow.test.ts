@@ -139,3 +139,70 @@ describe('groupByDay', () => {
     expect(days[1]!.events).toHaveLength(2)
   })
 })
+
+describe('VT-713 fetchFlowPage + day index', () => {
+  it('returns latest-first with a working older-than cursor', async () => {
+    const { fetchFlowPage } = await import('@/lib/ops/activity-flow')
+    const rows = Array.from({ length: 5 }, (_, i) => ({
+      role: 'owner', text: `m${i}`, surface: 'journey',
+      created_at: `2026-07-2${i}T10:00:00Z`,
+    }))
+    const client = {
+      from(table: string) {
+        const chain: any = {
+          _lt: null as string | null,
+          select() { return chain },
+          eq() { return chain },
+          lt(_c: string, v: string) { chain._lt = v; return chain },
+          not() { return chain },
+          order() { return chain },
+          limit() {
+            if (table !== 'conversation_log') return Promise.resolve({ data: [] })
+            const out = rows.filter((r) => (chain._lt ? r.created_at < chain._lt : true))
+            return Promise.resolve({ data: out })
+          },
+        }
+        return chain
+      },
+    }
+    const p1 = await fetchFlowPage({ role: 'vtadmin' as any, assignedTenants: null }, TID, {
+      client, limit: 20,
+    })
+    expect(p1.events.map((e) => e.body)).toEqual(['m4', 'm3', 'm2', 'm1', 'm0'])
+    expect(p1.nextBefore).toBeNull() // fewer than limit → exhausted
+
+    const p2 = await fetchFlowPage({ role: 'vtadmin' as any, assignedTenants: null }, TID, {
+      client, before: '2026-07-22T10:00:00Z', limit: 20,
+    })
+    expect(p2.events.map((e) => e.body)).toEqual(['m1', 'm0'])
+  })
+
+  it('fail-closes scoping like the rest of the layer', async () => {
+    const { fetchFlowPage, fetchFlowDayIndex } = await import('@/lib/ops/activity-flow')
+    const none = { role: 'vtr' as any, assignedTenants: [] }
+    expect((await fetchFlowPage(none, TID, { client: mockClient({}) })).events).toEqual([])
+    expect((await fetchFlowDayIndex(none, TID, { client: mockClient({}) })).years).toEqual([])
+  })
+
+  it('builds a desc year/month/day index', async () => {
+    const { fetchFlowDayIndex } = await import('@/lib/ops/activity-flow')
+    const client = {
+      from(table: string) {
+        const chain: any = {
+          select() { return chain }, eq() { return chain }, order() { return chain },
+          limit() {
+            const ts = table === 'conversation_log'
+              ? ['2026-07-20T10:00:00Z', '2026-07-19T09:00:00Z', '2025-12-31T08:00:00Z']
+              : ['2026-06-01T08:00:00Z', '2026-07-20T11:00:00Z']
+            return Promise.resolve({ data: ts.map((t) => ({ created_at: t })) })
+          },
+        }
+        return chain
+      },
+    }
+    const idx = await fetchFlowDayIndex({ role: 'vtadmin' as any, assignedTenants: null }, TID, { client })
+    expect(idx.years.map((y) => y.year)).toEqual(['2026', '2025'])
+    expect(idx.years[0]!.months.map((m) => m.month)).toEqual(['07', '06'])
+    expect(idx.years[0]!.months[0]!.days).toEqual(['2026-07-20', '2026-07-19'])
+  })
+})
