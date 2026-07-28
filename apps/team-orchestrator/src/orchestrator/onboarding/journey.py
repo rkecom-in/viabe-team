@@ -2765,6 +2765,26 @@ def _run_turn_brain_and_send(
     return r
 
 
+def present_first_question(tenant_id: UUID | str, recipient: str | None, *, lang: str = "en") -> bool:
+    """VT-716b (Fazal, run-6 console review: the welcome and the first question must read as
+    ONE person) — present the seeded queue's first question DETERMINISTICALLY as a
+    continuation of the welcome. No LLM, no synthetic 'complete setup' owner turn (that fake
+    request is what made the brain open with 'Sure, let's get you set up!' and re-greet).
+    The welcome already says 'a few quick questions' — this just asks the first one."""
+    try:
+        g = get_journey(tenant_id)
+        if g is None or g.get("status") != "active":
+            return False
+        q = _current(g)
+        if q is None:
+            return False
+        _send(recipient, q, lang, tenant_id=tenant_id)
+        return True
+    except Exception:  # noqa: BLE001 — the next owner reply re-enters the journey gate anyway
+        logger.warning("journey: present_first_question failed (fail-soft) tenant=%s", tenant_id)
+        return False
+
+
 def maybe_handle_journey_reply(
     tenant_id: UUID | str, body: str, message_sid: str | None, recipient: str | None, *, lang: str = "en"
 ) -> dict[str, Any] | None:

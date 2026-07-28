@@ -121,3 +121,29 @@ def test_prompt_carries_continuation_rule() -> None:
     src = inspect.getsource(tb)
     assert "ONE CONTINUOUS MANAGER" in src
     assert "never re-greet" in src
+
+
+def test_present_first_question_is_deterministic_continuation(monkeypatch) -> None:
+    """VT-716b: the kickoff presents the seeded first question via the walker send — no LLM,
+    no synthetic owner turn."""
+    sent = {}
+    monkeypatch.setattr(
+        j, "get_journey",
+        lambda t: {"status": "active", "cursor": 0,
+                   "question_queue": [{"field": "business_name", "kind": "gap",
+                                       "prompt_en": "What's your business called?", "prompt_hi": "?"}],
+                   "answers": {}, "skipped": []},
+    )
+    monkeypatch.setattr(j, "_send", lambda recipient, q, lang, *, tenant_id=None: sent.update(q=q))
+    assert j.present_first_question(_TID, "+919999007001") is True
+    assert sent["q"]["prompt_en"] == "What's your business called?"
+
+
+def test_signup_kickoff_has_no_synthetic_owner_turn() -> None:
+    import inspect
+
+    from orchestrator.onboarding import whatsapp_signup as ws
+
+    src = inspect.getsource(ws.handle_unknown_inbound)
+    assert '"complete setup"' not in src, "the fake owner request is gone"
+    assert "present_first_question" in src

@@ -20,7 +20,7 @@ Flow (consent-gated, DPDP — the gates here never bend):
      capture posture (finite exact-match outcomes only, per the no-keyword-lists rule).
   3. consent → ``signup.create_whatsapp_signup_tenant`` (consent proof + trial; NO OTP — the
      WhatsApp inbound is already Meta-phone-verified; ``created_via='whatsapp'``) → the
-     onboarding journey kicks off in-session via the proven ``"complete setup"`` token path
+     onboarding journey kicks off in-session by presenting the first seeded question deterministically (VT-716b — no synthetic owner turn)
      and collects the business details the public page asks.
 
 Abuse gates: the whole path is behind ``ENABLE_WHATSAPP_SIGNUP`` (default OFF — unknown_sender
@@ -397,11 +397,11 @@ def handle_unknown_inbound(phone_e164: str, body: str, message_sid: str | None) 
             # Start the journey with the SEEDED from-scratch queue (finding A: without a row +
             # a non-empty queue, the draft-gated lazy-fill never asks anything), then kick the
             # first question through the SAME proven path the welcome button uses (the exact
-            # "complete setup" kickoff token). Fail-open like the journey itself.
+            # first seeded question presented deterministically). Fail-open like the journey itself.
             try:
                 from orchestrator.onboarding.journey import (
                     get_journey,
-                    maybe_handle_journey_reply,
+                    present_first_question,
                     start_journey,
                 )
 
@@ -410,9 +410,10 @@ def handle_unknown_inbound(phone_e164: str, body: str, message_sid: str | None) 
                 # start_journey RESETS an existing row, which would wipe real progress.
                 if res.created or get_journey(res.tenant_id) is None:
                     start_journey(res.tenant_id, from_scratch_question_queue())
-                maybe_handle_journey_reply(
-                    res.tenant_id, "complete setup", message_sid, phone_e164
-                )
+                # VT-716b — NO synthetic 'complete setup' owner turn (it made the next message
+                # open with 'Sure…' + re-greet, reading as a second person). The first question
+                # is presented deterministically as the welcome's continuation.
+                present_first_question(res.tenant_id, phone_e164)
             except Exception:  # noqa: BLE001 — the next owner reply re-enters the journey gate
                 logger.warning(
                     "whatsapp_signup: journey start/kickoff failed (next reply re-enters) "
