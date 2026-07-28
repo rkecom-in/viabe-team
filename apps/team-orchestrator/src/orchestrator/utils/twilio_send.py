@@ -22,6 +22,10 @@ import json
 import logging
 import os
 import re
+import threading
+import time
+import unicodedata
+from collections import OrderedDict, deque
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -411,6 +415,188 @@ def _owner_template_whitelist_action(template_name: str, audience: str) -> str:
     return "block" if template_whitelist_enforce_enabled() else "shadow"
 
 
+# --- VT-718 S2: the single OWNER emission choke (CL-2026-07-28-single-voice-manager) ------------
+#
+# The Manager is ONE entity — it must never say the same thing twice with no owner turn between
+# (the run-6 completion-boundary double-reply class). The transport is the single physical funnel
+# every owner-bound send passes through (the only module that constructs the Twilio client), so
+# the choke lives HERE: every existing and every FUTURE owner send is guarded automatically, with
+# no caller migration and no bypassable wrapper. Mirrors the two sibling chokes above
+# (customer_send_context, the VT-683 whitelist): shadow-first, suppress-only, fail-open.
+#
+# SUPPRESSION RULE — an owner-bound send is a duplicate iff a prior outbound to the SAME recipient
+# within _EMISSION_WINDOW_S has the SAME normalized body AND no owner inbound arrived after that
+# prior send. The inbound condition is what keeps legitimate verbatim re-asks alive: a re-present
+# after an invalid answer always follows an owner turn; the double-reply disease is the Manager
+# speaking twice into silence.
+#
+# Two layers: L1 = per-recipient in-process ring (catches the seconds-apart burst class, works
+# tenant-blind, zero DB cost); L2 = conversation_log within-window check (cross-restart, only when
+# the caller supplied a tenant). The choke can only SUPPRESS — never create, reorder, or approve a
+# send; the customer choke and every effect gate upstream are untouched (ARCHITECTURE §0.1.1).
+#
+# TEMPLATE sends are deliberately NOT deduped: the whitelisted owner templates carry effectful
+# asks (approvals), and two DISTINCT asks via the same template with no owner reply between are
+# legitimate — suppressing an approval ask is the worst possible failure class for this guard.
+# The double-reply disease lives in the freeform/interactive session voice; that is what's choked.
+
+_EMISSION_WINDOW_S = 180.0  # matches the VT-716 typed-twice guard window
+_EMISSION_RING = 8  # outbound bodies remembered per recipient
+_EMISSION_CACHE_MAX = 512  # recipients tracked (LRU-bounded)
+
+#: Sentinel SID returned by freeform/interactive when ENFORCE suppresses a duplicate. Truthy and
+#: str so every caller's "sid = send_…" bookkeeping works unchanged; never a real Twilio SID.
+CHOKE_SUPPRESSED_SID = "choke-suppressed"
+
+#: SendResult.error_code when ENFORCE suppresses a duplicate template send (success stays True —
+#: the conversation state is exactly as if the send landed, because its twin already did).
+EMISSION_SUPPRESSED = "emission_suppressed"
+
+
+class _RecipientEmissions:
+    """Per-recipient outbound ring + the last-inbound marker. Process-local, lock-guarded."""
+
+    __slots__ = ("outbound", "last_inbound_ts")
+
+    def __init__(self) -> None:
+        self.outbound: deque[tuple[float, str]] = deque(maxlen=_EMISSION_RING)
+        self.last_inbound_ts: float = 0.0
+
+
+_emission_lock = threading.Lock()
+_emission_cache: OrderedDict[str, _RecipientEmissions] = OrderedDict()
+
+
+def _emission_normalize(body: str) -> str:
+    """The dedup identity of an outbound body: NFC, casefold, whitespace/punct collapsed, 200-char
+    head — the VT-716 typed-twice normalizer shape, so both guards agree on what "the same" means."""
+    norm = unicodedata.normalize("NFC", (body or "").strip().casefold())
+    norm = norm.replace("'", "").replace("’", "").replace("‘", "")  # what's == whats (house pattern)
+    norm = re.sub(r"[\s,.!?;:।/\\\-–—\"“”*_()]+", " ", norm).strip()
+    return norm[:200]
+
+
+def _emission_entry(recipient_token: str) -> _RecipientEmissions:
+    """Fetch-or-create the LRU entry for a recipient. Caller holds ``_emission_lock``."""
+    entry = _emission_cache.get(recipient_token)
+    if entry is None:
+        entry = _RecipientEmissions()
+        _emission_cache[recipient_token] = entry
+    _emission_cache.move_to_end(recipient_token)
+    while len(_emission_cache) > _EMISSION_CACHE_MAX:
+        _emission_cache.popitem(last=False)
+    return entry
+
+
+def note_owner_inbound(sender_phone: str) -> None:
+    """Mark an owner INBOUND for the choke's no-inbound-between rule (called from the runner's
+    early inbound record + the pre-tenant signup entry). Fail-soft, never raises."""
+    try:
+        if not sender_phone:
+            return
+        token = hash_phone(sender_phone)
+        with _emission_lock:
+            _emission_entry(token).last_inbound_ts = time.monotonic()
+    except Exception:  # noqa: BLE001 — a marker miss only weakens dedup, never a send
+        logger.debug("emission-choke: inbound marker failed (fail-soft)", exc_info=True)
+
+
+def _l1_dupe(recipient_token: str, norm: str, now: float) -> bool:
+    """L1 CHECK ONLY: same normalized body to the same recipient within the window, with no
+    inbound after that prior send. Recording is separate (``_note_owner_emission``, post-success)
+    so a FAILED attempt never poisons the ring — the fallback ladders (interactive → freeform with
+    the same text) must always be free to resend what never actually went out."""
+    with _emission_lock:
+        entry = _emission_entry(recipient_token)
+        return any(
+            prior_norm == norm
+            and (now - prior_ts) <= _EMISSION_WINDOW_S
+            and entry.last_inbound_ts <= prior_ts
+            for prior_ts, prior_norm in entry.outbound
+        )
+
+
+def _note_owner_emission(recipient_token: str, body: str) -> None:
+    """Record a SUCCESSFUL owner send into the L1 ring. Called only after Twilio accepted the
+    message (mode off records nothing — byte-identical). Fail-soft."""
+    try:
+        from orchestrator.feature_flags import owner_emission_choke_mode
+
+        if owner_emission_choke_mode() == "off":
+            return
+        norm = _emission_normalize(body)
+        if not norm:
+            return
+        with _emission_lock:
+            _emission_entry(recipient_token).outbound.append((time.monotonic(), norm))
+    except Exception:  # noqa: BLE001 — ring bookkeeping is never worth a send failure
+        logger.debug("emission-choke: emission record failed (fail-soft)", exc_info=True)
+
+
+def _l2_dupe(tenant_id: UUID | str, norm: str) -> bool:
+    """L2: the same rule against conversation_log (cross-restart). Fail-OPEN — a memory read must
+    never block a send."""
+    try:
+        from orchestrator.conversation_log import active_window
+
+        turns = active_window(tenant_id, max_turns=12, max_age_h=1)
+        now_utc = datetime.now(UTC)
+        match_at = None
+        for t in turns:  # chronological
+            created = t.get("created_at")
+            if created is None:
+                continue
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=UTC)
+            age = (now_utc - created).total_seconds()
+            if t.get("role") == "owner":
+                match_at = None  # an owner turn clears any earlier match — they spoke since
+            elif (
+                t.get("role") == "assistant"
+                and 0 <= age <= _EMISSION_WINDOW_S
+                and _emission_normalize(str(t.get("text") or "")) == norm
+            ):
+                match_at = created
+        return match_at is not None
+    except Exception:  # noqa: BLE001 — fail-open: dedup is advisory to the voice, never a gate
+        logger.warning("emission-choke: L2 window read failed (fail-open)", exc_info=True)
+        return False
+
+
+def _owner_emission_guard(
+    recipient_token: str, body: str, *, tenant_id: UUID | str | None, surface: str
+) -> bool:
+    """The S2 choke decision for one owner-bound send. Returns True iff the send must be
+    SUPPRESSED (mode=enforce and the suppression rule matched). Shadow logs and sends normally.
+    Off is byte-identical (nothing recorded, nothing read)."""
+    from orchestrator.feature_flags import owner_emission_choke_mode
+
+    mode = owner_emission_choke_mode()
+    if mode == "off":
+        return False
+    norm = _emission_normalize(body)
+    if not norm:
+        return False
+    dupe = _l1_dupe(recipient_token, norm, time.monotonic())
+    if not dupe and tenant_id is not None:
+        dupe = _l2_dupe(tenant_id, norm)
+    if not dupe:
+        return False
+    if mode == "shadow":
+        logger.warning(
+            "emission-choke SHADOW: would suppress duplicate owner send -> %s surface=%s",
+            recipient_token,
+            surface,
+        )
+        return False
+    logger.warning(
+        "emission-choke ENFORCE: suppressed duplicate owner send -> %s surface=%s",
+        recipient_token,
+        surface,
+    )
+    return True
+
+
 @DBOS.step()
 def send_template_message(
     tenant_id: UUID,
@@ -620,6 +806,7 @@ def send_freeform_message(
     tenant_id: UUID | str | None = None,
     surface: str = "manager",
     media_urls: list[str] | None = None,
+    record_turn: bool = True,
 ) -> str:
     """Send a free-form WhatsApp message via Twilio (VT-44).
 
@@ -649,6 +836,13 @@ def send_freeform_message(
         template_name="<freeform_session>",
         recipient_token=recipient_token,
     )
+    # VT-718 S2: the owner emission choke — suppress a duplicate owner send (enforce) rather than
+    # double-speak. Returns a sentinel sid; never raises (a raise would trigger the callers'
+    # freeform-fallback ladders and resend the very text being suppressed).
+    if not is_customer_session and _owner_emission_guard(
+        recipient_token, body, tenant_id=tenant_id, surface=surface
+    ):
+        return CHOKE_SUPPRESSED_SID
     logger.info(
         "twilio-send: freeform -> %s body_len=%d media=%d",
         recipient_token,
@@ -680,11 +874,15 @@ def send_freeform_message(
         recipient_token,
         message.sid,
     )
-    # VT-579: record the OWNER freeform send (the 'assistant' leg) — verbatim body IS the conversation.
-    # Only when the caller supplies a tenant (freeform transport is tenant-blind); customer session sends
-    # (is_customer_session=True) are excluded. Journey passes NO tenant_id (it double-writes via
-    # _append_recent_turns), so its questions never double-log here.
     if not is_customer_session:
+        # VT-718: remember the successful send for the dedup ring (never the failed attempts —
+        # the fallback ladders must stay free to resend what never went out).
+        _note_owner_emission(recipient_token, body)
+    # VT-579: record the OWNER freeform send (the 'assistant' leg) — verbatim body IS the conversation.
+    # Only when the caller supplies a tenant; customer session sends (is_customer_session=True) are
+    # excluded. VT-718: ``record_turn=False`` lets a caller with its OWN recorder (the journey
+    # turn-brain path via _append_recent_turns) supply the tenant for dedup without double-logging.
+    if not is_customer_session and record_turn:
         _record_owner_conversation_turn(tenant_id, body, message_sid=message.sid, surface=surface)
     return message.sid
 
@@ -697,6 +895,7 @@ def send_interactive_message(
     is_customer_session: bool = False,
     tenant_id: UUID | str | None = None,
     surface: str = "manager",
+    record_turn: bool = True,
 ) -> str:
     """Send an interactive WhatsApp message (quick-reply buttons / list-picker / card) IN-SESSION (VT-479).
 
@@ -723,6 +922,16 @@ def send_interactive_message(
         template_name="<interactive_session>",
         recipient_token=recipient_token,
     )
+    # VT-718 S2: owner emission choke. The dedup identity is the visible prompt text (the "1"
+    # variable — the journey/owner-question pattern); a text-less interactive keys on the content
+    # object + its variables so an identical card double-fire is still caught.
+    _dedup_body = str((content_variables or {}).get("1") or "") or (
+        f"[content:{content_sid}]{json.dumps(content_variables or {}, sort_keys=True)}"
+    )
+    if not is_customer_session and _owner_emission_guard(
+        recipient_token, _dedup_body, tenant_id=tenant_id, surface=surface
+    ):
+        return CHOKE_SUPPRESSED_SID
     create_kwargs: dict[str, Any] = {
         "content_sid": content_sid,
         "from_": _wa(os.environ["TEAM_TWILIO_FROM_NUMBER"], role="sender"),
@@ -741,11 +950,14 @@ def send_interactive_message(
         recipient_token,
         message.sid,
     )
+    if not is_customer_session:
+        # VT-718: successful-send dedup record (same identity the guard checked).
+        _note_owner_emission(recipient_token, _dedup_body)
     # VT-579: record the OWNER interactive send (the 'assistant' leg). The visible prompt text rides in
     # content_variables["1"] (the journey/owner-question pattern); record that. Only when a tenant is
-    # supplied + it is an owner send (is_customer_session=False). Journey passes NO tenant_id (double-
-    # writes via _append), so its interactive questions never double-log here.
-    if not is_customer_session:
+    # supplied + it is an owner send (is_customer_session=False). VT-718: ``record_turn=False`` for
+    # callers with their own recorder (journey), so they can supply the tenant without double-logging.
+    if not is_customer_session and record_turn:
         _record_owner_conversation_turn(
             tenant_id,
             str((content_variables or {}).get("1") or ""),

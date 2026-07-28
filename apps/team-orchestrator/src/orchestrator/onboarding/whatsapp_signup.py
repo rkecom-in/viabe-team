@@ -329,6 +329,11 @@ def handle_unknown_inbound(phone_e164: str, body: str, message_sid: str | None) 
     or crash the workflow into retry-spam)."""
     token = hash_phone(phone_e164)
     try:
+        # VT-718 S2: mark the pre-tenant inbound for the emission choke (L1 is tenant-blind, so
+        # the signup surface gets the no-inbound-between dedup rule too). Fail-soft inside.
+        from orchestrator.utils.twilio_send import note_owner_inbound
+
+        note_owner_inbound(phone_e164)
         try:
             purged = purge_stale()
             if purged:

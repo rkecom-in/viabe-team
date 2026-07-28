@@ -50,3 +50,13 @@ def template_whitelist_enforce_enabled() -> bool:
     (Fazal graduation). Customer-audience templates are never subject to this gate (they have their
     own customer_send_context choke)."""
     return _on("TEAM_TEMPLATE_WHITELIST_ENFORCE")
+
+
+def owner_emission_choke_mode() -> str:
+    """VT-718 S2 (CL-2026-07-28-single-voice-manager) — the single OWNER emission choke mode:
+    ``'off'`` (default; byte-identical) | ``'shadow'`` (log "would suppress", send normally) |
+    ``'enforce'`` (suppress the duplicate send). Governs the VOICE only — it can only SUPPRESS an
+    owner-bound send, never create, approve, or relax anything; the customer choke and every
+    effect gate (consent/opt-out/approval/money) are untouched upstream. Prod flip is Fazal-only."""
+    v = os.environ.get("TEAM_OWNER_EMISSION_CHOKE", "").strip().lower()
+    return v if v in {"shadow", "enforce"} else "off"

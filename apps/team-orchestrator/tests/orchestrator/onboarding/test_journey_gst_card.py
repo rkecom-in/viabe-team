@@ -44,10 +44,10 @@ def _wire(monkeypatch, *, sids=None, raise_send=False):
         table = sids
     monkeypatch.setattr(tr, "content_sid_for", lambda name, lang="en": table.get(name))
 
-    def _send(sid, phone, *, content_variables=None, tenant_id=None, surface=None):
+    def _send(sid, phone, *, content_variables=None, tenant_id=None, surface=None, record_turn=True):
         if raise_send:
             raise RuntimeError("transport down")
-        sent.update({"sid": sid, "vars": content_variables})
+        sent.update({"sid": sid, "vars": content_variables, "record_turn": record_turn})
         return "MKDEVx"
 
     monkeypatch.setattr(ts, "send_interactive_message", _send)
