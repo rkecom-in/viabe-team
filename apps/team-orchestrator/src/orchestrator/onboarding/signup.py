@@ -93,6 +93,18 @@ def _disclosure_versions() -> tuple[str, str]:
     return cfg["dpdpa"]["current"], cfg["residency"]["current"]
 
 
+def _fire_consent_record_email(tenant_id, *, channel: str) -> None:
+    """VT-715 (Fazal: every DPDP consent — UI or WhatsApp — gets an email record). Fail-soft;
+    with no owner_email yet (every WhatsApp signup today) the record stays PENDING and fires
+    when an email is captured (send_pending_consent_record)."""
+    try:
+        from orchestrator.onboarding.consent_record_email import send_consent_record_email
+
+        send_consent_record_email(tenant_id, channel=channel)
+    except Exception:  # noqa: BLE001 — the record email never gates the signup
+        logger.warning("consent record email hook failed (fail-soft) tenant=%s", tenant_id)
+
+
 def create_signup_tenant(
     *,
     business_name: str,
@@ -225,6 +237,7 @@ def create_signup_tenant(
             plan_tier = "founding"
 
     drain_kg_events(tid)
+    _fire_consent_record_email(tid, channel="web signup form (UI)")
     return SignupResult(
         tenant_id=tid, created=True, plan_tier=plan_tier, city_tier=city_tier
     )
@@ -315,6 +328,7 @@ def create_whatsapp_signup_tenant(
             plan_tier = "founding"
 
     drain_kg_events(tid)
+    _fire_consent_record_email(tid, channel="WhatsApp 'I agree' button")
     return SignupResult(tenant_id=tid, created=True, plan_tier=plan_tier, city_tier=None)
 
 
