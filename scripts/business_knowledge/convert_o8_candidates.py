@@ -2,10 +2,10 @@
 """Convert the audited 118-card archive into inert O8 candidate artifacts (VT-710).
 
 This is a deterministic migration utility, not the retired L4 loader. It performs a complete
-source-level rights inventory before invoking the ingestion pipeline for any card. Public access is
-not treated as a licence: only locally-authored synthesis receives owner-granted content-use rights;
-the five audit-identified live links remain ``live_link_only`` and all unverified third-party rights
-remain ``unknown``. Every output card is candidate/research-only and retrieval-ineligible.
+source-governance inventory before invoking the ingestion pipeline for any card. Rights metadata is
+retained for source handling and provenance, but never gates independently authored claims. The
+replacement gate rejects verbatim/near-verbatim source expression. Every output card remains
+candidate/research-only and retrieval-ineligible until accuracy/value/impact admission succeeds.
 """
 
 from __future__ import annotations
@@ -13,9 +13,12 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import subprocess
 import sys
 from collections import Counter, defaultdict
 from datetime import UTC, datetime
+from functools import lru_cache
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlparse
@@ -51,7 +54,9 @@ from orchestrator.knowledge.ingestion import (  # noqa: E402
     SourceRightsDecision,
 )
 
-INPUT = REPO_ROOT / "archives/business-knowledge/extracted/scenario_cards/executional_scenarios.jsonl"
+INPUT = (
+    REPO_ROOT / "archives/business-knowledge/extracted/scenario_cards/executional_scenarios.jsonl"
+)
 HISTORICAL_MANIFEST = (
     REPO_ROOT / "archives/business-knowledge/research/HISTORICAL_BUSINESS_CASES_SOURCE_MANIFEST.csv"
 )
@@ -61,6 +66,8 @@ CANDIDATE_OUTPUT = OUTPUT_DIR / "candidate_cards.jsonl"
 REPORT_OUTPUT = OUTPUT_DIR / "CONVERSION_REPORT.md"
 
 REVIEWED_AT = datetime(2026, 7, 27, 12, 0, tzinfo=UTC)
+# Operational review trigger only, not a legal conclusion or admission gate.
+COMPILATION_CONCENTRATION_REVIEW_SHARE = 0.10
 DOMAIN_MAP = {
     "manager_coo": KnowledgeDomain.MANAGEMENT,
     "sales": KnowledgeDomain.SALES,
@@ -115,6 +122,55 @@ class ArchiveReferenceQuarantine:
             content_hash=content_hash,
             acquired_at=source.acquired_at,
         )
+
+
+class _VisibleTextParser(HTMLParser):
+    """Small deterministic HTML-to-text parser used only for originality comparison."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+        self._suppressed_depth = 0
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        del attrs
+        if tag.casefold() in {"script", "style", "noscript", "svg"}:
+            self._suppressed_depth += 1
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.casefold() in {"script", "style", "noscript", "svg"}:
+            self._suppressed_depth = max(0, self._suppressed_depth - 1)
+
+    def handle_data(self, data: str) -> None:
+        if not self._suppressed_depth and data.strip():
+            self.parts.append(data)
+
+
+@lru_cache(maxsize=None)
+def _source_expression_text(relative_path: str) -> str | None:
+    """Extract local source expression without copying it into tracked artifacts."""
+
+    path = REPO_ROOT / relative_path
+    suffix = path.suffix.casefold()
+    if suffix in {".html", ".htm"}:
+        parser = _VisibleTextParser()
+        parser.feed(path.read_text(encoding="utf-8", errors="replace"))
+        text = "\n".join(parser.parts)
+    elif suffix == ".pdf":
+        try:
+            completed = subprocess.run(  # noqa: S603 - fixed local executable and local file
+                ["pdftotext", "-layout", str(path), "-"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except FileNotFoundError as exc:
+            raise RuntimeError("pdftotext is required for the corpus originality pass") from exc
+        text = completed.stdout
+    else:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    normalized = " ".join(text.split())
+    return normalized if len(normalized.split()) >= 12 else None
 
 
 def _read_cards() -> list[dict[str, Any]]:
@@ -228,9 +284,7 @@ def _publisher(url: str) -> str:
     return urlparse(url).hostname or "RKECOM local synthesis"
 
 
-def _source_inventory_hash(
-    source_url: str, source_cards: list[dict[str, Any]]
-) -> tuple[str, str]:
+def _source_inventory_hash(source_url: str, source_cards: list[dict[str, Any]]) -> tuple[str, str]:
     parts = [f"url:{source_url}"]
     archived = 0
     for relative in sorted({str(card["local_file"]) for card in source_cards}):
@@ -303,17 +357,18 @@ def _build_source_inventory(
             )
             for card in source_cards
         )
-        rights = _rights_for_source(
-            is_local_owned=is_local_owned, live_link_only=case_live_link
-        )
+        rights = _rights_for_source(is_local_owned=is_local_owned, live_link_only=case_live_link)
         acquired_at = min(
             datetime.fromisoformat(f"{card['retrieved_at']}T00:00:00+00:00")
             for card in source_cards
         )
         content_hash, hash_basis = _source_inventory_hash(source_url, source_cards)
+        source_share = len(source_cards) / len(cards)
+        concentration_flag = source_share >= COMPILATION_CONCENTRATION_REVIEW_SHARE
         decision = SourceRightsDecision(
             source_class=source_class,
             usage_rights=rights,
+            compilation_concentration=concentration_flag,
         )
         decisions[source_id] = decision
         rows.append(
@@ -331,12 +386,18 @@ def _build_source_inventory(
                 "usage_rights": rights.model_dump(mode="json"),
                 "retention_class": "lifecycle_managed",
                 "tainted": True,
+                "source_card_count": len(source_cards),
+                "source_card_share": round(source_share, 6),
+                "contractual_extraction_restriction": False,
+                "paywall_access_circumvented": False,
+                "compilation_concentration_review": concentration_flag,
                 "expires_at": (
                     _add_six_months(acquired_at).isoformat().replace("+00:00", "Z")
                     if source_class is SourceClass.T4_EXPERIENTIAL
                     else None
                 ),
                 "rights_pass_completed_before_conversion": True,
+                "source_governance_pass_completed_before_conversion": True,
             }
         )
     return rows, decisions
@@ -351,7 +412,7 @@ def convert() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     if len(live_link_ids) != 5:
         raise ValueError("historical source manifest must contain exactly five live-link cards")
 
-    # The entire rights inventory is completed and cardinality-checked before card 1 is converted.
+    # The entire source-governance inventory is completed before card 1 is converted.
     rights_rows, decisions = _build_source_inventory(cards, live_link_ids)
     if len(rights_rows) != len({str(card["source_url"]) for card in cards}):
         raise ValueError("rights inventory does not cover every unique source")
@@ -379,10 +440,24 @@ def convert() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
             jurisdictions=_jurisdiction(card, source_decision.source_class),
             channels=_channels(card),
             effective_from=(
-                retrieved_at
-                if source_decision.source_class is SourceClass.T1_REGULATORY
-                else None
+                retrieved_at if source_decision.source_class is SourceClass.T1_REGULATORY else None
             ),
+        )
+        live_link_only = source_decision.usage_rights.status is UsageRightsStatus.LIVE_LINK_ONLY
+        is_local_owned = source_url.startswith("archives/business-knowledge/")
+        expression_reference = (
+            None
+            if live_link_only or is_local_owned
+            else _source_expression_text(str(card["local_file"]))
+        )
+        originality_attestor = (
+            "corpus-author:vt710-live-link-originality"
+            if live_link_only
+            else "rkecom-source-owner:vt710-original-synthesis"
+            if is_local_owned
+            else "corpus-author:vt710-source-snapshot-unavailable"
+            if expression_reference is None
+            else None
         )
         candidate = pipeline.ingest(
             AcquiredSource(
@@ -393,6 +468,8 @@ def convert() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
                 raw_text=raw_text,
                 locator=f"{INPUT.relative_to(REPO_ROOT)}#line={line_number}",
                 content_kind=AcquiredContentKind.OWNED_DISTILLATION,
+                expression_reference_text=expression_reference,
+                expression_originality_attested_by=(originality_attestor),
             ),
             governance=CandidateGovernance(
                 domain=_domain(card),
@@ -411,10 +488,11 @@ def convert() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
             card_version_id=str(uuid5(NAMESPACE_URL, f"viabe:o8:card-version:{legacy_id}:1")),
         )
         warnings: list[str] = []
-        if candidate.embedding_state.value == "rights_blocked":
-            warnings.append("rights_blocked_no_embedding_or_retrieval")
-        elif candidate.embedding_state.value == "pending":
+        if candidate.embedding_state.value == "pending":
             warnings.append("embedding_deferred_until_authorized_egress")
+        if "expression_originality_attested" in candidate.pipeline_steps:
+            warnings.append("originality_attestation_only_recheck_at_admission")
+        warnings.extend(flag.value for flag in candidate.review_flags)
         if candidate.card.source_class is SourceClass.T1_REGULATORY:
             warnings.append("effective_from_is_observation_date_pending_authoritative_review")
         candidates.append(
@@ -428,6 +506,8 @@ def convert() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
                 "quarantine_ref": candidate.quarantine_ref,
                 "embedding_state": candidate.embedding_state.value,
                 "pipeline_steps": list(candidate.pipeline_steps),
+                "review_flags": [flag.value for flag in candidate.review_flags],
+                "expression_originality": candidate.expression_originality.model_dump(mode="json"),
                 "conversion_warnings": warnings,
             }
         )
@@ -436,9 +516,7 @@ def convert() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     return rights_rows, candidates
 
 
-def _write_outputs(
-    rights_rows: list[dict[str, Any]], candidates: list[dict[str, Any]]
-) -> None:
+def _write_outputs(rights_rows: list[dict[str, Any]], candidates: list[dict[str, Any]]) -> None:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     RIGHTS_OUTPUT.write_text(
         "".join(json.dumps(row, sort_keys=True) + "\n" for row in rights_rows),
@@ -451,22 +529,38 @@ def _write_outputs(
     rights_counts = Counter(row["usage_rights"]["status"] for row in rights_rows)  # type: ignore[index]
     card_statuses = Counter(row["card"]["status"] for row in candidates)  # type: ignore[index]
     embedding_states = Counter(str(row["embedding_state"]) for row in candidates)
+    originality_checks = Counter(str(row["expression_originality"]["mode"]) for row in candidates)
+    originality_attestors = Counter(
+        str(row["expression_originality"]["attested_by"])
+        for row in candidates
+        if row["expression_originality"]["mode"] == "attested"
+    )
+    max_source = max(rights_rows, key=lambda row: int(row["source_card_count"]))
     report = f"""# VT-710 O8 corpus conversion report
 
 Generated deterministically from `executional_scenarios.jsonl` on 2026-07-27.
 
 - Input cards: **{len(candidates)}**
-- Unique source-rights records: **{len(rights_rows)}**
+- Unique source-governance records: **{len(rights_rows)}**
 - Rights statuses: `{dict(sorted(rights_counts.items()))}`
 - Card statuses: `{dict(sorted(card_statuses.items()))}`
 - Embedding states: `{dict(sorted(embedding_states.items()))}`
-- Retrieval-eligible cards: **{sum(bool(row['card']['retrieval_eligible']) for row in candidates)}**
+- Expression-originality evidence: `{dict(sorted(originality_checks.items()))}`
+- Originality attestations: `{dict(sorted(originality_attestors.items()))}`
+- Retrieval-eligible cards: **{sum(bool(row["card"]["retrieval_eligible"]) for row in candidates)}**
+- Largest single-source contribution: **{max_source["source_card_count"]} cards
+  ({float(max_source["source_card_share"]):.2%})**
+- Compilation-concentration review trigger: **{COMPILATION_CONCENTRATION_REVIEW_SHARE:.0%}**
 
-The rights inventory was completed before conversion began. Public accessibility was not treated
-as a licence. Third-party sources without an explicit grant remain `unknown`; the five audited
-unarchived sources remain `live_link_only`. Only RKECOM-authored local synthesis has
-`permission_granted`, and its embedding remains deferred because VT-710 has no egress authority.
-All cards remain candidate/research-only and are consumed by no live route.
+The source-governance inventory was completed before conversion began. Rights status remains an
+honest record about handling the source reproduction: 96 records remain `unknown` and five remain
+`live_link_only`. Under CL-2026-07-29b it does not block embedding or claim retrieval. Locally
+available sources were checked for verbatim/near-verbatim expression. Five live-link inputs, seven
+RKECOM-authored cards and one archived snapshot without enough visible source text carry distinct,
+attributable originality attestations for admission review. Contractual
+extraction restrictions and compilation concentration are non-blocking review flags; paywall
+access circumvention is excluded outright. Embedding remains deferred only because VT-710 has no
+egress authority. All cards remain candidate/research-only and are consumed by no live route.
 
 Claim keys use the audited primary topic plus normalized hard-gate mechanism, jurisdiction,
 population and channel. They are deterministic candidate keys, not a human finding that two cards
