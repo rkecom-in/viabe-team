@@ -15,9 +15,11 @@ from orchestrator.agent_framework.retrieval_profiles import (  # noqa: E402
     specialist_retrieval_profile,
 )
 from orchestrator.knowledge.card_retrieval import (  # noqa: E402
+    CardAssignmentOverride,
     CardRegistryBrokerAdapter,
     CardRetrievalEngine,
     CardRetrievalPolicyError,
+    CardRetrievalResult,
     RetrievalBusinessContext,
 )
 from orchestrator.knowledge.contracts import (  # noqa: E402
@@ -28,6 +30,7 @@ from orchestrator.knowledge.contracts import (  # noqa: E402
     EvidenceAuthority,
     EvidenceConfidence,
     KnowledgeCard,
+    KnowledgeBundle,
     KnowledgeDomain,
     KnowledgeLayer,
     KnowledgeQuery,
@@ -38,6 +41,10 @@ from orchestrator.knowledge.contracts import (  # noqa: E402
     TypedClaimValue,
     UsageRights,
     UsageRightsStatus,
+)
+from orchestrator.knowledge_contracts import (  # noqa: E402
+    KNOWLEDGE_RETRIEVAL_AUTHORIZES_EFFECTS,
+    KnowledgeAssignmentScope,
 )
 
 NOW = datetime(2026, 7, 27, 12, 0, tzinfo=UTC)
@@ -77,6 +84,7 @@ def card(
     retrieval_eligible: bool = True,
     expires_at: datetime | None = None,
     retrieved_at: datetime | None = None,
+    default_assignment: str = "specialist:sales_recovery_agent",
 ) -> KnowledgeCard:
     return KnowledgeCard(
         card_id=f"card:{name}",
@@ -126,6 +134,7 @@ def card(
         status=status,
         retrieval_eligible=retrieval_eligible,
         expires_at=expires_at,
+        default_assignment=default_assignment,
     )
 
 
@@ -270,8 +279,12 @@ def test_minimum_score_returns_nothing_and_declared_behavior() -> None:
         retrieve([card("missing-vector")], card_embeddings={})
 
 
-def test_manager_receives_conclusion_only_and_cannot_request_sales_domain() -> None:
-    management = card("management", domain=KnowledgeDomain.MANAGEMENT)
+def test_manager_is_broad_knowledge_holder_but_receives_conclusions_only() -> None:
+    management = card(
+        "management",
+        domain=KnowledgeDomain.MANAGEMENT,
+        default_assignment=KnowledgeAssignmentScope.MANAGER_GLOBAL.value,
+    )
     result = retrieve(
         [management],
         domain=KnowledgeDomain.MANAGEMENT,
@@ -281,8 +294,79 @@ def test_manager_receives_conclusion_only_and_cannot_request_sales_domain() -> N
     assert result.items[0].content == management.claim
     assert management.distillation_note not in result.items[0].content
 
-    with pytest.raises(CardRetrievalPolicyError, match="does not declare domain"):
-        retrieve([card("sales")], profile=MANAGER_RETRIEVAL_PROFILE)
+    sales = card(
+        "sales",
+        default_assignment=KnowledgeAssignmentScope.MANAGER_GLOBAL.value,
+    )
+    result = retrieve(
+        [sales],
+        profile=MANAGER_RETRIEVAL_PROFILE,
+        stage=RetrievalStage.REVIEW.value,
+    )
+    assert result.items[0].content == sales.claim
+    assert sales.distillation_note not in result.items[0].content
+
+
+def test_assignment_scope_is_identity_bound_and_tenant_flip_is_immediate() -> None:
+    specialist_card = card("specialist")
+    manager_card = card(
+        "manager",
+        default_assignment=KnowledgeAssignmentScope.MANAGER_GLOBAL.value,
+    )
+    assert [item.card.card_id for item in retrieve([specialist_card, manager_card]).items] == [
+        specialist_card.card_id
+    ]
+
+    flipped = retrieve(
+        [manager_card],
+        assignment_overrides={
+            manager_card.card_version_id: CardAssignmentOverride(
+                card_version_id=manager_card.card_version_id,
+                tenant_id=TENANT,
+                scope="specialist:sales_recovery_agent",
+            )
+        },
+    )
+    assert [item.card.card_id for item in flipped.items] == [manager_card.card_id]
+
+    disabled = retrieve(
+        [specialist_card],
+        assignment_overrides={
+            specialist_card.card_version_id: CardAssignmentOverride(
+                card_version_id=specialist_card.card_version_id,
+                tenant_id=TENANT,
+                scope=KnowledgeAssignmentScope.DISABLED.value,
+                enabled=False,
+            )
+        },
+    )
+    assert disabled.items == ()
+
+    with pytest.raises(CardRetrievalPolicyError, match="tenant did not match"):
+        retrieve(
+            [specialist_card],
+            assignment_overrides={
+                specialist_card.card_version_id: CardAssignmentOverride(
+                    card_version_id=specialist_card.card_version_id,
+                    tenant_id=UUID("22222222-2222-4222-8222-222222222222"),
+                    scope="specialist:sales_recovery_agent",
+                )
+            },
+        )
+
+
+def test_profiles_are_narrow_by_construction_and_retrieval_never_authorizes_effects() -> None:
+    assert PROFILE.assignment_scopes == frozenset({"specialist:sales_recovery_agent"})
+    assert MANAGER_RETRIEVAL_PROFILE.domains == frozenset(KnowledgeDomain)
+    assert MANAGER_RETRIEVAL_PROFILE.assignment_scopes == frozenset(
+        {
+            KnowledgeAssignmentScope.MANAGER_GLOBAL.value,
+            KnowledgeAssignmentScope.MANAGER_TENANT.value,
+        }
+    )
+    assert CardRetrievalResult.AUTHORIZES_EFFECTS is False
+    assert KnowledgeBundle.AUTHORIZES_EFFECTS is False
+    assert KNOWLEDGE_RETRIEVAL_AUTHORIZES_EFFECTS is False
 
 
 def test_broker_adapter_fails_closed_on_context_tenant_mismatch_and_is_not_registered() -> None:

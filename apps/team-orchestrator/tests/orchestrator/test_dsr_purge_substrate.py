@@ -102,6 +102,37 @@ def _seed_full_tenant_data(dsn: str, tenant_id: UUID) -> dict[str, UUID]:
     run_id = uuid4()
 
     with psycopg.connect(dsn, autocommit=True) as conn:
+        # VT-711 / mig 186: global card assignment plus specialist thin task customisation.
+        # The global card is intentionally retained; only these tenant-owned rows are erased.
+        card_id = conn.execute(
+            "INSERT INTO knowledge_cards "
+            "(card_key, version, claim, claim_key, claim_value, distillation_note, "
+            " jurisdictions, effective_from, authority, confidence, scope, status, "
+            " retention_class, tainted, default_assignment) "
+            "VALUES (%s, 1, 'DSR assignment test claim', %s, "
+            "'{\"value_type\":\"boolean\",\"value\":true}'::jsonb, 'DSR test', "
+            "ARRAY['IN'], now(), 'verified_system', 'medium', 'global', 'candidate', "
+            "'lifecycle_managed', true, 'manager_global') RETURNING id",
+            (str(uuid4()), f"dsr|assignment|{uuid4()}|smb|all"),
+        ).fetchone()[0]
+        conn.execute(
+            "INSERT INTO knowledge_card_assignments "
+            "(tenant_id, card_id, scope, enabled, reason, actor, actor_id, "
+            " change_idempotency_key) "
+            "VALUES (%s, %s, 'specialist:sales_recovery_agent', true, "
+            "'DSR test assignment', 'manager', 'manager:dsr-test', %s)",
+            (str(tenant_id), card_id, f"assignment:{tenant_id}"),
+        )
+        conn.execute(
+            "INSERT INTO specialist_memory_cards "
+            "(tenant_id, agent, task_scope, memory_key, customization, authored_by, "
+            " author_id, reason, idempotency_key) "
+            "VALUES (%s, 'sales_recovery_agent', 'dsr-test-task', 'tone', "
+            "'Use this tenant customisation only for the exact task.', 'vtr', "
+            "'vtr:dsr-test', 'DSR test memory', %s)",
+            (str(tenant_id), f"memory:{tenant_id}"),
+        )
+
         # VT-709 / mig 183: O8 tenant evidence + incident rows.  Both global FKs are deliberately
         # NULL while immutable refs remain populated; this isolates the DSR contract under test
         # from global-corpus setup and proves the tenants-row CASCADE is not being relied upon.
@@ -418,6 +449,9 @@ def _ticket_row(dsn: str, ticket_id: UUID) -> dict[str, Any]:
 
 # Tables that should be ZERO for the purged tenant after the sweep.
 _PURGED_TABLES = (
+    "specialist_memory_events",  # VT-711: assignment + thin-memory lifecycle, hard-delete on DSR
+    "specialist_memory_cards",  # VT-711: exact task customisations, hard-delete on DSR
+    "knowledge_card_assignments",  # VT-711: tenant card routing overrides, hard-delete on DSR
     "decision_evidence_links",  # VT-709: O8 decision/outcome attribution, hard-delete on DSR
     "knowledge_incidents",  # VT-709: harmful-card tenant incidents, hard-delete on DSR
     "l1_relationships",
@@ -979,6 +1013,137 @@ def test_vt709_o8_hard_delete_canary_asserts_physical_zero_rows(substrate):  # t
         assert _count_tenant_rows(substrate.dsn, table, tenant_b) == 1, (
             f"VT-709: cross-tenant purge touched tenant B's {table} rows"
         )
+
+
+def test_vt711_specialist_memory_hard_delete_canary_asserts_physical_zero_rows(
+    substrate,
+):  # type: ignore[no-untyped-def]
+    """The append-only tenant event ledger has one narrow DSR hard-delete exception."""
+
+    from orchestrator.dsr_purge import _PURGE_ORDER, purge_tenant_data
+
+    tables = (
+        "specialist_memory_events",
+        "specialist_memory_cards",
+        "knowledge_card_assignments",
+    )
+    assert tuple(table for table in _PURGE_ORDER if table in tables) == tables
+    tenant_a = _new_tenant(substrate.dsn, name="Tenant A (VT711 purgee)")
+    tenant_b = _new_tenant(substrate.dsn, name="Tenant B (VT711 untouched)")
+    _seed_full_tenant_data(substrate.dsn, tenant_a)
+    _seed_full_tenant_data(substrate.dsn, tenant_b)
+
+    for table in tables:
+        assert _count_tenant_rows(substrate.dsn, table, tenant_a) >= 1
+        assert _count_tenant_rows(substrate.dsn, table, tenant_b) >= 1
+
+    result = purge_tenant_data(_open_dsr_ticket(substrate.dsn, tenant_a))
+    for table in tables:
+        assert result.deleted_counts[table] >= 1
+        assert _count_tenant_rows(substrate.dsn, table, tenant_a) == 0, (
+            f"VT-711: DSR left physical rows in {table}"
+        )
+        assert _count_tenant_rows(substrate.dsn, table, tenant_b) >= 1, (
+            f"VT-711: cross-tenant purge touched tenant B's {table} rows"
+        )
+
+
+def test_vt711_governed_write_seam_versions_replays_and_reads_exact_task_scope(
+    substrate,
+):  # type: ignore[no-untyped-def]
+    """Exercise the runtime seam in the full dependency + real-Postgres job."""
+
+    from orchestrator.knowledge.specialist_memory import (
+        read_specialist_customizations,
+        set_card_assignment,
+        write_specialist_customization,
+    )
+
+    tenant_id = _new_tenant(substrate.dsn, name="VT711 governed write seam")
+    _seed_full_tenant_data(substrate.dsn, tenant_id)
+    with psycopg.connect(substrate.dsn, autocommit=True) as conn:
+        conn.execute("SELECT set_config('app.current_tenant', %s, false)", (str(tenant_id),))
+        card_id = conn.execute(
+            "SELECT card_id FROM knowledge_card_assignments WHERE tenant_id = %s",
+            (tenant_id,),
+        ).fetchone()[0]
+
+        first = write_specialist_customization(
+            tenant_id,
+            agent="sales_recovery_agent",
+            task_scope="recover-abandoned-cart",
+            memory_key="tone-runtime",
+            customization="Use the owner-approved concise tone.",
+            authored_by="vtr",
+            author_id="vtr:test",
+            reason="VTR supplied an exact-task customisation",
+            idempotency_key=f"runtime-memory-v1:{tenant_id}",
+            conn=conn,
+        )
+        replay = write_specialist_customization(
+            tenant_id,
+            agent="sales_recovery_agent",
+            task_scope="recover-abandoned-cart",
+            memory_key="tone-runtime",
+            customization="Use the owner-approved concise tone.",
+            authored_by="vtr",
+            author_id="vtr:test",
+            reason="VTR supplied an exact-task customisation",
+            idempotency_key=f"runtime-memory-v1:{tenant_id}",
+            conn=conn,
+        )
+        second = write_specialist_customization(
+            tenant_id,
+            agent="sales_recovery_agent",
+            task_scope="recover-abandoned-cart",
+            memory_key="tone-runtime",
+            customization="Use the Manager-approved warm but concise tone.",
+            authored_by="manager",
+            author_id="manager:test",
+            reason="Manager revised the exact-task customisation",
+            idempotency_key=f"runtime-memory-v2:{tenant_id}",
+            conn=conn,
+        )
+        assert first.version == 1 and replay.memory_card_id == first.memory_card_id
+        assert replay.idempotent_replay is True and second.version == 2
+        assert read_specialist_customizations(
+            tenant_id,
+            agent="sales_recovery_agent",
+            task_scope="recover-abandoned-cart",
+            conn=conn,
+        )[-1]["customization"] == "Use the Manager-approved warm but concise tone."
+        assert read_specialist_customizations(
+            tenant_id,
+            agent="sales_recovery_agent",
+            task_scope="unrelated-task",
+            conn=conn,
+        ) == []
+
+        assignment = set_card_assignment(
+            tenant_id,
+            card_id=card_id,
+            scope="manager_tenant",
+            enabled=True,
+            actor="manager",
+            actor_id="manager:test",
+            reason="Manager takes the conclusion after specialist review",
+            idempotency_key=f"runtime-assignment:{tenant_id}",
+            conn=conn,
+        )
+        assignment_replay = set_card_assignment(
+            tenant_id,
+            card_id=card_id,
+            scope="manager_tenant",
+            enabled=True,
+            actor="manager",
+            actor_id="manager:test",
+            reason="Manager takes the conclusion after specialist review",
+            idempotency_key=f"runtime-assignment:{tenant_id}",
+            conn=conn,
+        )
+        assert assignment.idempotent_replay is False
+        assert assignment_replay.assignment_id == assignment.assignment_id
+        assert assignment_replay.idempotent_replay is True
 
 
 def test_purge_hard_deletes_tenant_oauth_tokens(substrate):  # type: ignore[no-untyped-def]

@@ -8,18 +8,22 @@ from __future__ import annotations
 
 from orchestrator.knowledge_contracts import (
     GroundingBehavior,
+    KnowledgeAssignmentScope,
     KnowledgeDomain,
     KnowledgeLayer,
     NoResultBehavior,
     RetrievalDepth,
     RetrievalProfile,
     RetrievalStage,
+    specialist_assignment_scope,
 )
 
 
 MANAGER_RETRIEVAL_PROFILE = RetrievalProfile(
     identity="team_manager",
-    domains=frozenset({KnowledgeDomain.MANAGEMENT, KnowledgeDomain.CROSS_FUNCTIONAL}),
+    # The Manager is the tenant's COO and knowledge holder: it may synthesize conclusions across
+    # every business domain. Specialists remain lane-scoped by identity below.
+    domains=frozenset(KnowledgeDomain),
     layers=frozenset(
         {
             KnowledgeLayer.L1,
@@ -40,6 +44,12 @@ MANAGER_RETRIEVAL_PROFILE = RetrievalProfile(
     grounding_behavior=GroundingBehavior.REQUIRED,
     no_result_behavior=NoResultBehavior.HEDGE,
     minimum_score=0.62,
+    assignment_scopes=frozenset(
+        {
+            KnowledgeAssignmentScope.MANAGER_GLOBAL.value,
+            KnowledgeAssignmentScope.MANAGER_TENANT.value,
+        }
+    ),
 )
 
 
@@ -77,6 +87,9 @@ def specialist_retrieval_profile(
         grounding_behavior=GroundingBehavior.REQUIRED,
         no_result_behavior=no_result_behavior,
         minimum_score=0.58,
+        # Narrow by construction: budget does not provide isolation. A specialist sees only
+        # cards/customisation explicitly assigned to this exact agent identity.
+        assignment_scopes=frozenset({specialist_assignment_scope(identity)}),
     )
 
 

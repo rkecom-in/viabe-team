@@ -16,7 +16,7 @@ from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Protocol
+from typing import ClassVar, Protocol
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -35,7 +35,9 @@ from orchestrator.knowledge.contracts import (
     RetrievalDepth,
     RetrievalProfile,
     SourceClass,
+    validate_assignment_scope,
 )
+from orchestrator.knowledge_contracts import KnowledgeAssignmentScope
 
 _WORD_RE = re.compile(r"[a-z0-9]+")
 _CHARS_PER_TOKEN = 4
@@ -121,11 +123,29 @@ class CardRetrievalTrace:
 
 @dataclass(frozen=True)
 class CardRetrievalResult:
+    """Advisory evidence for reasoning; it never authorizes an external effect."""
+
+    AUTHORIZES_EFFECTS: ClassVar[bool] = False
     items: tuple[RetrievedCard, ...]
     conflicts: tuple[RetrievedConflict, ...]
     no_result: bool
     no_result_behavior: str
     trace: CardRetrievalTrace
+
+
+@dataclass(frozen=True)
+class CardAssignmentOverride:
+    """Trusted tenant override loaded under RLS; never accepted from model input."""
+
+    card_version_id: str
+    tenant_id: UUID
+    scope: str
+    enabled: bool = True
+
+    def __post_init__(self) -> None:
+        if not self.card_version_id.strip():
+            raise ValueError("card_version_id must be non-empty")
+        validate_assignment_scope(self.scope)
 
 
 class CardRetrievalEngine:
@@ -144,6 +164,7 @@ class CardRetrievalEngine:
         profile: RetrievalProfile,
         context: RetrievalBusinessContext,
         allowed_scopes: frozenset[KnowledgeScopeKind],
+        assignment_overrides: Mapping[str, CardAssignmentOverride] | None = None,
         top_k: int | None = None,
         token_budget: int | None = None,
         max_per_cluster: int = 2,
@@ -167,6 +188,7 @@ class CardRetrievalEngine:
 
         effective_top_k = min(top_k or profile.top_k, profile.top_k)
         effective_budget = min(token_budget or profile.token_budget, profile.token_budget)
+        trusted_overrides = assignment_overrides or {}
         objective_tokens = _tokens(objective)
         entity_tokens = set().union(*(_tokens(value) for value in entity_refs)) if entity_refs else set()
 
@@ -176,9 +198,26 @@ class CardRetrievalEngine:
         scored: list[RetrievedCard] = []
 
         for card in cards:
-            # 1-2. Scope enforcement and lifecycle/retrieval exclusions happen before ranking.
+            # Assignment is an advisory-context boundary, never effect authority. A tenant flip
+            # can remove or redirect a card instantly, but cannot approve a send/spend/consent act.
+            assignment = card.default_assignment
+            override = trusted_overrides.get(card.card_version_id)
+            if override is not None:
+                if override.tenant_id != context.tenant_id:
+                    raise CardRetrievalPolicyError(
+                        "assignment override tenant did not match retrieval context"
+                    )
+                assignment = (
+                    override.scope
+                    if override.enabled
+                    else KnowledgeAssignmentScope.DISABLED.value
+                )
+
+            # 1-2. Assignment, scope and lifecycle exclusions happen before ranking.
             if (
-                card.scope not in allowed_scopes
+                assignment == KnowledgeAssignmentScope.DISABLED.value
+                or assignment not in profile.assignment_scopes
+                or card.scope not in allowed_scopes
                 or card.tenant_id is not None
                 or card.status
                 in {
@@ -345,6 +384,7 @@ class CardRegistryBrokerAdapter:
         domain: KnowledgeDomain,
         context_resolver: RetrievalContextResolver,
         query_embedder: Callable[[list[str]], Sequence[Sequence[float]]],
+        assignment_overrides: Mapping[str, CardAssignmentOverride] | None = None,
         engine: CardRetrievalEngine | None = None,
     ) -> None:
         if layer not in {KnowledgeLayer.L3, KnowledgeLayer.L4}:
@@ -356,6 +396,7 @@ class CardRegistryBrokerAdapter:
         self._domain = domain
         self._context_resolver = context_resolver
         self._query_embedder = query_embedder
+        self._assignment_overrides = dict(assignment_overrides or {})
         self._engine = engine or CardRetrievalEngine()
 
     def retrieve(
@@ -391,6 +432,7 @@ class CardRegistryBrokerAdapter:
             profile=self._profile,
             context=context,
             allowed_scopes=frozenset({allowed_scope}),
+            assignment_overrides=self._assignment_overrides,
             top_k=min(limit, query.top_k_per_layer),
             token_budget=query.token_budget,
         )
@@ -540,6 +582,7 @@ def _conflicts(items: Sequence[RetrievedCard]) -> tuple[RetrievedConflict, ...]:
 
 
 __all__ = [
+    "CardAssignmentOverride",
     "CardRegistryBrokerAdapter",
     "CardRetrievalEngine",
     "CardRetrievalPolicyError",
