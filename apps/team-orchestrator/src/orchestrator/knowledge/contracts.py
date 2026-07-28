@@ -12,7 +12,7 @@ import calendar
 from datetime import date, datetime
 from decimal import Decimal
 from enum import StrEnum
-from typing import Any
+from typing import Any, ClassVar
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -29,6 +29,7 @@ from orchestrator.knowledge_contracts import (
     RetrievalDepth,
     RetrievalProfile,
     RetrievalStage,
+    validate_assignment_scope,
 )
 
 
@@ -272,6 +273,7 @@ class KnowledgeCard(BaseModel):
     usage_rights: UsageRights
     retention_class: str = Field(min_length=1, max_length=100)
     scope: KnowledgeScopeKind
+    default_assignment: str = "manager_global"
     tenant_id: UUID | None = Field(default=None, exclude=True)
     status: CardStatus = CardStatus.CANDIDATE
     retrieval_eligible: bool = False
@@ -279,6 +281,7 @@ class KnowledgeCard(BaseModel):
 
     @model_validator(mode="after")
     def _governance_invariants(self) -> "KnowledgeCard":
+        validate_assignment_scope(self.default_assignment)
         if self.scope is KnowledgeScopeKind.TENANT and self.tenant_id is None:
             raise ValueError("tenant-scoped cards require tenant_id")
         if self.scope is not KnowledgeScopeKind.TENANT and self.tenant_id is not None:
@@ -520,9 +523,10 @@ class RetrievalTrace(BaseModel):
 
 
 class KnowledgeBundle(BaseModel):
-    """Token-bounded evidence bundle returned to a reasoning-stage composer."""
+    """Token-bounded advisory evidence returned to reasoning, never effect authorization."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
+    AUTHORIZES_EFFECTS: ClassVar[bool] = False
 
     query: KnowledgeQuery
     facts: tuple[EvidenceItem, ...] = ()

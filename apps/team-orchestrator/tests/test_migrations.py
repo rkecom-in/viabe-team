@@ -328,6 +328,221 @@ def test_vt709_corpus_rollback_is_a_version_verdict_not_a_card_status(migrated):
         assert row == ("rolled_back", "rolled_back")
 
 
+def test_vt711_specialist_memory_assignment_rls_lifecycle_and_global_purity(migrated):
+    """Migration 186 keeps thin memory tenant-local and every write attributable."""
+
+    dsn = migrated["dsn"]
+    tenant_a_marker = None
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        tenant_a = conn.execute(
+            "INSERT INTO tenants (business_name, plan_tier, phase) "
+            "VALUES ('VT711 A', 'founding', 'onboarding') RETURNING id"
+        ).fetchone()[0]
+        tenant_b = conn.execute(
+            "INSERT INTO tenants (business_name, plan_tier, phase) "
+            "VALUES ('VT711 B', 'standard', 'onboarding') RETURNING id"
+        ).fetchone()[0]
+        tenant_a_marker = str(tenant_a)
+        card_id, _ = _insert_o8_card(conn)
+
+        for tenant_id, suffix in ((tenant_a, "a"), (tenant_b, "b")):
+            conn.execute(
+                "INSERT INTO knowledge_card_assignments "
+                "(tenant_id, card_id, scope, enabled, reason, actor, actor_id, "
+                " change_idempotency_key) "
+                "VALUES (%s, %s, 'specialist:sales_recovery_agent', true, "
+                "'task needs this lane card', 'manager', 'manager:test', %s)",
+                (tenant_id, card_id, f"assignment-{suffix}"),
+            )
+            conn.execute(
+                "INSERT INTO specialist_memory_cards "
+                "(tenant_id, agent, task_scope, memory_key, customization, authored_by, "
+                " author_id, reason, idempotency_key) "
+                "VALUES (%s, 'sales_recovery_agent', 'recover-abandoned-cart', "
+                "'tone', 'Use the owner-approved concise tone.', 'vtr', 'vtr:test', "
+                "'tenant task customisation', %s)",
+                (tenant_id, f"memory-{suffix}"),
+            )
+
+        assert conn.execute(
+            "SELECT count(*) FROM specialist_memory_events WHERE tenant_id = %s", (tenant_a,)
+        ).fetchone()[0] == 2
+        assignment_id = conn.execute(
+            "SELECT id FROM knowledge_card_assignments WHERE tenant_id = %s", (tenant_a,)
+        ).fetchone()[0]
+        conn.execute(
+            "UPDATE knowledge_card_assignments SET scope = 'manager_tenant', "
+            "reason = 'Manager now consumes this conclusion', actor = 'manager', "
+            "actor_id = 'manager:test', change_idempotency_key = 'assignment-a-flip' "
+            "WHERE id = %s",
+            (assignment_id,),
+        )
+        assert conn.execute(
+            "SELECT event_type FROM specialist_memory_events "
+            "WHERE tenant_id = %s ORDER BY created_at DESC LIMIT 1",
+            (tenant_a,),
+        ).fetchone()[0] == "flip"
+        event_id = conn.execute(
+            "SELECT id FROM specialist_memory_events WHERE tenant_id = %s LIMIT 1", (tenant_a,)
+        ).fetchone()[0]
+        with pytest.raises(psycopg.errors.RaiseException, match="append-only"):
+            conn.execute(
+                "UPDATE specialist_memory_events SET reason = 'tampered' WHERE id = %s",
+                (event_id,),
+            )
+        with pytest.raises(psycopg.errors.RaiseException, match="append-only"):
+            conn.execute("DELETE FROM specialist_memory_events WHERE id = %s", (event_id,))
+
+        # PostgreSQL roles are cluster-global while each migration test database is throwaway.
+        # Reuse this test role across fresh databases instead of trying to drop a role that can
+        # legitimately retain grants in another still-running test database.
+        conn.execute(
+            "DO $$ BEGIN CREATE ROLE vt711_rls_tester NOLOGIN; "
+            "EXCEPTION WHEN duplicate_object THEN NULL; END $$"
+        )
+        conn.execute("GRANT USAGE ON SCHEMA public TO vt711_rls_tester")
+        conn.execute(
+            "GRANT SELECT, INSERT, UPDATE, DELETE ON knowledge_card_assignments, "
+            "specialist_memory_cards, specialist_memory_events TO vt711_rls_tester"
+        )
+        conn.execute("GRANT EXECUTE ON FUNCTION app_current_tenant() TO vt711_rls_tester")
+
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute("SET ROLE vt711_rls_tester")
+        conn.execute("SELECT set_config('app.current_tenant', %s, false)", (str(tenant_a),))
+        for table in (
+            "knowledge_card_assignments",
+            "specialist_memory_cards",
+            "specialist_memory_events",
+        ):
+            assert conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0] > 0
+            assert conn.execute(
+                f"SELECT count(*) FROM {table} WHERE tenant_id = %s", (tenant_b,)
+            ).fetchone()[0] == 0
+
+    assert tenant_a_marker is not None
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        for table in (
+            "knowledge_sources",
+            "knowledge_cards",
+            "knowledge_card_sources",
+            "knowledge_corpus_versions",
+            "knowledge_corpus_members",
+            "knowledge_evaluations",
+            "knowledge_lifecycle_events",
+        ):
+            assert conn.execute(
+                f"SELECT count(*) FROM {table} AS value "
+                "WHERE row_to_json(value)::text LIKE %s",
+                (f"%{tenant_a_marker}%",),
+            ).fetchone()[0] == 0
+
+
+def test_vt711_governed_write_seam_versions_replays_and_reads_exact_task_scope(migrated):
+    from orchestrator.knowledge.specialist_memory import (
+        read_specialist_customizations,
+        set_card_assignment,
+        write_specialist_customization,
+    )
+
+    dsn = migrated["dsn"]
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        tenant_id = conn.execute(
+            "INSERT INTO tenants (business_name, plan_tier, phase) "
+            "VALUES ('VT711 write seam', 'founding', 'onboarding') RETURNING id"
+        ).fetchone()[0]
+        card_id, _ = _insert_o8_card(conn)
+        conn.execute("SELECT set_config('app.current_tenant', %s, false)", (str(tenant_id),))
+
+        first = write_specialist_customization(
+            tenant_id,
+            agent="sales_recovery_agent",
+            task_scope="recover-abandoned-cart",
+            memory_key="tone",
+            customization="Use the owner-approved concise tone.",
+            authored_by="vtr",
+            author_id="vtr:test",
+            reason="VTR supplied a task customisation",
+            idempotency_key="runtime-memory-v1",
+            conn=conn,
+        )
+        replay = write_specialist_customization(
+            tenant_id,
+            agent="sales_recovery_agent",
+            task_scope="recover-abandoned-cart",
+            memory_key="tone",
+            customization="Use the owner-approved concise tone.",
+            authored_by="vtr",
+            author_id="vtr:test",
+            reason="VTR supplied a task customisation",
+            idempotency_key="runtime-memory-v1",
+            conn=conn,
+        )
+        second = write_specialist_customization(
+            tenant_id,
+            agent="sales_recovery_agent",
+            task_scope="recover-abandoned-cart",
+            memory_key="tone",
+            customization="Use the Manager-approved warm but concise tone.",
+            authored_by="manager",
+            author_id="manager:test",
+            reason="Manager revised this task's customisation",
+            idempotency_key="runtime-memory-v2",
+            conn=conn,
+        )
+        assert first.version == 1 and first.idempotent_replay is False
+        assert replay == type(replay)(
+            memory_card_id=first.memory_card_id,
+            version=1,
+            assignment_scope="specialist:sales_recovery_agent",
+            idempotent_replay=True,
+        )
+        assert second.version == 2
+        assert read_specialist_customizations(
+            tenant_id,
+            agent="sales_recovery_agent",
+            task_scope="recover-abandoned-cart",
+            conn=conn,
+        )[0]["customization"] == "Use the Manager-approved warm but concise tone."
+        assert read_specialist_customizations(
+            tenant_id,
+            agent="sales_recovery_agent",
+            task_scope="another-task",
+            conn=conn,
+        ) == []
+
+        assigned = set_card_assignment(
+            tenant_id,
+            card_id=card_id,
+            scope="specialist:sales_recovery_agent",
+            enabled=True,
+            actor="manager",
+            actor_id="manager:test",
+            reason="Specialist needs this card for the exact task",
+            idempotency_key="runtime-assignment-v1",
+            conn=conn,
+        )
+        assignment_replay = set_card_assignment(
+            tenant_id,
+            card_id=card_id,
+            scope="specialist:sales_recovery_agent",
+            enabled=True,
+            actor="manager",
+            actor_id="manager:test",
+            reason="Specialist needs this card for the exact task",
+            idempotency_key="runtime-assignment-v1",
+            conn=conn,
+        )
+        assert assigned.idempotent_replay is False
+        assert assignment_replay.assignment_id == assigned.assignment_id
+        assert assignment_replay.idempotent_replay is True
+        assert conn.execute(
+            "SELECT count(*) FROM specialist_memory_events WHERE tenant_id = %s "
+            "AND idempotency_key IN ('memory:runtime-memory-v1', "
+            "'memory:runtime-memory-v2', 'assignment:runtime-assignment-v1')",
+            (tenant_id,),
+        ).fetchone()[0] == 3
+
 # --- Migration 014: schema hardening (VT-Foundation-fix-1, CL-70 DC2/H3) ------
 
 

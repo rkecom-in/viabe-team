@@ -37,6 +37,8 @@ def test_no_environment_driven_rollout_activation() -> None:
     assert "RolloutMode.OFF" in rollout
 
 
-def test_no_checkpoint_c_migration_was_added() -> None:
+def test_only_clau_allocated_vt711_addendum_migration_was_added() -> None:
     migration_root = _ROOT.parents[1] / "migrations"
-    assert not list(migration_root.glob("*vt711*"))
+    assert [path.name for path in migration_root.glob("*vt711*")] == [
+        "186_vt711_specialist_memory_and_assignment.sql"
+    ]
