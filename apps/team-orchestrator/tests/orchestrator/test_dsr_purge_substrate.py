@@ -1048,6 +1048,104 @@ def test_vt711_specialist_memory_hard_delete_canary_asserts_physical_zero_rows(
         )
 
 
+def test_vt711_governed_write_seam_versions_replays_and_reads_exact_task_scope(
+    substrate,
+):  # type: ignore[no-untyped-def]
+    """Exercise the runtime seam in the full dependency + real-Postgres job."""
+
+    from orchestrator.knowledge.specialist_memory import (
+        read_specialist_customizations,
+        set_card_assignment,
+        write_specialist_customization,
+    )
+
+    tenant_id = _new_tenant(substrate.dsn, name="VT711 governed write seam")
+    _seed_full_tenant_data(substrate.dsn, tenant_id)
+    with psycopg.connect(substrate.dsn, autocommit=True) as conn:
+        conn.execute("SELECT set_config('app.current_tenant', %s, false)", (str(tenant_id),))
+        card_id = conn.execute(
+            "SELECT card_id FROM knowledge_card_assignments WHERE tenant_id = %s",
+            (tenant_id,),
+        ).fetchone()[0]
+
+        first = write_specialist_customization(
+            tenant_id,
+            agent="sales_recovery_agent",
+            task_scope="recover-abandoned-cart",
+            memory_key="tone-runtime",
+            customization="Use the owner-approved concise tone.",
+            authored_by="vtr",
+            author_id="vtr:test",
+            reason="VTR supplied an exact-task customisation",
+            idempotency_key=f"runtime-memory-v1:{tenant_id}",
+            conn=conn,
+        )
+        replay = write_specialist_customization(
+            tenant_id,
+            agent="sales_recovery_agent",
+            task_scope="recover-abandoned-cart",
+            memory_key="tone-runtime",
+            customization="Use the owner-approved concise tone.",
+            authored_by="vtr",
+            author_id="vtr:test",
+            reason="VTR supplied an exact-task customisation",
+            idempotency_key=f"runtime-memory-v1:{tenant_id}",
+            conn=conn,
+        )
+        second = write_specialist_customization(
+            tenant_id,
+            agent="sales_recovery_agent",
+            task_scope="recover-abandoned-cart",
+            memory_key="tone-runtime",
+            customization="Use the Manager-approved warm but concise tone.",
+            authored_by="manager",
+            author_id="manager:test",
+            reason="Manager revised the exact-task customisation",
+            idempotency_key=f"runtime-memory-v2:{tenant_id}",
+            conn=conn,
+        )
+        assert first.version == 1 and replay.memory_card_id == first.memory_card_id
+        assert replay.idempotent_replay is True and second.version == 2
+        assert read_specialist_customizations(
+            tenant_id,
+            agent="sales_recovery_agent",
+            task_scope="recover-abandoned-cart",
+            conn=conn,
+        )[-1]["customization"] == "Use the Manager-approved warm but concise tone."
+        assert read_specialist_customizations(
+            tenant_id,
+            agent="sales_recovery_agent",
+            task_scope="unrelated-task",
+            conn=conn,
+        ) == []
+
+        assignment = set_card_assignment(
+            tenant_id,
+            card_id=card_id,
+            scope="manager_tenant",
+            enabled=True,
+            actor="manager",
+            actor_id="manager:test",
+            reason="Manager takes the conclusion after specialist review",
+            idempotency_key=f"runtime-assignment:{tenant_id}",
+            conn=conn,
+        )
+        assignment_replay = set_card_assignment(
+            tenant_id,
+            card_id=card_id,
+            scope="manager_tenant",
+            enabled=True,
+            actor="manager",
+            actor_id="manager:test",
+            reason="Manager takes the conclusion after specialist review",
+            idempotency_key=f"runtime-assignment:{tenant_id}",
+            conn=conn,
+        )
+        assert assignment.idempotent_replay is False
+        assert assignment_replay.assignment_id == assignment.assignment_id
+        assert assignment_replay.idempotent_replay is True
+
+
 def test_purge_hard_deletes_tenant_oauth_tokens(substrate):  # type: ignore[no-untyped-def]
     """VT-422 GAP-1 — the DPDP erasure bug. The per-tenant ENCRYPTED OAuth credential
     (Shopify offline token) was EXPORTED on DSR but never ERASED: it FKs tenants, but the

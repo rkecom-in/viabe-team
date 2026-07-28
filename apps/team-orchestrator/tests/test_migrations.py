@@ -439,6 +439,10 @@ def test_vt711_specialist_memory_assignment_rls_lifecycle_and_global_purity(migr
 
 
 def test_vt711_governed_write_seam_versions_replays_and_reads_exact_task_scope(migrated):
+    # The migrations CI job intentionally installs only psycopg+pytest. Runtime knowledge modules
+    # load the full LangGraph stack and are exercised by the real-DB orchestrator substrate test;
+    # keep this duplicate local integration proof available only in that full environment.
+    pytest.importorskip("langgraph")
     from orchestrator.knowledge.specialist_memory import (
         read_specialist_customizations,
         set_card_assignment,
