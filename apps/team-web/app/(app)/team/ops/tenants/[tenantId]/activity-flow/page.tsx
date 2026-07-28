@@ -25,8 +25,10 @@ interface PageProps {
 
 const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 
-function endOfDay(day: string): string {
-  return `${day}T23:59:59.999Z`
+function endOfMonth(year: string, month: string): string {
+  // last instant of the month, UTC — Date.UTC(month index + 1, day 0) = last day of `month`
+  const lastDay = new Date(Date.UTC(Number(year), Number(month), 0)).getUTCDate()
+  return `${year}-${month}-${String(lastDay).padStart(2, '0')}T23:59:59.999Z`
 }
 
 export default async function TenantActivityFlowPage({ params, searchParams }: PageProps) {
@@ -94,36 +96,24 @@ export default async function TenantActivityFlowPage({ params, searchParams }: P
 
           {dayIndex.years.length > 0 ? (
             <nav
-              aria-label="Jump to date"
-              className="rounded-lg border border-[#DDE4DD] bg-white px-4 py-3 text-sm"
+              aria-label="Jump to month"
+              className="flex flex-wrap items-baseline gap-2 rounded-lg border border-[#DDE4DD] bg-white px-4 py-3 text-sm"
               data-flow-datenav
             >
-              <span className="mr-3 text-[11px] font-medium tracking-[0.05em] text-[#93A399] uppercase">
+              <span className="text-[11px] font-medium tracking-[0.05em] text-[#93A399] uppercase">
                 Jump to
               </span>
-              {dayIndex.years.map((y) => (
-                <details key={y.year} className="mr-4 inline-block align-top" open={dayIndex.years.length === 1}>
-                  <summary className="cursor-pointer font-medium text-[#0E7A5F]">{y.year}</summary>
-                  <div className="mt-1.5 space-y-1.5 pl-1">
-                    {y.months.map((m) => (
-                      <div key={m.month} className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
-                        <span className="w-8 text-[11px] font-medium text-[#5C6B63]">
-                          {MONTH_NAMES[Number(m.month) - 1]}
-                        </span>
-                        {m.days.map((d) => (
-                          <a
-                            key={d}
-                            className="rounded-full bg-[#EAEFE9] px-2 py-0.5 font-mono text-[11px] text-[#43554C] hover:bg-[#D8EFCB]"
-                            href={`${base}?before=${encodeURIComponent(endOfDay(d))}`}
-                          >
-                            {d.slice(8, 10)}
-                          </a>
-                        ))}
-                      </div>
-                    ))}
-                  </div>
-                </details>
-              ))}
+              {dayIndex.years.flatMap((y) =>
+                y.months.map((m) => (
+                  <a
+                    key={`${y.year}-${m.month}`}
+                    className="rounded-full bg-[#EAEFE9] px-3 py-1 font-mono text-[12px] text-[#43554C] hover:bg-[#D8EFCB]"
+                    href={`${base}?before=${encodeURIComponent(endOfMonth(y.year, m.month))}`}
+                  >
+                    {y.year}-{MONTH_NAMES[Number(m.month) - 1]}
+                  </a>
+                )),
+              )}
             </nav>
           ) : null}
         </header>

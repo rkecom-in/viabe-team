@@ -332,7 +332,7 @@ export async function fetchFlowPage(
   if (assignedTenants !== null && assignedTenants.length === 0) return { events: [], nextBefore: null }
   if (!canAccessTenant(assignedTenants, tenantId)) return { events: [], nextBefore: null }
   const client = opts.client ?? serverSecretClient()
-  const limit = Math.min(Math.max(opts.limit ?? 120, 20), 400)
+  const limit = Math.min(Math.max(opts.limit ?? 200, 20), 400)
   const before = opts.before ?? null
 
   const pull = async (table: keyof typeof CAPS, select: string, tsCol: string): Promise<any[]> => {
