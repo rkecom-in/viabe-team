@@ -133,6 +133,32 @@ def active_assertion(tenant_id: UUID | str, fact_key: str) -> dict[str, Any] | N
         return None
 
 
+def active_assertions(tenant_id: UUID | str) -> list[dict[str, Any]]:
+    """ALL active assertions for a tenant (one per fact_key by construction) — the compose-context
+    block: what the Manager has already told this owner. Fail-soft → []."""
+    try:
+        from orchestrator.db import tenant_connection
+
+        with tenant_connection(tenant_id) as conn:
+            rows = conn.execute(
+                "SELECT fact_key, fact_value, statement_text, asserted_at "
+                "FROM manager_asserted_facts "
+                "WHERE tenant_id = %s AND status = 'active' "
+                "ORDER BY fact_key, asserted_at DESC",
+                (str(tenant_id),),
+            ).fetchall()
+        out = []
+        for r in rows:
+            if isinstance(r, dict):
+                out.append(dict(r))
+            else:
+                out.append({"fact_key": r[0], "fact_value": r[1], "statement_text": r[2], "asserted_at": r[3]})
+        return out
+    except Exception:  # noqa: BLE001 — advisory read, never a gate
+        logger.warning("asserted_facts: bulk read failed (fail-soft) tenant=%s", tenant_id, exc_info=True)
+        return []
+
+
 def contradiction_check(
     tenant_id: UUID | str, fact_key: str, new_value: Any
 ) -> dict[str, Any] | None:
@@ -186,6 +212,7 @@ def assertions_derived_from_card(
 __all__ = [
     "FACT_KEYS",
     "active_assertion",
+    "active_assertions",
     "assertions_derived_from_card",
     "contradiction_check",
     "record_assertion",

@@ -2196,6 +2196,15 @@ def _handle_reply_with_turn_brain(
     # VT-716 — the brain composes against the WIRE-TRUTH history (see _merged_recent_history).
     g_aware = dict(g)
     g_aware["recent_turns"] = _merged_recent_history(tenant_id, g, message_sid)
+    # VT-719 — the brain also composes against what it has already TOLD this owner (the
+    # asserted-facts ledger): a stated commitment may only change as an OWNED change, never a
+    # silent flip. Fail-soft [] keeps the turn alive on any read miss.
+    try:
+        from orchestrator.manager.asserted_facts import active_assertions
+
+        g_aware["asserted_facts"] = active_assertions(tenant_id)
+    except Exception:  # noqa: BLE001 — advisory context, never a gate on the turn
+        g_aware["asserted_facts"] = []
     plan = turn_brain.compose_turn(
         g_aware, draft_attrs, body, locale=lang, provenance=provenance, is_start=is_start,
         tenant_id=tenant_id, profile_card=(card or None),
@@ -2705,6 +2714,24 @@ def _maybe_handle_post_profile_flow(
             key = "hi" if lang == "hi" else "en"
             text = _AGENT_CHOSEN[key].format(agent=(body or "").strip())
             _send_turn(recipient, text, ["Yes", "Later"], lang, tenant_id=tenant_id)
+            # VT-719: the confirm the owner just received IS a commitment — record what was said
+            # (which agent is active + the trial terms) so the Manager can never contradict it.
+            try:
+                from orchestrator.manager.asserted_facts import record_assertion
+
+                record_assertion(
+                    tenant_id, "active_agent", choice,
+                    statement_text=text, surface="journey", message_sid=message_sid,
+                    derived_from={"site": "flow_agent_chosen"},
+                )
+                record_assertion(
+                    tenant_id, "trial_terms",
+                    {"months": 1, "auto_charge": False, "cancel_anytime": True},
+                    statement_text=text, surface="journey", message_sid=message_sid,
+                    derived_from={"site": "flow_agent_chosen"},
+                )
+            except Exception:  # noqa: BLE001 — the ledger never breaks the beat
+                logger.warning("journey flow: assertion record failed tenant=%s", tenant_id)
             _set_flow(tenant_id, _FLOW_READY_ASKED, message_sid=message_sid)
             return {"done": False, "routed": "flow_agent_chosen", "agent": choice,
                     "flow": _FLOW_READY_ASKED}

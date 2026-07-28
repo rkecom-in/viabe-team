@@ -404,6 +404,25 @@ def grant_business_policy(
         "business_policy: granted tenant=%s action_types=%s segments=%s ceiling_minor=%d",
         tid, policy_doc["allowed_action_types"], policy_doc["allowed_segments"], ceiling,
     )
+    # VT-719: the limits the owner just approved are commitments the Manager STATED back
+    # ("no more than once per customer per week", "₹0 without your approval") — record them in
+    # the asserted-facts ledger so no later message can contradict the granted bounds silently.
+    # Fail-soft inside; the grant itself is already committed above.
+    try:
+        from orchestrator.manager.asserted_facts import record_assertion
+
+        record_assertion(
+            tenant_id, "message_frequency_cap", caps,
+            statement_text=f"frequency caps confirmed at grant: {caps}",
+            derived_from={"site": "grant_business_policy", "granted_by": grant_id},
+        )
+        record_assertion(
+            tenant_id, "spend_ceiling", {"minor": ceiling},
+            statement_text=f"spend ceiling confirmed at grant: {ceiling} minor units",
+            derived_from={"site": "grant_business_policy", "granted_by": grant_id},
+        )
+    except Exception:  # noqa: BLE001 — the ledger never perturbs a completed grant
+        logger.warning("business_policy: assertion record failed (fail-soft) tenant=%s", tid)
     return get_business_policy(tenant_id, conn=conn)
 
 

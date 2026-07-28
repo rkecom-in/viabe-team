@@ -60,6 +60,65 @@ def test_record_fail_soft_on_db_error(monkeypatch):
     assert af.record_assertion(uuid4(), "weekly_report_day", "monday") is False
 
 
+def test_prompt_renders_commitments_block_and_owned_change_rule():
+    """VT-719 stage 2: when the journey state carries asserted_facts, the turn-brain user prompt
+    renders the COMMITMENTS block, and the system prompt carries the OWNED CHANGES rule."""
+    from orchestrator.onboarding.turn_brain import _build_prompts
+
+    js = {
+        "answers": {},
+        "queue": [],
+        "cursor": 0,
+        "recent_turns": [],
+        "asserted_facts": [
+            {"fact_key": "trial_terms", "fact_value": {"months": 1, "auto_charge": False}},
+            {"fact_key": "active_agent", "fact_value": "sales_recovery"},
+        ],
+    }
+    system, user = _build_prompts(js, {}, "hi", locale="en", provenance=None, is_start=False)
+    assert "COMMITMENTS YOU HAVE ALREADY MADE" in user
+    assert "trial_terms" in user and "active_agent" in user
+    assert "OWNED CHANGES ONLY" in system
+
+
+def test_prompt_no_facts_no_block():
+    from orchestrator.onboarding.turn_brain import _build_prompts
+
+    js = {"answers": {}, "queue": [], "cursor": 0, "recent_turns": []}
+    _, user = _build_prompts(js, {}, "hi", locale="en", provenance=None, is_start=False)
+    assert "COMMITMENTS YOU HAVE ALREADY MADE" not in user
+
+
+def test_policy_grant_records_limit_assertions(monkeypatch):
+    """VT-719 stage 2: grant_business_policy records the granted caps + ceiling as assertions
+    (spy on the ledger; fake conn satisfies the upsert + read-back)."""
+    from unittest.mock import MagicMock
+
+    from orchestrator.agents import business_policy as bp
+    from orchestrator.manager import asserted_facts as af_mod
+
+    recorded: list[tuple[str, object]] = []
+    monkeypatch.setattr(
+        af_mod, "record_assertion",
+        lambda tenant_id, key, value, **kw: recorded.append((key, value)) or True,
+    )
+    conn = MagicMock()
+    monkeypatch.setattr(bp, "get_business_policy", lambda tid, conn=None: "policy-sentinel")
+    out = bp.grant_business_policy(
+        uuid4(),
+        allowed_action_types=["customer_message"],
+        allowed_segments=["all"],
+        frequency_caps={"per_customer_weekly": 1},
+        spend_ceiling_minor=0,
+        granted_by=uuid4(),
+        conn=conn,
+    )
+    assert out == "policy-sentinel"
+    keys = {k for k, _ in recorded}
+    assert keys == {"message_frequency_cap", "spend_ceiling"}
+    assert dict(recorded)["spend_ceiling"] == {"minor": 0}
+
+
 def test_purge_order_membership():
     """Migration 187's table must be swept on DSR (the tenants row is anonymized, never deleted —
     CASCADE is not the erasure path)."""

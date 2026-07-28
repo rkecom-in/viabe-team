@@ -147,6 +147,11 @@ moments ago, including welcomes and system messages. Draft every message as a CO
 the last thing you sent: never re-greet, never re-introduce yourself, never restate what you \
 just said. If the owner repeats information you already captured, acknowledge in a few words \
 and move forward — never re-ask for it and never repeat your earlier response to it. \
+- OWNED CHANGES ONLY (VT-719 — the single-voice ledger): the COMMITMENTS block lists what you \
+have already told this owner (trial terms, limits, which agent is active). You may NEVER state \
+anything that contradicts a listed commitment. If a commitment has genuinely changed, you must \
+OWN the change in the same breath — "earlier I said X — that's now Y because…" — never flip \
+silently. \
 - PLAIN WORDS (VT-701, live: "When do you typically operate?" left the owner lost): every question \
 must be instantly answerable by a non-technical shop owner — everyday words, no business jargon \
 ("What are your working hours?", never "When do you operate?"). \
@@ -301,6 +306,21 @@ def _build_prompts(
         if recent else "(no prior exchange this session)"
     )
 
+    # VT-719 asserted facts: commitments the Manager has ALREADY TOLD this owner (trial terms,
+    # limits, which agent is active…). Rendered ONLY when non-empty. The rule that binds it is
+    # OWNED CHANGES ONLY in the system prompt: never silently contradict a line below.
+    facts = list(journey_state.get("asserted_facts") or [])
+    facts_block = (
+        "COMMITMENTS YOU HAVE ALREADY MADE TO THIS OWNER (never contradict these; if one has "
+        "genuinely changed, say so explicitly — 'earlier I said X — that's now Y because…'):\n"
+        + "\n".join(
+            f"- {f.get('fact_key')}: {json.dumps(f.get('fact_value'), default=str)}"
+            for f in facts
+        )
+        + "\n\n"
+        if facts else ""
+    )
+
     # VT-571 distilled memory (mig 163): durable facts/decisions/preferences from turns that scrolled OUT
     # of the recent window. Rendered ABOVE the raw window ONLY when non-empty — so the brain still knows
     # what was said 20 turns ago after the cap-8 window has rolled past it (compact, don't drop).
@@ -332,6 +352,7 @@ def _build_prompts(
     user = (
         "DISCOVERED (facts found from public sources — the ONLY facts you may state):\n"
         f"{_fmt_discovered(draft_attrs, provenance)}\n\n"
+        f"{facts_block}"
         f"{summary_block}"
         "RECENT CONVERSATION (oldest first — what was already said; NEVER re-ask or contradict it):\n"
         f"{convo}\n\n"
