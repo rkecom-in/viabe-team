@@ -189,6 +189,70 @@ def purge_stale(*, retention_days: int = RETENTION_DAYS) -> int:
         return cur.rowcount if cur.rowcount is not None else 0
 
 
+# --- VT-714: pre-tenant transcript capture (Fazal: journeys must be captured in the
+# not-logged-in state and later mapped back to the tenant, flagged as such) -----------------------
+
+
+def _append_transcript(phone_e164: str, role: str, text: str, sid: str | None = None) -> None:
+    """Append one pre-tenant turn onto the session row. Lives WITH the session, so the DPDP
+    retention posture is inherited: declined/expired sessions purge with their transcripts;
+    only a consent conversion flushes them into the tenant's lifetime log. Fail-soft —
+    evidence, never a gate."""
+    import json as _json
+    from datetime import UTC, datetime
+
+    entry = {
+        "role": "owner" if role == "owner" else "assistant",
+        "text": (text or "")[:1500],
+        "sid": sid,
+        "ts": datetime.now(UTC).isoformat(),
+    }
+    try:
+        with _pool().connection() as conn:
+            conn.execute(
+                "UPDATE whatsapp_signup_sessions "
+                "SET transcript = transcript || %s::jsonb WHERE phone_e164 = %s",
+                (_json.dumps([entry]), phone_e164),
+            )
+    except Exception:  # noqa: BLE001
+        logger.warning("whatsapp_signup: transcript append failed (fail-soft)")
+
+
+def flush_transcript_to_tenant(phone_e164: str, tenant_id: UUID | str) -> int:
+    """Copy the captured pre-tenant turns into conversation_log under the NEW tenant with
+    surface='signup' (the not-logged-in flag) and their ORIGINAL timestamps — the activity
+    flow then shows the journey from the very first 'Hi'. Idempotent enough for the workflow
+    replay shape: a second flush would duplicate, so callers only flush on created=True."""
+    try:
+        with _pool().connection() as conn:
+            row = conn.execute(
+                "SELECT transcript FROM whatsapp_signup_sessions WHERE phone_e164 = %s",
+                (phone_e164,),
+            ).fetchone()
+            entries = (row[0] if not isinstance(row, dict) else row.get("transcript")) if row else []
+            n = 0
+            for e in entries or []:
+                if not isinstance(e, dict):
+                    continue
+                conn.execute(
+                    "INSERT INTO conversation_log "
+                    "(tenant_id, role, text, message_sid, surface, created_at) "
+                    "VALUES (%s, %s, %s, %s, 'signup', %s)",
+                    (
+                        str(tenant_id),
+                        "owner" if e.get("role") == "owner" else "assistant",
+                        str(e.get("text") or ""),
+                        e.get("sid"),
+                        e.get("ts"),
+                    ),
+                )
+                n += 1
+            return n
+    except Exception:  # noqa: BLE001
+        logger.warning("whatsapp_signup: transcript flush failed (fail-soft) tenant=%s", tenant_id)
+        return 0
+
+
 # --- consent classification (LLM-primary; deterministic veto in the safe direction only) --------
 
 
@@ -280,11 +344,14 @@ def handle_unknown_inbound(phone_e164: str, body: str, message_sid: str | None) 
         if session is None:
             if consent_hard_stop(body) is not None:
                 upsert_prompted(phone_e164)
+                _append_transcript(phone_e164, "owner", body, message_sid)
                 mark_status(phone_e164, "declined")
                 logger.info("whatsapp_signup: first contact was a refusal → silent from=%s", token)
                 return {"outcome": "declined_silent", "phone_token": token}
             upsert_prompted(phone_e164)
+            _append_transcript(phone_e164, "owner", body, message_sid)
             _send_consent_prompt(phone_e164)
+            _append_transcript(phone_e164, "assistant", CONSENT_PROMPT)
             logger.info("whatsapp_signup: consent prompted (first contact) from=%s", token)
             return {"outcome": "consent_prompted", "phone_token": token}
 
@@ -306,6 +373,8 @@ def handle_unknown_inbound(phone_e164: str, body: str, message_sid: str | None) 
         # status == 'consent_pending' → this reply answers the consent ask.
         decision = classify_consent_reply(body)
 
+        _append_transcript(phone_e164, "owner", body, message_sid)
+
         if decision == "consent":
             from orchestrator.onboarding.signup import create_whatsapp_signup_tenant
 
@@ -316,6 +385,15 @@ def handle_unknown_inbound(phone_e164: str, body: str, message_sid: str | None) 
                 res.tenant_id, res.created, token,
             )
             _send(phone_e164, WELCOME_AFTER_CONSENT)
+            _append_transcript(phone_e164, "assistant", WELCOME_AFTER_CONSENT)
+            # VT-714 — the pre-tenant story becomes part of the tenant's lifetime log,
+            # flagged surface='signup' (not-logged-in state). created-only: a redelivered
+            # consent replay must not double-flush.
+            if res.created:
+                flushed = flush_transcript_to_tenant(phone_e164, res.tenant_id)
+                logger.info(
+                    "whatsapp_signup: flushed %d pre-tenant turn(s) tenant=%s", flushed, res.tenant_id
+                )
             # Start the journey with the SEEDED from-scratch queue (finding A: without a row +
             # a non-empty queue, the draft-gated lazy-fill never asks anything), then kick the
             # first question through the SAME proven path the welcome button uses (the exact
@@ -350,6 +428,7 @@ def handle_unknown_inbound(phone_e164: str, body: str, message_sid: str | None) 
         if decision == "declined":
             mark_status(phone_e164, "declined")
             _send(phone_e164, DECLINED_ACK)
+            _append_transcript(phone_e164, "assistant", DECLINED_ACK)
             logger.info("whatsapp_signup: declined from=%s", token)
             return {"outcome": "declined", "phone_token": token}
 
@@ -364,6 +443,7 @@ def handle_unknown_inbound(phone_e164: str, body: str, message_sid: str | None) 
             return {"outcome": "expired", "phone_token": token}
         upsert_prompted(phone_e164)
         _send_consent_prompt(phone_e164)
+        _append_transcript(phone_e164, "assistant", CONSENT_PROMPT)
         logger.info("whatsapp_signup: unclear reply → re-prompted with buttons (%d/%d) from=%s",
                     prompts + 1, MAX_CONSENT_PROMPTS, token)
         return {"outcome": "consent_reprompted", "phone_token": token}
@@ -387,6 +467,7 @@ __all__ = [
     "classify_consent_reply",
     "consent_hard_stop",
     "handle_unknown_inbound",
+    "flush_transcript_to_tenant",
     "purge_stale",
     "whatsapp_signup_run",
 ]

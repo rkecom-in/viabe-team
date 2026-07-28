@@ -102,6 +102,8 @@ function SystemCard({ e }: { e: FlowEvent }) {
 
 function MessageBubble({ e }: { e: FlowEvent }) {
   const owner = e.lane === 'owner'
+  // VT-714 — pre-tenant turns (captured before the tenant existed) are visibly flagged.
+  const preSignup = e.meta.surface === 'signup'
   return (
     <div className={`relative z-[1] flex ${owner ? 'justify-end' : 'justify-start'}`}>
       <div
@@ -109,11 +111,16 @@ function MessageBubble({ e }: { e: FlowEvent }) {
           owner
             ? 'rounded-br-[4px] bg-[#D8EFCB] text-[#1E3320]'
             : 'rounded-bl-[4px] border border-[#DDE4DD] bg-white text-[#1C2B25]'
-        }`}
+        } ${preSignup ? 'border border-dashed border-[#B4560F]/50' : ''}`}
       >
         <div className="flex items-baseline gap-2">
           <span className="text-[11px] font-medium text-[#5C6B63]">{e.title}</span>
           <span className="font-mono text-[10px] text-[#93A399]">{String(e.ts).slice(11, 16)}Z</span>
+          {preSignup ? (
+            <span className="rounded-full bg-[#FBEFE3] px-2 py-px font-mono text-[9px] tracking-[0.05em] text-[#B4560F]">
+              NOT LOGGED IN
+            </span>
+          ) : null}
         </div>
         <p className="mt-0.5 whitespace-pre-wrap [overflow-wrap:anywhere]">
           <Linkified text={e.body} />
