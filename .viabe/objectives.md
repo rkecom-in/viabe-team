@@ -107,7 +107,7 @@
   via injection). Post-merge: migrations auto-apply → parity check → Fazal authorizes
   framework flags → prod smoke.
 
-## O8 · Learning loop & moat (Track C) — PARKED (post-trust-floor)
+## O8 · Learning loop & moat (Track C) — IN PROGRESS (LAUNCH-CRITICAL, un-parked Fazal 2026-07-29)
 - Bar: the Manager learns per-tenant from the audit log; KG/RAG wired; per-capability
   accuracy graduation; concierge as the learning engine.
 - Now: substrate exists (audit/trace, L2/L3, KG separate); RAG broker landed but UNWIRED;

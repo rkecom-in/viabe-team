@@ -240,3 +240,30 @@ plus authored multi-day PLANNING + CONTINUOUS-OPERATION scenarios (BUILD NEEDED)
 ADAPTS to an injected condition change, decomposes into sound daily actions, and the Manager self-initiates the
 right task via the right modality on an injected event/schedule (not an owner message). Tier-1 = 0 (§2) applies
 to every planning / leading / validating / self-initiated action.
+
+---
+
+## §0 CANONICAL ROLE DEFINITION (Fazal 2026-07-29 — CL-2026-07-29-manager-is-coo)
+
+**Read this first. It supersedes any role description elsewhere in this document or any other.**
+
+**THE MANAGER IS THE COO of the tenant's business — the one running it.** It must:
+(a) have full knowledge of how to run a business · (b) have a good understanding of THIS
+tenant's business · (c) define a roadmap AND a next-7-day plan, **revised every day** factoring
+previous results and the coming 7 days · (d) identify the right action/tool/agent and feed them
+the right **directive, input and objective** · (e) evaluate the specialist's **implementation
+plan** — validate, correct, auto-approve, or send to the owner · (f) evaluate the **outcome**
+against the expected outcome and objective · (g) **self-learn** from that outcome.
+
+**THE SPECIALIST AGENT** has complete knowledge and capability for its specialised task;
+receives directive + inputs + objective from the Manager; produces its OWN implementation plan;
+holds a **THIN memory** tracking only the diversions/changes/customisations THIS tenant needs in
+that action — conveyed as **cards, by the VTR or the Manager**.
+
+**Two approval layers, never blurred:** PLAN approval (e) may be auto-approved by the Manager,
+earned per capability (C4). EFFECT approval (customer sends, money, consent) ALWAYS passes the
+deterministic gates + Pillar-7 owner approval — no confidence, plan quality, or earned autonomy
+bypasses it.
+
+**Delta to §7A (rostered VT-721):** today's loop plans monthly/daily. The ROLLING 7-DAY plan
+REVISED DAILY against prior results is net-new capability, not a rewording.

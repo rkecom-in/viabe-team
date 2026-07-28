@@ -83,3 +83,43 @@ Run either migration anywhere · pick further numbers (184+ are unallocated; ask
 live consumer · deviate from §0/§3 silently. If the shape here appears wrong for a real
 constraint you hit in code, RAISE IT — schema disagreements are architecture decisions, not
 implementation details.
+
+---
+
+# ADDENDUM 2026-07-29 — specialist memory + card assignment (migration 186)
+
+**Correction of a Clau error, caught by Codex.** My 2026-07-29 role-definition addendum told
+Codex to record specialist-memory writes in `knowledge_lifecycle_events`. **That is wrong:**
+that table is GLOBAL (migration 182, table 7 — "NO tenant_id column and NO RLS"). Writing
+tenant-scoped specialist customisation into it would violate the §0 ownership rule. Specialist
+memory and per-tenant assignment get their OWN tenant-scoped tables.
+
+## Allocated: migration **186** — `186_vt711_specialist_memory_and_assignment.sql`
+(187+ unallocated. Split into 186/187 if Codex prefers memory vs assignment separately — ask.)
+
+## A. GLOBAL side (small change to existing global tables — no tenant data)
+- `knowledge_cards` gains **`default_assignment`** — the card's out-of-the-box scope
+  (`manager_global` | `manager_tenant` | `specialist:<agent>` | `disabled`). Global column,
+  no tenant identity. Changes here are global lifecycle events (existing table, correct).
+
+## B. TENANT-SCOPED side (migration 186 — `tenant_id UUID NOT NULL`, RLS + **FORCE ROW LEVEL SECURITY**)
+
+| Table | Holds | Notes |
+|---|---|---|
+| `knowledge_card_assignments` | per-tenant OVERRIDE of a global card's assignment: `tenant_id`, `card_id`, `scope`, `enabled`, `reason`, `actor` | this is what makes flips situational (§13.2): global default + tenant override, evaluated at retrieval |
+| `specialist_memory_cards` | the specialist's THIN memory: `tenant_id`, `agent`, claim/customisation, `authored_by` (`vtr`\|`manager`), `reason`, `status`, `version` | bounded to task customisation — enforce structurally (type/scope constraint), never a general-knowledge estate |
+| `specialist_memory_events` | **append-only** lifecycle for the two tables above: write / change / disable / flip, with actor + reason + idempotency key | the tenant-scoped twin of `knowledge_lifecycle_events`; that global table stays global-only |
+
+## C. Non-negotiables (same rules as 183, same reasons)
+- All three tenant tables: RLS + FORCE RLS + per-op policies.
+- **All three registered in `_PURGE_ORDER` in THIS migration** — children-first
+  (`specialist_memory_events` → `specialist_memory_cards` → `knowledge_card_assignments`).
+  The tenants row is anonymized, not deleted, on DSR: the CASCADE never fires. A tenant table
+  created without a purge entry is an INCOMPLETE migration.
+- Hard-delete canary asserting **physical zero rows** post-purge, plus a co-resident tenant
+  surviving.
+- Emergency flip-out (disable a card for a tenant, or globally) must be an UPDATE on assignment
+  + an event row — instant, no ablation required (§13.2). Ablation governs permanent demotion
+  only.
+- Global-purity test extended: a seeded tenant identifier must not appear in any global table
+  text field after specialist-memory writes.
