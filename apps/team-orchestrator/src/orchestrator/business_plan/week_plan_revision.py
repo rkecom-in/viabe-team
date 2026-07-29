@@ -25,7 +25,9 @@ from uuid import UUID
 
 logger = logging.getLogger(__name__)
 
-_MAX_OUTPUT_TOKENS = 2048
+# 4096: a full 10-action revision + notes overruns 2048 and truncates mid-JSON (canary day-2
+# finding — day 1's short first plan parsed, every later revision failed).
+_MAX_OUTPUT_TOKENS = 4096
 _LLM_TIMEOUT_SECONDS = 90.0
 
 
@@ -46,17 +48,21 @@ def _recent_outcomes(tenant_id: UUID | str, *, hours: int = 24) -> list[dict[str
     try:
         with tenant_connection(tenant_id) as conn:
             rows = conn.execute(
-                "SELECT task_type, status, updated_at FROM manager_tasks "
+                "SELECT objective, status, terminal_outcome FROM manager_tasks "
                 "WHERE tenant_id = %s AND status IN ('completed', 'failed', 'cancelled') "
                 "AND updated_at > now() - %s::interval ORDER BY updated_at DESC LIMIT 20",
                 (str(tenant_id), f"{int(hours)} hours"),
             ).fetchall()
         out = []
         for r in rows:
-            if isinstance(r, dict):
-                out.append({"task": r["task_type"], "status": r["status"]})
-            else:
-                out.append({"task": r[0], "status": r[1]})
+            obj, status, outcome = (
+                (r["objective"], r["status"], r.get("terminal_outcome"))
+                if isinstance(r, dict) else (r[0], r[1], r[2])
+            )
+            # objective is jsonb — a string for triage-minted tasks, an object for planner-shaped
+            # ones; render either to a compact text head.
+            text = obj if isinstance(obj, str) else json.dumps(obj, ensure_ascii=False, default=str)
+            out.append({"task": (text or "")[:160], "status": status, "outcome": outcome})
         return out
     except Exception:  # noqa: BLE001
         logger.warning("week_plan_revision: outcomes read failed (fail-soft) tenant=%s", tenant_id)
@@ -115,7 +121,8 @@ specialist), inputs (object), assigned_to (a specialist/tool name), expected_out
 Every change needs a note: {{"action_key", "change": "keep"|"drop"|"resequence"|"add"|"amend",
 "reason"}} — the reason must cite the outcome/roadmap fact that justifies it.
 
-Reply with STRICT JSON only: {{"actions": [...], "notes": [...]}}"""
+Keep every string SHORT (directive <= 2 sentences, reason <= 1). Prefer FEWER, higher-value
+actions over a full list. Reply with STRICT JSON only: {{"actions": [...], "notes": [...]}}"""
 
 
 def _call_llm(prompt: str, model: str) -> str:
