@@ -174,6 +174,11 @@ _PURGE_ORDER: tuple[str, ...] = (
     # anonymized, not deleted), so a tenant DSR-delete MUST sweep it here or the policy grant survives
     # the purge (the tenant_business_autonomy lesson, on the new single-row-per-tenant table).
     "tenant_business_policy",
+    # VT-721 (mig 188): the rolling 7-day plan chain — the Manager's plan for the tenant's
+    # business (objectives + actions + why-notes = tenant business context). Leaf-ish (self-ref
+    # prev_plan_id is SET NULL; FK tenants CASCADE never fires — tenant anonymized, not deleted),
+    # so a tenant DSR-delete MUST sweep it here or the plans survive the purge.
+    "tenant_week_plans",
     # VT-719 (mig 187): the Manager's asserted-facts ledger — what the Manager has TOLD the owner
     # (fact values + the said sentences). Leaf-ish (self-ref superseded_by is SET NULL; FK tenants
     # CASCADE never fires — tenant anonymized, not deleted), so a tenant DSR-delete MUST sweep it
