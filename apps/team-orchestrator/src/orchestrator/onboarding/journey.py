@@ -2369,6 +2369,56 @@ _AGENT_CATALOG = {
     "customer win-back": "customer_winback",
     "campaigns": "campaigns",
 }
+
+
+def maybe_record_agent_pick(
+    tenant_id: UUID | str, body: str, message_sid: str | None
+) -> str | None:
+    """VT-722 — the MODE-INDEPENDENT agent-pick recorder (the ledger's live-path hole).
+
+    An EXACT catalog tap ("Sales Recovery" / "Customer Win-back" / "Campaigns" — a finite
+    button-title enum, the sanctioned exact-match list class) records the pick into the draft
+    substrate + the asserted-facts ledger, regardless of WHICH gate then consumes the turn:
+    on enforce the brain composes the confirm free-form and the walker beats never run, so
+    without this net `active_agent` never landed on the live path. Called from the runner's
+    inbound seam (pre-mode-split). NEVER consumes the turn — recording only; the reply is
+    whatever the mode's consumer produces. Gated on owner_inputs (the chooser only exists
+    post-activation) so a pre-consent message can't record. Idempotent: the walker beat's own
+    writer (legacy/shadow) collapses onto this via record_assertion's same-value no-op, and
+    the draft merge dedups. Returns the canonical choice, or None (not a tap / gated / error).
+    """
+    try:
+        choice = _AGENT_CATALOG.get((body or "").strip().lower())
+        if not choice:
+            return None
+        from orchestrator.db import tenant_connection
+
+        with tenant_connection(tenant_id) as conn:
+            row = conn.execute(
+                "SELECT owner_inputs FROM tenants WHERE id = %s", (str(tenant_id),)
+            ).fetchone()
+        enabled = bool(row and (row["owner_inputs"] if isinstance(row, dict) else row[0]))
+        if not enabled:
+            return None
+        try:
+            from orchestrator.onboarding.draft_profile import get_draft, write_draft
+
+            have = (get_draft(tenant_id) or {}).get("attributes") or {}
+            agents = list(dict.fromkeys([*(have.get("activated_agents") or []), choice]))
+            write_draft(tenant_id, {"activated_agents": agents}, source="owner")
+        except Exception:  # noqa: BLE001 — the assertion still records; draft is best-effort
+            logger.warning("VT-722: agent-pick draft write failed tenant=%s", tenant_id)
+        from orchestrator.manager.asserted_facts import record_assertion
+
+        record_assertion(
+            tenant_id, "active_agent", choice,
+            statement_text=(body or "").strip(), surface="manager", message_sid=message_sid,
+            derived_from={"site": "runner_pick_net"},
+        )
+        return choice
+    except Exception:  # noqa: BLE001 — recording only; never perturb the inbound pipeline
+        logger.warning("VT-722: agent-pick net failed (fail-soft) tenant=%s", tenant_id)
+        return None
 _AGENT_CHOSEN = {
     "en": (
         "{agent} is on your team — your FREE 1-month trial starts now (after the month it's "

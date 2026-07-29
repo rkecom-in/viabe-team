@@ -1186,6 +1186,16 @@ def webhook_pipeline_run(tenant_id: str, run_id: str, twilio_fields: dict) -> di
     # this row. Placed after the run row exists so the tenant-scoped write has its RLS context.
     _record_owner_inbound_turn(tenant_id, event)
 
+    # VT-722 — the mode-independent agent-pick net: an exact chooser tap records the pick into
+    # the draft + asserted-facts ledger HERE (pre-mode-split), because on enforce the brain
+    # consumes the turn and the walker's writer beats never run. Recording only — never routes,
+    # never consumes; the dispatch commitments block then composes against the just-recorded
+    # pick in the same run. Inbound + non-dupe only; fail-soft inside.
+    if event.message_type == "inbound_message" and not event.dupe_status:
+        from orchestrator.onboarding.journey import maybe_record_agent_pick
+
+        maybe_record_agent_pick(tenant_id, event.body or "", event.twilio_message_sid)
+
     # VT-524 (B1) — owner-notification delivery ledger. Persist the async delivery truth
     # (delivered/failed) against the owner send, keyed by the outbound message_sid, for EVERY
     # status-callback state — runs BEFORE pre_filter (which Rejects 'delivered' as
