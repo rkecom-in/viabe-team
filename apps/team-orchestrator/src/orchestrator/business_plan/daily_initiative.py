@@ -96,6 +96,38 @@ def select_next_item(tenant_id: UUID | str, year_month: str) -> RoadmapItem | No
     return None
 
 
+def _plan_preferred_item(tenant_id: UUID | str, year_month: str) -> RoadmapItem | None:
+    """VT-721 S3 — the first PLANNED roadmap-sourced action in today's 7-day plan whose roadmap
+    item is still accepted AND not yet dispatched this month (the same idempotency rule as the
+    seq pick). None when no plan / no such action — the caller keeps the seq pick. The plan can
+    only re-order among items the roadmap already accepted; it cannot mint new work."""
+    from orchestrator.business_plan.week_plan import latest_plan
+    from orchestrator.manager import task_store
+
+    plan = latest_plan(tenant_id)
+    if plan is None:
+        return None
+    wanted: list[str] = []
+    for a in plan.actions:
+        if a.get("status") == "planned" and a.get("source") == "roadmap_item":
+            ref = str((a.get("inputs") or {}).get("item_id") or a.get("key") or "").strip()
+            if ref:
+                wanted.append(ref)
+    if not wanted:
+        return None
+    candidates: list[RoadmapItem] = []
+    for agent in sorted(OWNING_AGENTS):
+        candidates.extend(items_for_agent(tenant_id, agent, statuses=("accepted",)))
+    by_id = {c.item_id: c for c in candidates}
+    for ref in wanted:
+        cand = by_id.get(ref)
+        if cand is not None and task_store.find_task_id(
+            tenant_id, _idempotency_key(cand.item_id, year_month)
+        ) is None:
+            return cand
+    return None
+
+
 def _surface_initiative(tenant_id: UUID | str, item: RoadmapItem) -> None:
     """D3 — the initiative's FIRST owner-visible act, sent BEFORE ``start_manager_task_workflow``
     (never after — "surface before effect"). Best-effort: a send failure must never block the
@@ -137,6 +169,19 @@ def dispatch_daily_initiative(tenant_id: UUID | str, *, now: datetime) -> dict[s
 
     year_month = now.strftime("%Y%m")
     item = select_next_item(tenant_id, year_month)
+    # VT-721 S3 (active mode only): the 7-day plan GUIDES the pick — when today's plan carries a
+    # planned roadmap-sourced action, prefer THAT roadmap item over raw seq order. The plan can
+    # only re-order among ACCEPTED items that pass the same idempotency rule; it can never mint
+    # an item of its own (plan ≠ effect), and shadow/off leave the seq pick byte-identical.
+    try:
+        from orchestrator.business_plan.week_plan_revision import week_plan_mode
+
+        if week_plan_mode() == "active":
+            preferred = _plan_preferred_item(tenant_id, year_month)
+            if preferred is not None:
+                item = preferred
+    except Exception:  # noqa: BLE001 — plan guidance is advisory; the seq pick stands
+        logger.warning("VT-721: plan-guided pick failed (fail-soft) tenant=%s", tenant_id)
     if item is None:
         return None
 

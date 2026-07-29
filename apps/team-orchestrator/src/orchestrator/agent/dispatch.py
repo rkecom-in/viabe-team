@@ -351,6 +351,36 @@ def _build_commitments_block(tenant_id: UUID) -> str | None:
     return "\n".join(lines)
 
 
+def _build_week_plan_block(tenant_id: UUID) -> str | None:
+    """VT-721 S3 — the current 7-day plan as per-turn context, so 'what's the plan this week?'
+    is answerable from the durable plan object (owner-visible on ask, CL-2026-07-29-manager-is-coo
+    (c)) and the brain never invents a plan. None while the tenant has no plan row (pre-VT-721
+    byte-identical) or the flag is off. Best-effort; cache-preserving per-turn SystemMessage."""
+    try:
+        from orchestrator.business_plan.week_plan import latest_plan
+        from orchestrator.business_plan.week_plan_revision import week_plan_mode
+
+        if week_plan_mode() == "off":
+            return None
+        plan = latest_plan(tenant_id)
+    except Exception:  # noqa: BLE001 — advisory context, never a gate on dispatch
+        logger.warning("dispatch: week-plan block assembly failed (tenant=%s); proceeding without", tenant_id)
+        return None
+    if plan is None or not plan.actions:
+        return None
+    lines = [
+        f"## This week's plan (rolling 7-day, revised {plan.plan_date})",
+        "The current plan for this business. When the owner asks about the plan, answer from "
+        "THIS list in their language — never invent plan items. A planned action is an "
+        "intention, not an authorization: effects still need their approvals.",
+    ]
+    for a in plan.actions:
+        status = a.get("status", "planned")
+        approval = " [needs owner approval]" if a.get("requires_approval") else ""
+        lines.append(f"- ({status}) {a.get('objective')} — {a.get('assigned_to')}{approval}")
+    return "\n".join(lines)
+
+
 def _build_onboarding_state_block(tenant_id: UUID) -> str | None:
     """VT-588 — surface the LIVE onboarding step so the Team-Manager knows it is mid-setup and can
     field an OFF-SCRIPT owner message without losing the thread. The integration resume gate now falls
@@ -840,6 +870,17 @@ def dispatch_brain(
             0,
             SystemMessage(
                 content=commitments_block, id=_initial_turn_msg_id(run_id, "commitments_block")
+            ),
+        )
+
+    # VT-721 S3: the rolling 7-day plan — answerable on ask, never invented. None when the
+    # flag is off or no plan row exists (pre-VT-721 tenants byte-identical).
+    week_plan_block = _build_week_plan_block(tenant_id)
+    if week_plan_block:
+        _messages.insert(
+            0,
+            SystemMessage(
+                content=week_plan_block, id=_initial_turn_msg_id(run_id, "week_plan_block")
             ),
         )
 

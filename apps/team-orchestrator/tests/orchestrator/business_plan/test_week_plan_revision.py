@@ -88,3 +88,47 @@ def test_already_revised_today_is_noop(monkeypatch):
     written, llm = _wire(monkeypatch, prior=prior, llm_reply="{}")
     out = wpr.revise_week_plan(uuid4(), now=datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc), llm=llm)
     assert out is None and written == {}
+
+
+# --- S3: the dispatch block + the plan-guided pick -----------------------------------------
+
+
+def test_dispatch_week_plan_block_renders_and_off_is_none(monkeypatch):
+    from types import SimpleNamespace
+
+    from orchestrator.agent import dispatch as d
+
+    monkeypatch.setenv("TEAM_WEEK_PLAN", "shadow")
+    plan = SimpleNamespace(
+        plan_date=date(2026, 7, 30),
+        actions=[{"objective": "win back lapsed", "assigned_to": "sales_recovery",
+                  "status": "planned", "requires_approval": True}],
+    )
+    monkeypatch.setattr("orchestrator.business_plan.week_plan.latest_plan", lambda t: plan)
+    block = d._build_week_plan_block(uuid4())
+    assert block is not None and "win back lapsed" in block and "[needs owner approval]" in block
+
+    monkeypatch.delenv("TEAM_WEEK_PLAN", raising=False)
+    assert d._build_week_plan_block(uuid4()) is None  # flag off → byte-identical
+
+
+def test_plan_preferred_item_reorders_only_accepted_undispatched(monkeypatch):
+    from types import SimpleNamespace
+
+    from orchestrator.business_plan import daily_initiative as di
+
+    plan = SimpleNamespace(actions=[
+        {"status": "planned", "source": "roadmap_item", "key": "it-2", "inputs": {}},
+        {"status": "planned", "source": "reactive", "key": "chat", "inputs": {}},
+    ])
+    monkeypatch.setattr("orchestrator.business_plan.week_plan.latest_plan", lambda t: plan)
+    it1 = SimpleNamespace(item_id="it-1", seq=1)
+    it2 = SimpleNamespace(item_id="it-2", seq=2)
+    monkeypatch.setattr(di, "items_for_agent", lambda t, a, statuses: [it1, it2] if a == sorted(di.OWNING_AGENTS)[0] else [])
+    monkeypatch.setattr("orchestrator.manager.task_store.find_task_id", lambda t, k: None)
+    got = di._plan_preferred_item(uuid4(), "202607")
+    assert got is it2  # the plan's choice wins over seq order
+
+    # Already dispatched this month → falls through to None (seq pick stands).
+    monkeypatch.setattr("orchestrator.manager.task_store.find_task_id", lambda t, k: "existing")
+    assert di._plan_preferred_item(uuid4(), "202607") is None
