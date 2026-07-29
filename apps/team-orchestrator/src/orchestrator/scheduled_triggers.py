@@ -1342,6 +1342,15 @@ def run_daily_initiative_body(now: datetime | None = None) -> list[dict[str, Any
     now = now or datetime.now(timezone.utc)
     results: list[dict[str, Any]] = []
     for tenant_id in _scan_active_paid_or_trial_tenants():
+        # VT-721 S2 — the daily 7-day-plan revision pass rides the SAME fire, BEFORE the pick
+        # (behind TEAM_WEEK_PLAN; off = byte-identical no-op, shadow = write revisions only).
+        # Fail-soft per tenant: a revision failure never blocks the initiative dispatch.
+        try:
+            from orchestrator.business_plan.week_plan_revision import revise_week_plan
+
+            revise_week_plan(tenant_id, now=now)
+        except Exception:  # noqa: BLE001
+            logger.exception("VT-721 week_plan: revision failed tenant=%s", tenant_id)
         try:
             result = dispatch_daily_initiative(tenant_id, now=now)
             if result is not None:
