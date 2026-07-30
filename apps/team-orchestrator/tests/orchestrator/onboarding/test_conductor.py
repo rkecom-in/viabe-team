@@ -148,7 +148,7 @@ def test_completion_is_deterministic_not_self_declared() -> None:
         business_type="restaurant",
         draft=_draft(category="restaurant", city="Pune"),
         answered=["category", "city"],
-        skipped=["operating_hours", "web_presence", "owner_email"],  # VT-724: skip is legal
+        skipped=["operating_hours", "web_presence"],  # VT-724: email never gates completion
         llm_fn=_gaps("operating_hours"),
     )
     assert done is True
@@ -161,17 +161,21 @@ def test_next_question_none_signals_but_does_not_self_complete() -> None:
     decision = decide_next_question(
         business_type="restaurant",
         draft=_draft(category="restaurant"),
-        answered=["category", "web_presence", "owner_email"],
+        answered=["category", "web_presence"],
         skipped=[],
         llm_fn=_gaps(),  # no gaps
     )
-    assert decision.next_question is None
-    # The deterministic check agrees (same state) — but it is a DIFFERENT function call: the
-    # conductor signals, the check decides.
+    # VT-724: the budget-exempt owner_email capture is the one remaining ask — the conductor
+    # still SIGNALS it (it should be asked)…
+    assert decision.next_question is not None
+    assert decision.next_question.field == "owner_email"
+    # …while the deterministic COMPLETION check (same state) is already TRUE: the email ask
+    # never gates done (the VT-724 hard boundary) — the sharpest proof the two callables are
+    # separate: the conductor signals an ask, the check decides completion.
     assert profile_collection_complete(
         business_type="restaurant",
         draft=_draft(category="restaurant"),
-        answered=["category", "web_presence", "owner_email"],
+        answered=["category", "web_presence"],
         skipped=[],
         llm_fn=_gaps(),
     ) is True
