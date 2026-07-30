@@ -117,6 +117,10 @@ _TENANT_ANONYMIZE = {
     # method / verified_at are non-PII operational flags, left intact.
     "verified_business_name": None,
     "gstin": None,
+    # VT-724 (mig 185 added the column; VT-715): the owner's email — a direct PII anchor. The
+    # anonymize path predates the column, so without this line an erased tenant kept their email
+    # (the recurring VT-366 class, caught by Clau's row-note before any real capture existed).
+    "owner_email": None,
 }
 
 # FK-safe deletion order. Children before parents — pipeline_steps /
