@@ -2041,7 +2041,11 @@ def _maybe_refresh_owner_website(
     belt-and-braces — it guarantees the ≤10s same-turn wait + persistence even when the brain doesn't
     decide to fetch, so the reply reflects the site without depending on the LLM's tool choice."""
     try:
-        m = _URL_RE.search(body or "")
+        # VT-724 (live diag: "Asha.Kirana@Gmail.com" → website 'https://Asha.Kirana'): an
+        # EMAIL-shaped message is never a website — the domain regex matches the local part.
+        # Strip email spans before sniffing so an email answer can't be stolen as a URL.
+        sniff = _EMAIL_RE.sub(" ", body or "")
+        m = _URL_RE.search(sniff)
         if not m:
             return
         url = m.group(0).rstrip(".,;:!?)")
@@ -2130,6 +2134,21 @@ def _handle_reply_with_turn_brain(
     # walker — signal already_presented so the intercept does NOT re-send (the first delivery sent it).
     if message_sid and message_sid == g.get("last_message_sid"):
         return {"already_presented": True, "done": _current(g) is None}
+
+    # VT-724 (the turn-brain-bypasses-walker-seams lesson, applied at build time): while the
+    # owner_email question is IN-FLIGHT, a REPLY turn is the deterministic two-phase machinery's
+    # — never the brain's (live diag: the URL sniffer + brain stole "Asha.Kirana@Gmail.com" as a
+    # website). The walker's owner_email branch owns validate → echo-confirm → persist →
+    # retro-send. START/card turns are exempt — the profile card must still present (the brain
+    # renders it; the email ask follows on the owner's next message).
+    _cur_q = _current(g)
+    if (
+        not is_start
+        and profile_card is None
+        and _cur_q is not None
+        and _cur_q.get("field") == "owner_email"
+    ):
+        return handle_reply(tenant_id, body, message_sid, lang=lang)
 
     # VT-716 — TYPED-TWICE guard (run-5: a repeated business name re-ran discovery and sent
     # the found-online card twice). A NEW sid whose normalized body equals the owner's LAST
