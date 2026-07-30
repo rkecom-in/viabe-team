@@ -117,6 +117,7 @@ def create_signup_tenant(
     consent_residency: bool,
     verified_gstin: str | None = None,
     verified_business_name: str | None = None,
+    owner_email: str | None = None,
     now_fn: Callable[[], datetime] | None = None,
 ) -> SignupResult:
     """Atomically create the signup tenant + consent proof + trial + city_tier +
@@ -170,9 +171,10 @@ def create_signup_tenant(
                 (business_name, plan_tier, phase, whatsapp_number, language_preference,
                  business_type, city_tier, signed_up_at, trial_started_at,
                  phase_entered_at, created_via, verification_status,
-                 verified_business_name, verification_method, gstin, verified_at)
+                 verified_business_name, verification_method, gstin, verified_at,
+                 owner_email)
             VALUES (%s, %s, 'onboarding', %s, %s, %s, %s, %s, %s, %s, 'web',
-                    %s, %s, %s, %s, %s)
+                    %s, %s, %s, %s, %s, %s)
             ON CONFLICT (whatsapp_number) WHERE whatsapp_number IS NOT NULL
             DO NOTHING
             RETURNING id
@@ -180,7 +182,7 @@ def create_signup_tenant(
             (business_name, plan_tier, whatsapp_number, preferred_language,
              business_type, city_tier, now, now, now,
              verification_status, verified_business_name, verification_method,
-             verified_gstin, verified_at),
+             verified_gstin, verified_at, (owner_email or None)),
         ).fetchone()
 
         if row is None:
@@ -379,6 +381,10 @@ class SignupInput:
     # nothing). Defaults to '' so the field stays optional at the dataclass boundary, but
     # run_signup rejects an empty/unverified value (fail-closed).
     gstin: str = ""
+    # VT-724 (Fazal D6): the owner's email from the web form — OPTIONAL, never gates signup.
+    # Typed into a visible form field (the form IS the echo; the WA leg does chat echo-confirm).
+    # Present at create → the consent-record email fires immediately via the existing hook.
+    owner_email: str = ""
     # VT-449: the MCA CIN the owner picked/resolved (registry leg). When present, run_signup fetches
     # MCA Company Master Data → uses the AUTHORITATIVE canonical name for the GST name-match (stronger
     # than the client-typed business_name) + persists tenant_mca_data (encrypted) post-create. Optional.
@@ -420,6 +426,12 @@ def _validate(inp: SignupInput) -> None:
         # legitimate names, e.g. a 3-letter blocked token inside a real word).
         if any(re.search(rf"\b{re.escape(term)}\b", folded) for term in blocked):
             raise SignupError("invalid_name", "name contains a disallowed term")
+    if inp.owner_email and not re.fullmatch(
+        r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}", inp.owner_email.strip()
+    ):
+        # VT-724: an INVALID address is a loud reject (a typo'd consent-record destination is a
+        # DPDP disclosure risk); an EMPTY one is always legal — email never gates signup.
+        raise SignupError("invalid_email", "owner_email must be a valid address (or empty)")
 
 
 def _default_welcome(
@@ -557,6 +569,7 @@ def run_signup(
     _now = now_fn or (lambda: now)  # single instant for both create + trial_end
 
     res = create_signup_tenant(
+        owner_email=(inp.owner_email or '').strip().lower() or None,
         business_name=inp.business_name,
         owner_name=inp.owner_name,
         whatsapp_number=inp.whatsapp_number,
