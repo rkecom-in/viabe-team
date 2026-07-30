@@ -39,7 +39,9 @@ def _load_local_anthropic_key() -> None:
 def main() -> int:
     dsn = os.environ["DATABASE_URL"]
     os.environ.setdefault("TEAM_SUPABASE_DB_URL", dsn)
-    os.environ["TEAM_WEEK_PLAN"] = "shadow"
+    # Respect an outer mode (the ACTIVE-flip proof runs with TEAM_WEEK_PLAN=active); default shadow.
+    os.environ.setdefault("TEAM_WEEK_PLAN", "shadow")
+    print(f"mode: {os.environ['TEAM_WEEK_PLAN']}")
     _load_local_anthropic_key()
 
     from dbos_config import launch_dbos, shutdown_dbos
@@ -122,6 +124,18 @@ def main() -> int:
             check("why-notes on later revisions", bool(rows[1][3]) or bool(rows[2][3]))
         latest = latest_plan(tenant_id)
         check("latest_plan reads day 3", latest is not None and str(latest.plan_id) == str(rows[2][0]) if len(rows) == 3 else False)
+
+        # VT-719 join: each revision recorded a week_plan assertion; the chain must show ONE
+        # active + two superseded (every daily revision = an owned change of yesterday's plan).
+        with psycopg.connect(dsn, autocommit=True) as conn:
+            arows = conn.execute(
+                "SELECT status, count(*) FROM manager_asserted_facts "
+                "WHERE tenant_id = %s AND fact_key = 'week_plan' GROUP BY status",
+                (tenant_id,),
+            ).fetchall()
+        counts = {r[0]: r[1] for r in arows}
+        check("plan assertions: 1 active + 2 superseded (owned-change chain)",
+              counts.get("active") == 1 and counts.get("superseded") == 2)
     finally:
         if tenant_id:
             with psycopg.connect(dsn, autocommit=True) as conn:

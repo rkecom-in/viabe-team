@@ -190,9 +190,33 @@ def revise_week_plan(
     except Exception:  # noqa: BLE001 — a failed proposal keeps yesterday's plan
         logger.warning("week_plan_revision: LLM/parse failed tenant=%s (plan unchanged)", tenant_id, exc_info=True)
         return None
-    return write_revision(
+    plan_id = write_revision(
         tenant_id, actions, notes, plan_date=plan_date, generated_by="manager", model_id=model
     )
+    if plan_id is not None:
+        # VT-721 × VT-719 (the Clau-named hole, closed): the plan is owner-visible (ask + console),
+        # so each revision IS a commitment — record it in the asserted-facts ledger. The ledger's
+        # append-only supersession makes every daily revision an OWNED change of yesterday's plan;
+        # a brain reply stating a different plan trips contradiction_check. Fail-soft inside.
+        try:
+            from orchestrator.manager.asserted_facts import record_assertion
+
+            gated = latest_plan(tenant_id)
+            summary = [
+                {"key": a.get("key"), "objective": a.get("objective"), "status": a.get("status")}
+                for a in (gated.actions if gated else [])
+            ]
+            record_assertion(
+                tenant_id, "week_plan",
+                {"plan_date": str(plan_date), "actions": summary},
+                statement_text=f"7-day plan revised {plan_date}: "
+                + "; ".join(str(s["objective"]) for s in summary[:5]),
+                surface="system",
+                derived_from={"site": "week_plan_revision", "plan_id": str(plan_id)},
+            )
+        except Exception:  # noqa: BLE001 — the ledger never breaks the revision
+            logger.warning("week_plan_revision: plan assertion failed (fail-soft) tenant=%s", tenant_id)
+    return plan_id
 
 
 __all__ = ["revise_week_plan", "week_plan_mode"]

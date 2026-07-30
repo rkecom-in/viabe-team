@@ -37,6 +37,8 @@ FACT_KEYS: frozenset[str] = frozenset(
         "spend_ceiling",           # autonomous-spend bound the Manager stated
         "active_agent",            # which specialist the owner picked / was told is active
         "business_identity",       # the confirmed business identity line (name/city/what-it-does)
+        "week_plan",               # the rolling 7-day plan (VT-721) — owner-visible on ask, so a
+                                   # revision must supersede (owned change), never silently differ
     }
 )
 
