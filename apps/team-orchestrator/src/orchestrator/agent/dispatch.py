@@ -370,9 +370,11 @@ def _build_week_plan_block(tenant_id: UUID) -> str | None:
         return None
     lines = [
         f"## This week's plan (rolling 7-day, revised {plan.plan_date})",
-        "The current plan for this business. When the owner asks about the plan, answer from "
-        "THIS list in their language — never invent plan items. A planned action is an "
-        "intention, not an authorization: effects still need their approvals.",
+        "The current plan for this business. When the owner asks what the plan is (any "
+        "phrasing — 'plan', 'is hafte ka plan', 'what are we doing this week'), your reply "
+        "MUST enumerate the actions below, one short line each in the owner's language, before "
+        "anything else — never summarize them away, never invent items not listed. A planned "
+        "action is an intention, not an authorization: effects still need their approvals.",
     ]
     for a in plan.actions:
         status = a.get("status", "planned")
