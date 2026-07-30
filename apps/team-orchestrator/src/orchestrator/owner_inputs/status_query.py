@@ -431,7 +431,15 @@ def classify_status_query(body: str) -> StatusQueryType:
         and not list_cue
     ):
         return "customer_count"
-    if {"trial", "billing", "plan", "subscription", "phase"} & tokens:
+    # VT-721 — the bare 'plan' token is no longer a billing cue: since the rolling 7-day plan
+    # exists, "what's the plan this week?" is a PLAN ask the brain answers from its week-plan
+    # block (the ACTIVE-flip canary caught this floor hijacking it into the billing template).
+    # 'plan' now counts only alongside an unambiguous billing companion; a bare 'plan' falls to
+    # the brain, which can still answer the billing sense from its own context (defer-safe, the
+    # VT-653 direction).
+    if {"trial", "billing", "subscription", "phase"} & tokens:
+        return "billing"
+    if "plan" in tokens and ({"price", "cost", "charge", "paid", "payment", "upgrade"} & tokens):
         return "billing"
     return "unknown"
 

@@ -90,6 +90,19 @@ def test_already_revised_today_is_noop(monkeypatch):
     assert out is None and written == {}
 
 
+def test_plan_ask_is_not_billing():
+    """VT-721 ACTIVE-flip canary finding: 'what is the plan this week?' was hijacked into the
+    billing template by the bare 'plan' token. A plan ask must fall to the brain; billing still
+    fires with an unambiguous companion token."""
+    from orchestrator.owner_inputs.status_query import classify_status_query
+
+    assert classify_status_query("what is the plan this week?") == "unknown"
+    assert classify_status_query("is hafte ka plan kya hai") == "unknown"
+    assert classify_status_query("what's my trial status") == "billing"
+    assert classify_status_query("plan price kya hai") == "billing"
+    assert classify_status_query("how much does the plan cost") == "billing"
+
+
 # --- S3: the dispatch block + the plan-guided pick -----------------------------------------
 
 
