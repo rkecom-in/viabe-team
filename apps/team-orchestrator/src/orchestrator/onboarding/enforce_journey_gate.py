@@ -387,6 +387,21 @@ def maybe_handle_enforce_journey_turn(
         if kickoff:
             return maybe_handle_journey_reply(tenant_id, text, message_sid, recipient)
 
+        # A2 (VT-724, live-canary gap): while the owner_email question is IN-FLIGHT, the
+        # deterministic two-phase machinery owns EVERY turn of the exchange — the typo
+        # re-present, the echo, AND the bare "Yes" confirm (which this gate's other rules
+        # would otherwise route to the brain / other nets, leaving the address unconfirmed
+        # and the consent record unsent). Active journeys only.
+        if g is not None and g.get("status") == "active":
+            try:
+                from orchestrator.onboarding.journey import _current
+
+                _q = _current(g)
+                if _q is not None and _q.get("field") == "owner_email":
+                    return maybe_handle_journey_reply(tenant_id, text, message_sid, recipient)
+            except Exception:  # noqa: BLE001 — fail-open to the gate's normal rules
+                pass
+
         # B — setup-status ask: answer honestly from the row (a question, but a JOURNEY-status
         # question this gate owns; checked before the interrogative fall-through).
         if g is not None and _is_setup_status_ask(text):
