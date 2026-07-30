@@ -112,6 +112,11 @@ def from_scratch_question_queue() -> list[dict[str, Any]]:
          "prompt_en": "What kind of business is it? (e.g. restaurant, salon, kirana/retail, "
                       "services)",
          "prompt_hi": "यह किस तरह का बिज़नेस है? (जैसे रेस्टोरेंट, सैलून, किराना/रिटेल, सर्विसेज़)"},
+        {"field": "owner_email", "kind": "gap", "draft_value": None,
+         "prompt_en": "What's your email address? We'll send your consent record there "
+                      "for your files. (Reply Skip if you'd rather not.)",
+         "prompt_hi": "आपका email पता क्या है? आपका consent record वहीं भेजेंगे। "
+                      "(नहीं देना हो तो Skip भेजें।)"},
         {"field": "city", "kind": "gap", "draft_value": None,
          "prompt_en": "Which city are you in?",
          "prompt_hi": "आप किस शहर में हैं?"},

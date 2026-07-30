@@ -807,6 +807,17 @@ def handle_reply(
                     _confirm(tenant_id, {field: value})
             else:
                 _confirm(tenant_id, {field: value})
+    elif field == "owner_email":
+        # VT-724 — the email capture is TWO-PHASE (echo-and-confirm): a consent record naming
+        # the business must never go to an address the owner hasn't seen echoed back (a typo =
+        # a self-inflicted DPDP disclosure). Phase 1: a syntactically-valid address is held
+        # PENDING + echoed with a Yes/correct ask (no advance). Phase 2: Yes → persist to
+        # tenants.owner_email + fire the retroactive consent-record send + record + advance;
+        # a new address replaces the pending echo; anything else re-presents.
+        hold = _handle_owner_email_turn(tenant_id, q, body, toks, answers, skipped)
+        if hold is not None:
+            return hold
+        recorded_answer = True
     else:  # gap question — the body IS the value
         if field and body.strip():
             answers[field] = body.strip()
@@ -886,6 +897,85 @@ def handle_reply(
         # Deterministic; holds with the LLM down (that is exactly when this path runs).
         reply = _prefix_answer_ack(reply)
     return reply
+
+
+_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+_PENDING_EMAIL_KEY = "owner_email__pending"
+
+
+def _handle_owner_email_turn(
+    tenant_id, q, body: str, toks, answers: dict[str, Any], skipped: list[str]
+) -> dict[str, Any] | None:
+    """VT-724 — the two-phase owner_email turn. Returns a reply dict to HOLD on this question
+    (no advance), or None when a confirmed address was recorded (the caller's shared advance
+    runs). Deterministic throughout; the pending echo survives restarts via the answers jsonb."""
+    pending = str(answers.get(_PENDING_EMAIL_KEY) or "")
+    match = _EMAIL_RE.search(body or "")
+    if match:
+        email = match.group(0).strip().rstrip(".").lower()
+        # A (new) address → hold it pending + echo for confirmation. Replaces any prior pending.
+        answers[_PENDING_EMAIL_KEY] = email
+        try:
+            _write_answers_skipped(tenant_id, answers, skipped)
+        except Exception:  # noqa: BLE001 — a persist miss only risks a re-ask, never a wrong send
+            logger.warning("VT-724: pending-email persist failed tenant=%s", tenant_id)
+        return {
+            "reply_en": (
+                f"Got it — {email}. Your consent record will go there. "
+                "Reply Yes to confirm, or send the correct address."
+            ),
+            "reply_hi": (
+                f"ठीक है — {email}. आपका consent record इसी पते पर जाएगा। "
+                "सही है तो Yes भेजें, या सही पता भेज दें।"
+            ),
+            "done": False,
+            "re_present": True,
+        }
+    if pending and (toks & _YES):
+        # Confirmed: persist + fire the retroactive consent-record send; record + advance.
+        try:
+            with tenant_connection(tenant_id) as conn:
+                conn.execute(
+                    "UPDATE tenants SET owner_email = %s WHERE id = %s",
+                    (pending, str(tenant_id)),
+                )
+        except Exception:  # noqa: BLE001 — the journey answer still records; retro-send skips
+            logger.warning("VT-724: owner_email persist failed tenant=%s", tenant_id)
+        try:
+            from orchestrator.onboarding.consent_record_email import (
+                send_pending_consent_record,
+            )
+
+            send_pending_consent_record(tenant_id)
+        except Exception:  # noqa: BLE001 — the record send is fail-soft + idempotent
+            logger.warning("VT-724: pending consent-record send failed tenant=%s", tenant_id)
+        answers[q.get("field")] = pending
+        answers.pop(_PENDING_EMAIL_KEY, None)
+        return None
+    # No address in the body and no confirmable pending → re-present with the format hint
+    # (or, with a pending held, nudge toward Yes/correction).
+    if pending:
+        return {
+            "reply_en": (
+                f"Should I use {pending}? Reply Yes to confirm, or send the correct address."
+            ),
+            "reply_hi": (
+                f"क्या {pending} सही है? Yes भेजें, या सही पता भेज दें।"
+            ),
+            "done": False,
+            "re_present": True,
+        }
+    return {
+        "reply_en": (
+            "That doesn't look like an email address — something like name@example.com. "
+            "You can also reply Skip."
+        ),
+        "reply_hi": (
+            "यह email पता नहीं लग रहा — जैसे name@example.com. आप Skip भी भेज सकते हैं।"
+        ),
+        "done": False,
+        "re_present": True,
+    }
 
 
 def _advance(tenant_id, cursor, answers, skipped, message_sid) -> None:

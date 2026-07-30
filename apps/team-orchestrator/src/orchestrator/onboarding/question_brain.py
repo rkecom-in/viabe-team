@@ -240,7 +240,7 @@ def compose_onboarding_questions(
     # residual answer the owner has ALREADY given consumes one slot, so an answered question
     # can never refill the window with a fresh one. Identity captures (name/owner/GST card)
     # and confirm-style answers (fields the draft itself carries) are not residuals.
-    _non_residual = {"business_name", "owner_name", "gst_identity"}
+    _non_residual = {"business_name", "owner_name", "gst_identity", "owner_email"}
     _draft_canon = {_canonical_field(f) for f in draft_attrs}
     spent = sum(
         1 for f in answered_set
@@ -315,6 +315,36 @@ def compose_onboarding_questions(
         )
         if len(gaps) >= max_gaps:
             break
+
+    # VT-724 (Fazal, resolves D6: email at ONBOARDING) — the owner_email capture is a
+    # deterministic, BUDGET-EXEMPT question asked LAST: it is a compliance capture (the DPDP
+    # consent record needs an address), not a profile residual, so it never consumes a gap slot
+    # and never counts as spent (_non_residual). Skip is legal — capture never gates anything.
+    if "owner_email" not in answered_set and "owner_email" not in {q.field for q in gaps}:
+        gaps.append(
+            Question(
+                field="owner_email",
+                kind="gap",
+                prompt_en=(
+                    "One last detail — what's your email address? We'll send your consent "
+                    "record there for your files. (Reply Skip if you'd rather not.)"
+                ),
+                prompt_hi=(
+                    "एक आख़िरी जानकारी — आपका email पता क्या है? आपका consent record वहीं "
+                    "भेजेंगे, आपके records के लिए। (नहीं देना हो तो Skip भेजें।)"
+                ),
+                suggestions_en=("Skip",),
+                suggestions_hi=("Skip",),
+                help_en=(
+                    "A copy of the consent you gave us, emailed to you as a record — like "
+                    "name@example.com."
+                ),
+                help_hi=(
+                    "आपने जो consent दिया उसकी एक copy आपको email पर मिलेगी — जैसे "
+                    "name@example.com."
+                ),
+            )
+        )
 
     return confirms + gaps
 

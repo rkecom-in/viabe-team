@@ -38,7 +38,8 @@ def test_excludes_answered_and_drafted_from_gaps_and_confirms():
 def test_minimal_cap_no_dump():
     many = _gaps(*[f"f{i}" for i in range(20)])
     qs = compose_onboarding_questions("services", {"attributes": {}}, answered=[], llm_fn=many)
-    assert sum(q.kind == "gap" for q in qs) <= _MAX_GAPS
+    # VT-724: owner_email is a budget-EXEMPT compliance capture (Fazal D6) appended last.
+    assert sum(q.kind == "gap" and q.field != "owner_email" for q in qs) <= _MAX_GAPS
 
 
 def test_all_questions_bilingual():
@@ -52,7 +53,7 @@ def test_gap_dedup():
     qs = compose_onboarding_questions("apparel", {"attributes": {}}, answered=[], llm_fn=_gaps("hours", "hours", "size_range"))
     gap_fields = [q.field for q in qs if q.kind == "gap"]
     # VT-696: no draft → no web-presence ask (it is draft-gated); the dedup contract holds.
-    assert gap_fields == ["operating_hours", "size_range"]
+    assert [f for f in gap_fields if f != "owner_email"] == ["operating_hours", "size_range"]
 
 
 def test_gap_synonym_repeat_and_draft_coverage_suppressed():
@@ -77,8 +78,11 @@ def test_llm_failure_falls_back_to_confirms_only():
 
     qs = compose_onboarding_questions("apparel", _DRAFT, answered=[], llm_fn=boom)
     # the confirm questions still stand; no crash. VT-696: the deterministic web-presence
-    # capture survives an LLM outage (it never depends on the gap LLM).
-    assert qs and all(q.kind == "confirm" or q.field == "web_presence" for q in qs)
+    # capture survives an LLM outage (it never depends on the gap LLM). VT-724: so does the
+    # deterministic owner_email compliance capture.
+    assert qs and all(
+        q.kind == "confirm" or q.field in ("web_presence", "owner_email") for q in qs
+    )
     assert any(q.kind == "confirm" for q in qs)
 
 

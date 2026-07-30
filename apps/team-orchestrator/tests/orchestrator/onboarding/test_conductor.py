@@ -63,7 +63,7 @@ def test_next_question_is_confirm_first_then_gap() -> None:
     # the full remaining set is registry-bounded (confirm fields + the deterministic VT-696
     # web-presence capture + the one gap).
     fields = [q.field for q in decision.remaining]
-    assert fields == ["category", "city", "web_presence", "operating_hours"]
+    assert fields == ["category", "city", "web_presence", "operating_hours", "owner_email"]
 
 
 def test_next_question_advances_to_gap_once_confirms_answered() -> None:
@@ -148,7 +148,7 @@ def test_completion_is_deterministic_not_self_declared() -> None:
         business_type="restaurant",
         draft=_draft(category="restaurant", city="Pune"),
         answered=["category", "city"],
-        skipped=["operating_hours", "web_presence"],
+        skipped=["operating_hours", "web_presence", "owner_email"],  # VT-724: skip is legal
         llm_fn=_gaps("operating_hours"),
     )
     assert done is True
@@ -161,7 +161,7 @@ def test_next_question_none_signals_but_does_not_self_complete() -> None:
     decision = decide_next_question(
         business_type="restaurant",
         draft=_draft(category="restaurant"),
-        answered=["category", "web_presence"],
+        answered=["category", "web_presence", "owner_email"],
         skipped=[],
         llm_fn=_gaps(),  # no gaps
     )
@@ -171,7 +171,7 @@ def test_next_question_none_signals_but_does_not_self_complete() -> None:
     assert profile_collection_complete(
         business_type="restaurant",
         draft=_draft(category="restaurant"),
-        answered=["category", "web_presence"],
+        answered=["category", "web_presence", "owner_email"],
         skipped=[],
         llm_fn=_gaps(),
     ) is True
