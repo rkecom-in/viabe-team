@@ -723,6 +723,10 @@ def handle_reply(
     # is NOT an answer: re-present the gap WITHOUT recording/advancing. Gap-only (never a confirm — a
     # confirm-"yes" is a real signal, handled below); subset test so a mid-sentence particle still records.
     is_bare_gap_affirm = q.get("kind") != "confirm" and bool(toks) and toks <= _GAP_BARE_AFFIRM
+    # VT-724 (canary v4: the 'Yes' confirm was eaten here): with a PENDING echoed email, a bare
+    # affirmation IS the meaningful confirm — the two-phase branch owns it.
+    if field == "owner_email" and answers.get(_PENDING_EMAIL_KEY):
+        is_bare_gap_affirm = False
     if not is_skip and _is_bare_greeting(body):
         # A bare greeting → acknowledge + re-present the SAME question (the owner just said hi).
         return _greet_then_question(q)
