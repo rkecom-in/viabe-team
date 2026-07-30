@@ -22,8 +22,15 @@
 | D3 | **O8 activation flip** — when the Manager starts *using* the knowledge | Engine built + inert. Cards eligible. Needs: my sealed set + baseline first (in progress, mine). | O8 → serving |
 | D4 | **VT-231 prod cutover call** | Framework flag promotion rides it. | O7 |
 | D5 | **O9 dynamic sensing release** / **O8 learning-loop un-park depth** | Both held by your sequencing. | O0 north star |
-| D6 | **Where do we ask owners for their EMAIL?** | The DPDP consent-record email is live on prod but nothing collects an email yet — every record sits "pending e-mail" and sends retroactively the moment one lands. CC recommends: one WhatsApp ask right after team activation + an optional portal field. | Consent-record emails actually going out |
 | D7 | **Knowledge-card promotion bars** | Separate from D3's flip: how much measured evidence PROMOTES a card to advising tenants, and what demotes it. Clau brings the baseline numbers; the bars are your call. | O8 graduation |
+
+**DECIDED 2026-07-30 — off the list:**
+
+- **D6 owner email → ONBOARDING, both surfaces.** Fazal: "lets get email address from the tenant
+  as part of the onboarding form and also in the WA onboarding journey." Overrides CC's
+  post-activation recommendation. Rostered **VT-724** (High, CC). Skippable — never gates
+  onboarding or activation.
+- **VT-721 → ACTIVE on dev.** Fazal: "Go on with VT-721." Flip dispatched to CC.
 
 ---
 
@@ -36,8 +43,12 @@
   (no new failure classes). The Manager's commitment ledger now fills on every mode.
 - **O8 engine:** BUILT + MERGED, inert (default off, 0 retrieval-eligible). #542/#543/#545/#548.
 - **Rights gate:** reset per your ruling — 118 cards eligible, originality check replaces it.
-- **Next in CC's queue:** VT-721 (rolling 7-day plan) after the ×3 verdict.
-- **Codex queue:** idle pending next brief.
+- **VT-721 rolling 7-day plan: DEV-PROVEN** (mig 188, 3-fire chain canary 7/7 real-LLM) —
+  ACTIVE flip authorized by you 2026-07-30, CC executing.
+- **Next in CC's queue:** VT-721 flip → VT-724 (owner email) → VT-720 (S4 route unification).
+- **Codex queue:** idle **by design** — its next row (VT-723, additive corpus coverage) targets
+  the weak slices the O11 baseline exposes, and that baseline is Clau's to produce. Not a stall;
+  the unblocker is mine. No filler work dispatched.
 
 ---
 
