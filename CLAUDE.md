@@ -5,7 +5,7 @@ You (Claude) just got pointed at this repo. **Read these files first, in this or
 1. **`docs/clau/operating-brief.md`** — defines the three-role model (Fazal/Cowork/Claude Code), the sequencing principle, and how decisions flow. ~5 min read.
 2. **`docs/clau/latest-snapshot.md`** — 5-field State Snapshot: Critical Path / In Flight / Blocked On / Next Action / Do Not. **Treat as suspect until reconciled.** This file drifts; see Rule #14 below.
 3. **`docs/clau/decisions-ledger.md`** — flat list of every Standing decision with originating CL number. Do not re-litigate anything in here.
-4. **`docs/agent-framework/ARCHITECTURE.md`** — CANONICAL definition of how the system is shaped (Manager / SubAgent / Tool; ratified Fazal 2026-07-16). The structural source of truth.
+4. **`docs/agent-framework/ARCHITECTURE.md`** — CANONICAL definition of how the system is shaped (Manager / SubAgent / Tool; ratified Fazal 2026-07-16). The structural source of truth. **Read §0.1 first** — it defines the roles in business terms (Manager = the tenant's COO; specialist = expert doer with thin memory), §0.1.1 separates PLAN approval from EFFECT approval, and **§0.1.3 defines where knowledge sits and how it is flipped** between Manager-global / Manager-tenant / specialist memory at runtime. Where any doc disagrees with §0.1, §0.1 wins.
 5. **`docs/clau/active-context-summary.md`** — Cowork-maintained digest of every active CL + brief contract. Required reading before any brief-ready dispatch (Rule #16).
 6. **`docs/clau/discipline-rules.md`** — full text of Rules #1–17. Reference; read on demand.
 
