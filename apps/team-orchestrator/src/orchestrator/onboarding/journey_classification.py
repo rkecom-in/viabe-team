@@ -84,14 +84,36 @@ def classify_journey_state(
     )
 
 
+def pending_ask_line(g: dict[str, Any], locale: str) -> str | None:
+    """VT-720 — the ONE outstanding item as a SHORT question, in the same confirm-vs-gap terms as
+    ``classify_journey_state``. ``None`` when nothing is outstanding.
+
+    Always ends in a question mark: its caller appends it to a reply that asked nothing, and the
+    emission gate's structural invariant is precisely "a reply during active+incomplete onboarding
+    must ask something".
+    """
+    queue = list(g.get("question_queue") or [])
+    cursor = int(g.get("cursor") or 0)
+    q = queue[cursor] if 0 <= cursor < len(queue) else None
+    if q is None:
+        return None
+    value = str(q.get("draft_value") or "").strip()
+    if q.get("kind") == "confirm" and value:
+        return (
+            f"बस एक बात confirm कर दें — {value} सही है?"
+            if locale == "hi"
+            else f"Just one thing — is {value} right?"
+        )
+    prompt = str((q.get("prompt_hi") if locale == "hi" else q.get("prompt_en")) or "").strip()
+    return prompt or None
+
+
 def compose_for_journey(
     tenant_id: UUID | str,
     owner_message: str,
     g: dict[str, Any],
     classification: RouteClassification,
     locale: str,
-    *,
-    rejected_draft: str | None = None,
 ) -> str | None:
     """Hand a journey classification to the composer; return the Manager's own line, or ``None``.
 
@@ -121,7 +143,6 @@ def compose_for_journey(
             classification,
             locale=locale,
             provenance=dict(draft.get("provenance") or {}),
-            rejected_draft=rejected_draft,
         )
     except Exception:  # noqa: BLE001 — best-effort; the caller's deterministic line still answers
         return None

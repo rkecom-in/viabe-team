@@ -979,45 +979,49 @@ def test_claim_veto_discards_a_rewrite_that_still_claims_a_draft(monkeypatch):
     assert out == mod._REPLACEMENT_COPY["campaign_not_drafted"]["en"]
 
 
-def test_onboarding_incomplete_veto_prefers_rewrite(monkeypatch):
-    """Layer 3d kept its invariant (never read as done while incomplete) and lost the verbatim
-    paste: the owner's actual question keeps its answer instead of being deleted."""
+def _patch_layer3d(monkeypatch):
     _patch_facts(monkeypatch, fact=True, pending=False)
     monkeypatch.setattr(mod, "_emit_blocked_audit", lambda *a, **k: None)
     monkeypatch.setattr(mod, "campaign_draft_fact_exists", lambda t: True)
     monkeypatch.setattr(mod, "_onboarding_journey_active", lambda t: True)
     monkeypatch.setattr(mod, "_onboarding_incomplete_swap", lambda t, loc: "We found Agra — right?")
+
+
+def test_honest_reply_is_kept_verbatim_and_the_ask_appended(monkeypatch):
+    """The measured defect (owner_corrects_inline_direct): an owner asked how long setup takes and
+    got a correct answer, which Layer 3d DELETED and replaced with a verbatim re-ask. The layer no
+    longer replaces the Manager's words at all — it appends the one fact it owns."""
+    _patch_layer3d(monkeypatch)
     monkeypatch.setattr(
-        mod, "_recompose_onboarding_incomplete",
-        lambda t, rejected, loc: "Setup takes about two minutes. Just confirm Agra is right?",
+        mod, "_append_pending_ask",
+        lambda t, r, loc: f"{r} Just one thing — is Agra right?",
     )
     out = mod.apply_emission_gate("Setup takes about two minutes.", TENANT)
-    assert out == "Setup takes about two minutes. Just confirm Agra is right?"
+    assert out == "Setup takes about two minutes. Just one thing — is Agra right?"
+    assert out.startswith("Setup takes about two minutes."), "the Manager's sentence survives verbatim"
 
-    monkeypatch.setattr(mod, "_recompose_onboarding_incomplete", lambda t, rejected, loc: None)
+
+def test_layer3d_falls_back_to_the_swap_when_no_ask_can_be_built(monkeypatch):
+    _patch_layer3d(monkeypatch)
+    monkeypatch.setattr(mod, "_append_pending_ask", lambda *a, **k: None)
     assert mod.apply_emission_gate("Setup takes about two minutes.", TENANT) == (
         "We found Agra — right?"
-    ), "no composer → the deterministic swap still guarantees honesty"
+    ), "the deterministic swap still guarantees the honesty invariant"
 
 
-def test_onboarding_recompose_rejects_a_question_less_rewrite(monkeypatch):
-    """_recompose_onboarding_incomplete enforces the invariant on its OWN output."""
+def test_append_pending_ask_uses_the_confirm_value_and_must_ask(monkeypatch):
     monkeypatch.setattr(
         "orchestrator.onboarding.journey.get_journey",
         lambda t: {"status": "active", "cursor": 0, "answers": {}, "question_queue": [
             {"field": "city", "kind": "confirm", "draft_value": "Agra", "prompt_en": "?"}
         ]},
     )
-    monkeypatch.setattr(
-        "orchestrator.onboarding.journey_classification.compose_for_journey",
-        lambda *a, **k: "You're all set, nothing more needed.",
-    )
-    assert mod._recompose_onboarding_incomplete(TENANT, "All done!", "en") is None
+    out = mod._append_pending_ask(TENANT, "Setup takes about two minutes.", "en")
+    assert out == "Setup takes about two minutes. Just one thing — is Agra right?"
 
+    # Nothing outstanding → None (the caller's swap decides).
     monkeypatch.setattr(
-        "orchestrator.onboarding.journey_classification.compose_for_journey",
-        lambda *a, **k: "Almost there — is Agra right?",
+        "orchestrator.onboarding.journey.get_journey",
+        lambda t: {"status": "active", "cursor": 0, "answers": {}, "question_queue": []},
     )
-    assert mod._recompose_onboarding_incomplete(TENANT, "All done!", "en") == (
-        "Almost there — is Agra right?"
-    )
+    assert mod._append_pending_ask(TENANT, "Setup takes about two minutes.", "en") is None

@@ -865,7 +865,6 @@ def compose_classified_reply(
     *,
     locale: str = "en",
     provenance: dict[str, Any] | None = None,
-    rejected_draft: str | None = None,
 ) -> str | None:
     """VT-720 (S4) — compose the owner-visible line for a route that CLASSIFIED instead of speaking.
 
@@ -880,12 +879,6 @@ def compose_classified_reply(
         answer turn: nothing here may record a field, confirm one, or advance the cursor. The
         durable spine stays exactly where the deterministic layer left it.
 
-    ``rejected_draft`` — a reply a deterministic FLOOR just vetoed. The floor's veto stands (the
-    claim it caught must not survive), but the veto must not silently delete a true and responsive
-    answer along with it: the measured case is an owner asking "how long will setup take?" whose
-    answer was replaced wholesale by a verbatim re-ask of the pending question. Passing the vetoed
-    draft lets the composer keep what was true and drop only what was not.
-
     The classification rides the USER prompt, not the system prompt: it is per-turn volatile, and
     the system block is the per-owner-stable cached prefix (see ``_invoke_llm``).
     """
@@ -899,17 +892,6 @@ def compose_classified_reply(
             locale=locale, provenance=provenance, is_start=False, profile_card=None,
         )
         blocks = [user, render_classification_block(classification)]
-        if (rejected_draft or "").strip():
-            blocks.append(
-                "## Your previous draft for this turn was BLOCKED\n"
-                "A deterministic check rejected it because it did not match the facts above "
-                "(typically: it read as though setup were finished when it is not).\n"
-                f"BLOCKED DRAFT: {rejected_draft.strip()[:1200]}\n"
-                "Rewrite it: KEEP everything in it that was true and that answered the owner's "
-                "actual message; REMOVE anything that claims or implies setup is complete; then ask "
-                "for the ONE outstanding item above, in your own words. Do not repeat an earlier "
-                "message word-for-word."
-            )
         plan = _parse_turn_plan(
             _invoke_llm(system, "\n\n".join(blocks), timeout_s=_CLASSIFIED_TIMEOUT_S)
         )
