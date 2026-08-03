@@ -331,3 +331,27 @@ Fazal's process ruling on the §6 graduation gate (minimum sample sizes, non-inf
 
 ## CL-2026-07-29b-knowledge-not-source — SUPERSEDES CL-2026-07-29-card-rights-licensed-sources: inclusion turns on the card's ACCURACY and VALUE and on ORIGINALITY OF EXPRESSION — not on the source's licence (Fazal 2026-07-29, Standing)
 Fazal corrected Clau's over-cautious position: *"how would license matter for the 96 unlicensed cards? We are only using their information as a knowledge, and our criteria of inclusion and exclusion must be the accuracy and value of the knowledge provided by the card and not its source."* **He is right, and the earlier ruling is superseded.** Copyright protects EXPRESSION, not facts or ideas (the idea/expression dichotomy). A card that re-expresses an extracted finding in our own words is knowledge, not a reproduction — the 118 cards are Codex-authored structure and sentences (situation / decision pressure / risk / recommended action), with none of the source's expression surviving. **The gate is therefore RESET:** (1) INCLUSION = accuracy + value + measured impact (§6), never source licence; (2) `usage_rights: unknown` no longer blocks embedding or serving — the 96 cards are eligible; (3) provenance/source-class remains, but for its legitimate purpose — **AUTHORITY WEIGHTING** in retrieval ranking and conflict resolution (T1–T4), not eligibility. **Narrow cases where source still binds, retained deliberately:** (a) **expression-originality check** — a card containing verbatim or near-verbatim source text is a reproduction and is rejected/rewritten regardless of licence (this replaces the rights gate as the real check); (b) **compilation/database rights** — wholesale extraction of a substantial portion of ONE source/dataset can attach rights even where individual facts don't; flag if a single source dominates; (c) **contractual ToS** prohibiting extraction — binds by contract, not copyright; (d) paywalled material obtained by circumventing access — excluded; (e) **raw archived source pages remain local-only and never retrieval-eligible** — those ARE reproductions (the existing rule, now correctly justified); (f) the 5 `live_link_only` cards keep their honesty convention (never claim the local synthesis is the source original). **VT-723 is RE-SCOPED** from "replace unknown-rights cards" to "grow coverage from high-authority licensed sources where O11 shows weak slices" — additive, not remedial. Clau's note for the record: this is a legal framework, not legal advice; if a specific publisher's ToS or a dominant-source concentration surfaces, that is a counsel question, not an engineering one.
+
+## CL-2026-08-03-seed-then-full-ingestion — Standing (Fazal)
+
+**Decision.** O8 fills the registry in two stages: a small seed corpus to prove the serving path
+end-to-end (**VT-726**), then the **FULL 118-file ingestion (VT-727), which must not be missed**.
+Fazal, verbatim: *"Seed a small corpus, prove the pipe, and once proved ensure all 118 files are
+ingested. The full ingestion must not be missed."*
+
+**Trigger.** CC's 2026-08-03 bounce of VT-725: every O8 table held ZERO rows. Clau had asserted
+"118 eligible cards" — those are FILES, never ingested. Decisive blocker: `knowledge_cards` has
+no `domain` column while `CardRetrievalEngine` filters on `card.domain` first.
+
+**Binding sub-rulings (Clau, within the grant):**
+- `domain` is a **first-class NOT NULL column** on `knowledge_cards` (migration 189), indexed
+  `(domain, status)` — never a per-retrieval 3-way join, never derived.
+- **Seed cards MUST enter through the VT-710 pipeline. A hand-authored direct INSERT is
+  forbidden** — it would rebuild the authored-playbook mechanism Track-D retired and R1 killed,
+  and would prove nothing about the pipe.
+- VT-727 does not close because VT-726 proved the pipe. Per-file verdict for all 118; a silent
+  drop is a row failure.
+
+**Lesson recorded (Clau).** Third premise error in this program — runtime state asserted from
+documents instead of verified against the database. CC verified; Clau did not. Bouncing a row
+with evidence is correct behaviour and is to continue.

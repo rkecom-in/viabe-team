@@ -9,6 +9,10 @@
 
 ## 🔴 BLOCKING — work stops until you act
 
+**B0 — Hand Codex its brief.** `docs/agent-framework/CODEX-BRIEF-2026-08-03-seed-corpus-then-full-ingestion.md`
+(pushed with CC's next push). Codex has been idle and now has real work: migration 189 + the
+seed ingestion, then the full 118.
+
 **B1 — Place the sealed eval dataset on the Mac, outside the repo.** Clau has authored it
 (12 cases, digest `96304705…`, harness-validated PASS, family-isolated). The VT-705 contract
 forbids it entering the repo, a branch, or any builder-visible artifact — so it cannot be
