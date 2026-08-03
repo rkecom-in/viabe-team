@@ -706,6 +706,105 @@ def _onboarding_incomplete_swap(tenant_id: UUID | str, locale: str) -> str | Non
     return variants.get(locale) or variants["en"]
 
 
+def _recompose_claim_veto(tenant_id: UUID | str, rejected: str, finding: str) -> str | None:
+    """VT-720 (S4) — rewrite a false-claim-vetoed reply in the Manager's voice, then RE-CHECK it.
+
+    The rewrite is passed back through the very fact-check that vetoed the original: if it still
+    claims a draft that does not exist, it is discarded and the deterministic replacement stands. A
+    floor handed a voice must not become a floor with a loophole.
+
+    ``None`` on any failure (no key, LLM error, rewrite still false) → the caller's canned line.
+    """
+    try:
+        from orchestrator.agent.dispatch import compose_under_veto
+        from orchestrator.conversation_log import active_window
+
+        owner_message = ""
+        try:
+            window = active_window(tenant_id, max_turns=4)
+            last_owner = next(
+                (t for t in reversed(window) if t.get("role") == "owner"), None
+            )
+            owner_message = str((last_owner or {}).get("text") or "")
+        except Exception:  # noqa: BLE001 — the owner's line is context, not a precondition
+            owner_message = ""
+        rewrite = compose_under_veto(
+            tenant_id, rejected, finding, owner_message=owner_message
+        )
+        if not rewrite:
+            return None
+        if contains_campaign_draft_claim(rewrite):
+            logger.info(
+                "emission_gate: claim-veto rewrite still claims a draft tenant=%s — canned line stands",
+                tenant_id,
+            )
+            return None
+        return rewrite
+    except Exception:  # noqa: BLE001 — best-effort voice; the deterministic replacement still holds
+        logger.warning(
+            "emission_gate: claim-veto recompose failed tenant=%s — canned line stands", tenant_id
+        )
+        return None
+
+
+def _recompose_onboarding_incomplete(
+    tenant_id: UUID | str, rejected: str, locale: str
+) -> str | None:
+    """VT-720 (S4) — rewrite a Layer-3d-vetoed reply in the Manager's own voice.
+
+    Returns ``None`` on ANY failure (no journey row, no key, LLM error) so the caller keeps its
+    deterministic swap: the honesty invariant (never read as done while incomplete) must hold
+    without the LLM, and only the VOICE depends on it.
+
+    The composer is given the vetoed draft explicitly — it keeps what actually answered the owner
+    and drops only the completion reading. It is also told to avoid repeating an earlier message
+    verbatim, which is what the pasted-prompt swap did every time it fired.
+    """
+    try:
+        from orchestrator.onboarding.journey import get_journey
+        from orchestrator.onboarding.journey_classification import (
+            classify_journey_state,
+            compose_for_journey,
+        )
+
+        g = get_journey(tenant_id)
+        if g is None or g.get("status") != "active":
+            return None
+        classification = classify_journey_state(
+            g,
+            "onboarding_incomplete_veto",
+            extra_constraints=(
+                "You may NOT say or imply that setup/onboarding is finished — it is not.",
+                "Answer whatever the owner actually asked, then ask for the one outstanding item.",
+            ),
+            suggested_disposition="acknowledge_and_continue",
+        )
+        # The owner's own last message is already in the composed history window; the vetoed draft
+        # is what needs repairing, so it is what we pass as the turn's subject.
+        rewrite = compose_for_journey(
+            tenant_id, "", g, classification, locale, rejected_draft=rejected
+        )
+        if not rewrite:
+            return None
+        # The rewrite is subject to the SAME structural invariant that vetoed the original: a reply
+        # that asks nothing during active+incomplete onboarding reads as a premature stop. If the
+        # composer produced one anyway, its output is discarded and the deterministic swap stands —
+        # the floor is never weakened by handing it a voice.
+        if not _reply_asks_a_question(rewrite):
+            logger.info(
+                "emission_gate: onboarding recompose still question-less tenant=%s — swap stands",
+                tenant_id,
+            )
+            return None
+        return rewrite
+    except Exception:  # noqa: BLE001 — best-effort voice; the deterministic swap still guarantees honesty
+        logger.warning(
+            "emission_gate: onboarding-incomplete recompose failed tenant=%s — deterministic swap stands",
+            tenant_id,
+        )
+        return None
+
+
 def _split_sentences(text: str) -> list[str]:
     """Split into sentences, each carrying its trailing terminator, dropping empties."""
     parts = _SENTENCE_SPLIT_RE.split(text)
@@ -1055,7 +1154,17 @@ def apply_emission_gate(text: str, tenant_id: UUID | str) -> str:
             variants = _REPLACEMENT_COPY["campaign_not_drafted"]
             replacement = variants.get(resolve_owner_locale(tenant_id)) or variants["en"]
             _emit_blocked_audit(tenant_id, text, event_kind="emission_campaign_draft_blocked")
-            return replacement
+            # VT-720 (S4) — the veto stands (no draft exists, so no reply may say one does), but the
+            # canned line is a second mouth: measured 3/3, an owner who said "sirf check karke batao,
+            # koi campaign ya message mat banana" was answered "I haven't drafted that yet — want me
+            # to put it together now?", offering the exact thing they had refused. The Manager
+            # rewrites its own blocked draft against the finding; the canned line is the fallback.
+            return _recompose_claim_veto(
+                tenant_id,
+                text,
+                "No campaign draft exists for this owner. You have NOT drafted, prepared or created "
+                "any campaign or message for them. Do not say or imply that you have.",
+            ) or replacement
 
         # Layer 3d — premature ONBOARDING-COMPLETE (VT-654 → VT-656, j05): STATE-DRIVEN, not phrase-
         # matched. The authoritative completion state is known deterministically BEFORE the reply
@@ -1069,15 +1178,25 @@ def apply_emission_gate(text: str, tenant_id: UUID | str) -> str:
         # and is swapped for the deterministic pending question. ``_onboarding_incomplete_swap`` returns
         # None when the profile is deterministically COMPLETE (next_question None) — a true "all set" then
         # falls through untouched; a NON-onboarding reply (journey inactive) never reaches the swap.
+        #
+        # VT-720 (S4) — the VETO stands; the TEMPLATE goes. Measured (owner_corrects_inline_direct,
+        # 3/3): an owner asked "kitna time lagega setup complete karne mein" and this layer replaced
+        # the Manager's answer wholesale with the pending question VERBATIM — byte-identical to the
+        # previous turn, the owner's question never answered. A floor may terminate a claim; it may
+        # not delete a true, responsive answer and speak in the Manager's place. So the layer now
+        # hands the vetoed draft + the journey classification back to the composer and emits the
+        # Manager's own rewrite; ``_onboarding_incomplete_swap`` remains the fallback whenever the
+        # composer is unavailable, so the honesty guarantee never depends on the LLM.
         if _onboarding_journey_active(tenant_id) and not _reply_asks_a_question(text):
             from orchestrator.owner_surface.freeform_acks import resolve_owner_locale
 
-            swap = _onboarding_incomplete_swap(tenant_id, resolve_owner_locale(tenant_id))
+            locale = resolve_owner_locale(tenant_id)
+            swap = _onboarding_incomplete_swap(tenant_id, locale)
             if swap is not None:
                 _emit_blocked_audit(
                     tenant_id, text, event_kind="emission_onboarding_incomplete_blocked"
                 )
-                return swap
+                return _recompose_onboarding_incomplete(tenant_id, text, locale) or swap
 
         # Layer 2 — phantom promise (#58/T7): a deferred follow-up from a nonexistent team/person.
         # Surgically strip the offending sentence(s), keeping the honest remainder. Runs on

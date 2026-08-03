@@ -153,15 +153,28 @@ def _compose_status_answer(g: dict[str, Any]) -> dict[str, str]:
     """Honest, journey-row-grounded status. Never claims readiness beyond the row; never pitches
     a platform (the measured Shopify-assumption fabrication). R9 item 2: names the pending need with
     a SHORT field-keyed label + pluralizes 'detail(s)' — never re-pastes the verbatim prompt (a
-    verbatim repeat reads as a loop_stall)."""
+    verbatim repeat reads as a loop_stall).
+
+    VT-720 (S4) — this is now the FALLBACK line for the turn the composer cannot take, and the
+    conversion required FIXING it, not merely demoting it. The measured 3/3 defect
+    (efficient_collection_incremental_no_reask + multi_field_single_message_hinglish) was here: a
+    pending CONFIRM ("we found your shop is in Surat — is that right?") was rendered with the ASK
+    label "which city you're based in", inventing ignorance of a fact the draft holds. A confirm now
+    names the VALUE it is confirming; only a genuine gap gets an ask label."""
     if g.get("status") == "active":
         queue = list(g.get("question_queue") or [])
         cursor = int(g.get("cursor") or 0)
         remaining = max(len(queue) - cursor, 0)
         q = queue[cursor] if 0 <= cursor < len(queue) else None
         if remaining > 0 and q is not None:
-            label_en, label_hi = _need_label(q.get("field"))
             noun = "detail" if remaining == 1 else "details"
+            value = str(q.get("draft_value") or "").strip()
+            if q.get("kind") == "confirm" and value:
+                return {
+                    "en": f"Not quite yet — {remaining} quick {noun} to go: just confirm {value} is right.",
+                    "hi": f"अभी थोड़ा बाकी है — {remaining} छोटी जानकारी और: बस {value} सही है, यह confirm कर दें।",
+                }
+            label_en, label_hi = _need_label(q.get("field"))
             return {
                 "en": f"Not quite yet — {remaining} quick {noun} to go: {label_en}.",
                 "hi": f"अभी थोड़ा बाकी है — {remaining} छोटी जानकारी और: {label_hi}।",
@@ -183,13 +196,45 @@ def _compose_status_answer(g: dict[str, Any]) -> dict[str, str]:
     }
 
 
+def _classify_status_turn(g: dict[str, Any], intent: str) -> Any:
+    """VT-720 (S4) — the status route's CLASSIFICATION: what this gate deterministically KNOWS about
+    where setup stands. Findings, never a sentence. The journey-state derivation is SHARED with the
+    emission gate's Layer 3d (``journey_classification``) so the two seams can never again answer
+    "what is outstanding?" differently."""
+    from orchestrator.onboarding.journey_classification import classify_journey_state
+
+    return classify_journey_state(
+        g,
+        intent,
+        extra_constraints=(
+            "The owner asked where setup stands. Answer that — do not open a new topic.",
+        ),
+    )
+
+
+def _compose_status_via_brain(
+    tenant_id: UUID | str, text: str, g: dict[str, Any], intent: str, locale: str
+) -> str | None:
+    """VT-720 (S4) — hand the classification to the composer and get the Manager's OWN voice back.
+    ``None`` on any failure → the caller sends its deterministic line instead. Never records, never
+    advances: a status question is not an answer turn."""
+    from orchestrator.onboarding.journey_classification import compose_for_journey
+
+    return compose_for_journey(tenant_id, text, g, _classify_status_turn(g, intent), locale)
+
+
 def _answer_status_from_row(
     tenant_id: UUID | str, text: str, recipient: str | None, g: dict[str, Any], routed_kind: str
 ) -> dict[str, Any] | None:
-    """Send an HONEST, journey-row-grounded answer (rule B setup-status + DF7(d) remaining-needs) and
-    return the routed result — else None (fall through the whole gate). Opt-out/DSR ALWAYS wins (→ None,
-    to pre_filter); no recipient → None (fall through rather than go silent). Otherwise compose from the
-    row (``_compose_status_answer``) + send via the freeform ack seam. Never pitches a platform."""
+    """Answer the setup-status (rule B) / remaining-needs (DF7(d)) ask, or None to fall through the
+    whole gate. Opt-out/DSR ALWAYS wins (→ None, to pre_filter); no recipient → None (fall through
+    rather than go silent).
+
+    VT-720 (S4) — this route no longer OWNS a sentence. It classifies what it knows
+    (``_classify_status_turn``) and the composer speaks (``_compose_status_via_brain``); the
+    row-grounded ``_compose_status_answer`` line is the honest fallback for the turn the composer
+    cannot take. Either way the send rides the S2 emission choke and neither path pitches a
+    platform."""
     from orchestrator.pre_filter_gate import matches_opt_out_or_dsr
 
     if matches_opt_out_or_dsr(text):
@@ -198,11 +243,20 @@ def _answer_status_from_row(
         return None  # no recipient to answer → fall through rather than go silent
     from orchestrator.owner_surface.freeform_acks import resolve_owner_locale, send_freeform_ack
 
-    answer = _compose_status_answer(g)
     locale = resolve_owner_locale(tenant_id)
+    composed = _compose_status_via_brain(tenant_id, text, g, routed_kind, locale)
+    if composed:
+        send_freeform_ack(tenant_id, recipient, composed)
+        logger.info(
+            "enforce_journey_gate: %s composed by the brain tenant=%s", routed_kind, tenant_id
+        )
+        return {"done": g.get("status") != "active", "routed_kind": routed_kind}
+
+    answer = _compose_status_answer(g)
     send_freeform_ack(tenant_id, recipient, answer.get(locale) or answer["en"])
     logger.info(
-        "enforce_journey_gate: %s answered deterministically tenant=%s", routed_kind, tenant_id
+        "enforce_journey_gate: %s answered deterministically (composer unavailable) tenant=%s",
+        routed_kind, tenant_id,
     )
     return {"done": g.get("status") != "active", "routed_kind": routed_kind}
 

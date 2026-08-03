@@ -926,3 +926,98 @@ def test_apply_gate_onboarding_reply_already_asks_question_not_degraded(monkeypa
     monkeypatch.setattr("orchestrator.onboarding.conductor.next_question_for_tenant", _boom)
     text = "Got it — B2B wholesale. We found your business is based in Chennai — is that right?"
     assert mod.apply_emission_gate(text, TENANT) == text
+
+
+# ── VT-720 (S4): a vetoed reply is REWRITTEN by the Manager, never replaced by a stock line ──────
+#
+# Both layers below kept their veto and lost their template. Each test pins the same three-part
+# contract: the rewrite is used when it is valid; the deterministic line stands when the composer is
+# unavailable; and a rewrite that fails the very check that vetoed the original is DISCARDED (a floor
+# handed a voice must not become a floor with a loophole).
+
+
+def test_claim_veto_prefers_the_managers_rewrite(monkeypatch):
+    """Measured 3/3 (routing_db_proof_finance_vs_sr): the owner said 'sirf check karke batao, koi
+    campaign ya message mat banana' and got the canned 'want me to put it together now?' — an offer
+    of the exact thing they refused. The rewrite honors the instruction."""
+    _patch_facts(monkeypatch, fact=True, pending=False)
+    monkeypatch.setattr(mod, "_emit_blocked_audit", lambda *a, **k: None)
+    seen = {}
+
+    def _compose(tenant_id, rejected, finding, *, owner_message=""):
+        seen.update({"rejected": rejected, "finding": finding})
+        return "Sharma ji ka exact pending date is summary mein nahi hai — ledger detail chahiye."
+
+    monkeypatch.setattr("orchestrator.agent.dispatch.compose_under_veto", _compose)
+    monkeypatch.setattr(mod, "campaign_draft_fact_exists", lambda t: False)
+    out = mod.apply_emission_gate("I've drafted the campaign for you.", TENANT)
+    assert out == "Sharma ji ka exact pending date is summary mein nahi hai — ledger detail chahiye."
+    assert "drafted" in seen["rejected"], "the composer sees the blocked draft"
+    assert "No campaign draft exists" in seen["finding"], "and the finding it must respect"
+
+
+def test_claim_veto_falls_back_to_canned_line_without_composer(monkeypatch):
+    _patch_facts(monkeypatch, fact=True, pending=False)
+    monkeypatch.setattr(mod, "_emit_blocked_audit", lambda *a, **k: None)
+    monkeypatch.setattr("orchestrator.agent.dispatch.compose_under_veto", lambda *a, **k: None)
+    monkeypatch.setattr(mod, "campaign_draft_fact_exists", lambda t: False)
+    out = mod.apply_emission_gate("I've drafted the campaign for you.", TENANT)
+    assert out == mod._REPLACEMENT_COPY["campaign_not_drafted"]["en"]
+
+
+def test_claim_veto_discards_a_rewrite_that_still_claims_a_draft(monkeypatch):
+    """The teeth test: the rewrite is re-run through contains_campaign_draft_claim. A rewrite that
+    reasserts the blocked claim is thrown away and the canned line stands."""
+    _patch_facts(monkeypatch, fact=True, pending=False)
+    monkeypatch.setattr(mod, "_emit_blocked_audit", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "orchestrator.agent.dispatch.compose_under_veto",
+        lambda *a, **k: "Good news — I've prepared the campaign for you already.",
+    )
+    monkeypatch.setattr(mod, "campaign_draft_fact_exists", lambda t: False)
+    out = mod.apply_emission_gate("I've drafted the campaign for you.", TENANT)
+    assert out == mod._REPLACEMENT_COPY["campaign_not_drafted"]["en"]
+
+
+def test_onboarding_incomplete_veto_prefers_rewrite(monkeypatch):
+    """Layer 3d kept its invariant (never read as done while incomplete) and lost the verbatim
+    paste: the owner's actual question keeps its answer instead of being deleted."""
+    _patch_facts(monkeypatch, fact=True, pending=False)
+    monkeypatch.setattr(mod, "_emit_blocked_audit", lambda *a, **k: None)
+    monkeypatch.setattr(mod, "campaign_draft_fact_exists", lambda t: True)
+    monkeypatch.setattr(mod, "_onboarding_journey_active", lambda t: True)
+    monkeypatch.setattr(mod, "_onboarding_incomplete_swap", lambda t, loc: "We found Agra — right?")
+    monkeypatch.setattr(
+        mod, "_recompose_onboarding_incomplete",
+        lambda t, rejected, loc: "Setup takes about two minutes. Just confirm Agra is right?",
+    )
+    out = mod.apply_emission_gate("Setup takes about two minutes.", TENANT)
+    assert out == "Setup takes about two minutes. Just confirm Agra is right?"
+
+    monkeypatch.setattr(mod, "_recompose_onboarding_incomplete", lambda t, rejected, loc: None)
+    assert mod.apply_emission_gate("Setup takes about two minutes.", TENANT) == (
+        "We found Agra — right?"
+    ), "no composer → the deterministic swap still guarantees honesty"
+
+
+def test_onboarding_recompose_rejects_a_question_less_rewrite(monkeypatch):
+    """_recompose_onboarding_incomplete enforces the invariant on its OWN output."""
+    monkeypatch.setattr(
+        "orchestrator.onboarding.journey.get_journey",
+        lambda t: {"status": "active", "cursor": 0, "answers": {}, "question_queue": [
+            {"field": "city", "kind": "confirm", "draft_value": "Agra", "prompt_en": "?"}
+        ]},
+    )
+    monkeypatch.setattr(
+        "orchestrator.onboarding.journey_classification.compose_for_journey",
+        lambda *a, **k: "You're all set, nothing more needed.",
+    )
+    assert mod._recompose_onboarding_incomplete(TENANT, "All done!", "en") is None
+
+    monkeypatch.setattr(
+        "orchestrator.onboarding.journey_classification.compose_for_journey",
+        lambda *a, **k: "Almost there — is Agra right?",
+    )
+    assert mod._recompose_onboarding_incomplete(TENANT, "All done!", "en") == (
+        "Almost there — is Agra right?"
+    )

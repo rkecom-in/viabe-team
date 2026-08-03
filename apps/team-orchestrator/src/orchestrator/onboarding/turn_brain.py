@@ -839,6 +839,72 @@ def compose_turn(
         return None
 
 
+def compose_classified_reply(
+    journey_state: dict[str, Any],
+    draft_attrs: dict[str, Any],
+    owner_message: str,
+    classification: Any,
+    *,
+    locale: str = "en",
+    provenance: dict[str, Any] | None = None,
+    rejected_draft: str | None = None,
+) -> str | None:
+    """VT-720 (S4) — compose the owner-visible line for a route that CLASSIFIED instead of speaking.
+
+    Returns the message TEXT, or ``None`` fail-soft (LLM error / timeout / no key / unparseable /
+    empty) so the caller can fall back to its deterministic line. The caller sends; this composes.
+
+    PURE of durable side effects — deliberately narrower than ``compose_turn``:
+      - it does NOT run the tool belt (a converted gate turn is on the owner-inbound hot path and
+        the classification already carries the facts; a tool round-trip would add seconds for
+        nothing), and
+      - it DISCARDS every extraction field on the returned plan. A converted route's turn is not an
+        answer turn: nothing here may record a field, confirm one, or advance the cursor. The
+        durable spine stays exactly where the deterministic layer left it.
+
+    ``rejected_draft`` — a reply a deterministic FLOOR just vetoed. The floor's veto stands (the
+    claim it caught must not survive), but the veto must not silently delete a true and responsive
+    answer along with it: the measured case is an owner asking "how long will setup take?" whose
+    answer was replaced wholesale by a verbatim re-ask of the pending question. Passing the vetoed
+    draft lets the composer keep what was true and drop only what was not.
+
+    The classification rides the USER prompt, not the system prompt: it is per-turn volatile, and
+    the system block is the per-owner-stable cached prefix (see ``_invoke_llm``).
+    """
+    try:
+        from orchestrator.manager.route_classification import render_classification_block
+
+        if not _anthropic_key_present():
+            return None  # no usable key (unit/CI) → the caller's deterministic line owns the turn
+        system, user = _build_prompts(
+            journey_state, draft_attrs, owner_message,
+            locale=locale, provenance=provenance, is_start=False, profile_card=None,
+        )
+        blocks = [user, render_classification_block(classification)]
+        if (rejected_draft or "").strip():
+            blocks.append(
+                "## Your previous draft for this turn was BLOCKED\n"
+                "A deterministic check rejected it because it did not match the facts above "
+                "(typically: it read as though setup were finished when it is not).\n"
+                f"BLOCKED DRAFT: {rejected_draft.strip()[:1200]}\n"
+                "Rewrite it: KEEP everything in it that was true and that answered the owner's "
+                "actual message; REMOVE anything that claims or implies setup is complete; then ask "
+                "for the ONE outstanding item above, in your own words. Do not repeat an earlier "
+                "message word-for-word."
+            )
+        plan = _parse_turn_plan(_invoke_llm(system, "\n\n".join(blocks)))
+        if plan is None:
+            return None
+        text = (plan.reply_text or "").strip()
+        return text or None
+    except Exception as exc:  # noqa: BLE001 — hot path: any failure degrades to the caller's line
+        logger.warning(
+            "turn_brain: compose_classified_reply failed (%s: %s) — caller falls back",
+            type(exc).__name__, str(exc)[:300],
+        )
+        return None
+
+
 # --- VT-583 (CL-2026-07-03-conversing-surfaces-and-harness): the small INTENT-CLASSIFICATION seam ---
 #
 # The paced post-profile flow (journey._maybe_handle_post_profile_flow) decides readiness yes/later and

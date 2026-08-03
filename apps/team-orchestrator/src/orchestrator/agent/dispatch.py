@@ -1538,6 +1538,76 @@ _COMPOSE_ANTIREPEAT_SYSTEM = (
 )
 
 
+_COMPOSE_VETO_SYSTEM = (
+    "You are the Viabe Team-Manager writing a WhatsApp reply to the OWNER of a small Indian "
+    "business. A draft reply you wrote was BLOCKED by a deterministic fact-check because it "
+    "asserted something the system's own records do not support. The block is CORRECT and final — "
+    "you may not restate the blocked assertion in any form. Rewrite the reply: KEEP everything in "
+    "the draft that was true and that actually answered the owner, DROP the unsupported claim, and "
+    "say plainly and briefly what is true instead. Honor what the owner asked for — if they told "
+    "you NOT to do something, do not offer to do it. Output ONLY the message to send the owner — "
+    "second person, in the SAME language and script the owner is using (Hindi/Hinglish/English; "
+    "never switch them into English when they wrote Hindi or Hinglish), complete and "
+    "self-contained, no narration or meta-commentary. Never invent a number, price, date or status, "
+    "and never claim an action you did not take."
+)
+
+
+def compose_under_veto(
+    tenant_id: UUID | str, rejected: str, finding: str, *, owner_message: str = ""
+) -> str | None:
+    """VT-720 (S4) — recompose a reply a deterministic FACT-CHECK vetoed, in the Manager's own voice.
+
+    The single-voice counterpart to the emission gate's canned replacements. A floor that catches a
+    false claim is right to catch it; what it must NOT do is speak a stock sentence in the Manager's
+    place. Measured (routing_db_proof_finance_vs_sr, 3/3): an owner who said "just check, do NOT
+    make any campaign or message" got the canned "I haven't drafted that yet — want me to put it
+    together now?" — a fixed line offering the very thing they had just refused, alongside the real
+    answer. Two mouths, one of them deaf.
+
+    ``finding`` is the deterministic fact the rewrite must respect (e.g. "no campaign draft exists
+    for this tenant"). ``None`` on ANY failure so the caller keeps its deterministic replacement —
+    the floor's guarantee never depends on this call succeeding.
+    """
+    try:
+        text = (rejected or "").strip()
+        if not text:
+            return None
+        tid = tenant_id if isinstance(tenant_id, UUID) else UUID(str(tenant_id))
+        parts: list[str] = []
+        conversation_block = _build_manager_conversation_block(tid)
+        if conversation_block:
+            parts.append(conversation_block)
+        if (owner_message or "").strip():
+            parts.append(f"## The owner just messaged you\n{owner_message.strip()}")
+        parts.append(
+            "## The deterministic finding your rewrite MUST respect\n"
+            f"{finding}"
+        )
+        parts.append(f"## Your BLOCKED draft — do not restate the unsupported claim\n{text}")
+        response = _resolve_model(_BRAIN_MODEL_SONNET, tenant_id=tid).invoke(
+            [
+                SystemMessage(content=_COMPOSE_VETO_SYSTEM),
+                HumanMessage(content="\n\n".join(parts)),
+            ]
+        )
+        raw = getattr(response, "content", None)
+        if isinstance(raw, str):
+            out = raw.strip()
+        elif isinstance(raw, list):
+            out = "".join(
+                block.get("text", "")
+                for block in raw
+                if isinstance(block, dict) and block.get("type") == "text"
+            ).strip()
+        else:
+            out = ""
+        return out or None
+    except Exception:  # noqa: BLE001 — best-effort voice; the caller's deterministic line stands
+        logger.warning("VT-720: compose_under_veto failed (fail-soft) tenant=%s", tenant_id)
+        return None
+
+
 def _normalize_reply(text: str) -> str:
     """Lowercase + whitespace-collapse for a content-similarity compare (VT-616)."""
     return " ".join(text.lower().split())
