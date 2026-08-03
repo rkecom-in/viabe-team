@@ -387,7 +387,12 @@ def _invoke_llm(system_prompt: str, user_prompt: str) -> str:
         messages=[{"role": "user", "content": user_prompt}],
         timeout=_TURN_TIMEOUT_S,
     )
-    return resp.content[0].text if resp.content else ""
+    # VT-720 (live diag): index 0 is NOT necessarily the text. With extended thinking on, content[0]
+    # is a ThinkingBlock and ``.text`` raises AttributeError — which killed compose_classified_reply
+    # on EVERY dev turn ("compose_classified_reply failed (AttributeError: 'ThinkingBlock' object has
+    # no attribute 'text')"), silently degrading every converted route to its fallback line. Same
+    # class as the VT-662 empty-beta death. Concatenate the TEXT blocks, exactly like _final_text.
+    return _final_text(resp)
 
 
 def _cached_system_block(system_prompt: str) -> dict[str, Any]:
