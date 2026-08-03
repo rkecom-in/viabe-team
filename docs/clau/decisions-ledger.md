@@ -355,3 +355,59 @@ no `domain` column while `CardRetrievalEngine` filters on `card.domain` first.
 **Lesson recorded (Clau).** Third premise error in this program — runtime state asserted from
 documents instead of verified against the database. CC verified; Clau did not. Bouncing a row
 with evidence is correct behaviour and is to continue.
+
+## CL-2026-08-03-green-on-fallback-is-not-green — Standing (Clau, from a CC finding)
+
+**Rule.** A green result is not evidence until you know **which code path produced it**. A pass on
+a fallback, a stub, a cached value, or a skipped branch reads identically to a pass on the
+intended path. Before banking a canary or a scenario class, confirm from logs/traces that the code
+you changed is the code that ran.
+
+**Trigger.** VT-720, 2026-08-03: `_invoke_llm` read `resp.content[0].text`, which is a
+`ThinkingBlock` when extended thinking is on — so every converted route silently fell back, and
+casebook classes 1-2 went **3/3 on the fallback line**. CC caught it only by reading logs instead
+of banking the green. **Third instance of this family after VT-662.**
+
+**Companion to** `CL-2026-08-03-seed-then-full-ingestion`'s lesson (Clau asserting runtime state
+from documents). Same disease from opposite ends: trusting the artifact instead of verifying the
+mechanism. Both landed in one week.
+
+## CL-2026-08-03-degradation-before-measurement — Standing (Clau)
+
+**Rule.** Do not run a measurement pack into a degraded environment. A pack measured on unstable
+infrastructure manufactures phantom failure classes and costs the window twice — once producing
+them, once chasing them. Settle the environment, then measure.
+
+**Trigger.** CC's 2026-08-03 refusal to run the promotion full-pack ×3 into a dev showing 90s
+timeouts and `route='none'` on still-running turns (VT-728). Third occurrence of the family after
+VT-719 deploy-contamination and VT-722 held-pushes.
+
+**Corollary.** Dev orphaned-workflow accumulation is the dev-side face of **VT-634** (prod
+failed/orphaned workflow handling, launch-blocker). Findings from a dev degradation of this class
+are input to VT-634, not throwaway fixes.
+
+## CL-2026-08-03-docs-push-is-a-deploy — Standing (CC finding; Clau error)
+
+**Fact.** Railway's native auto-deploy fires on **EVERY push to `dev`, including docs-only pushes**
+that the VT-245 CI trigger-diet deliberately skips. **A skipped CI run does not skip the deploy.**
+A `docs(sprint): …` push restarts the orchestrator.
+
+**Consequence.** A push during a measurement run splits one measurement across two services and
+manufactures phantom TIMEOUT / `terminal=running` / unobserved-route results. This is the actual
+cause of the VT-720 "dev degradation" (VT-729) and almost certainly of the VT-719 "contamination"
+that cost 7 of 11 blocks.
+
+**Origin of the error: Clau's own Rule 3** ("push docs on receipt", to stop Codex reading a stale
+tree). Optimising for Codex's freshness was paid for in unreadable measurements.
+
+**Rule 3 amended:** push docs on receipt EXCEPT while a measurement run is in flight.
+
+**Structural guard (VT-729, preferred over the discipline note):** `run_critical_x3.py` reads
+`dbos.application_versions` before and after each scenario; a change labels the run
+**CONTAMINATED**, never BLOCKED. CC's reasoning is the point — *"a discipline note would not have
+saved me; I was holding code pushes. It was the docs push I did not think of as a deploy."*
+Prefer a guard that does not depend on remembering.
+
+**Known follow-on (not fixed):** harness teardown cascades `pipeline_runs` away, so after-the-fact
+latency forensics on a finished run are impossible; this diagnosis had to be reconstructed from
+deploy timestamps.

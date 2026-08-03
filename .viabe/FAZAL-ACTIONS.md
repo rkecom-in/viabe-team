@@ -65,8 +65,20 @@ Codex's VT-723** — and it was Clau's overdue item, now ready.
 - **Docs:** the card-assignment model (`manager_global` / `manager_tenant` / `specialist:<agent>`
   / `disabled` + runtime flipping) is now in the CANONICAL tier — ARCHITECTURE §0.1.3,
   manager-objective §0, CLAUDE.md bootstrap. Your "update it everywhere" instruction is closed.
-- **CC's queue:** VT-720 → VT-725 → full-pack ×3 → then your promotion.
-- **Codex queue:** idle until the baseline lands, then VT-723.
+- **VT-720 S4: ALL FOUR casebook classes DEV-PROVEN 3/3** (were 0/3). Single-voice program
+  complete: S2 prod-live, S3 + S3b + S4 dev-proven.
+- **Dev was never degraded — VT-729.** CC root-caused it: **Railway redeploys on EVERY push to
+  dev, including docs-only pushes CI skips.** Clau's docs push restarted the orchestrator mid-run.
+  Fixed structurally (runs straddling a redeploy now report CONTAMINATED, not BLOCKED) rather than
+  by a discipline note. Clau's VT-728 retired as superseded.
+- **VT-726 delivered by Codex (PR #549)** — migration 189 written, 15 governed seed cards, and the
+  through-the-pipeline constraint enforced **in code** (a hand-authored card cannot be admitted).
+  CC now applies the migration on dev and runs the retrieval canary — the first proof the engine
+  can return a card.
+- **CC's queue:** migration 189 + canary → full-pack ×3 → your promotion. VT-725 wires once the
+  registry holds rows.
+- **Codex queue:** VT-727 (full 118) — **starts only after the canary passes**, and only after we
+  answer how many of the 118 files actually yield admissible cards (see below).
 
 ---
 
