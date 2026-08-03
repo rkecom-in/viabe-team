@@ -443,16 +443,27 @@ def test_broker_adapter_returns_redacted_provenance_bearing_global_evidence() ->
     assert "owner@example.com" not in observed[0]
 
 
-def test_adapter_has_no_live_import_or_registration_consumer() -> None:
+def test_the_engine_has_exactly_one_consumer_and_the_broker_adapter_still_has_none() -> None:
+    """VT-725 opened the engine's single call site; the broker adapter stays unregistered.
+
+    The adapter returns content-bearing ``EvidenceItem`` values into a ``KnowledgeBundle``, which
+    is the injection path. ``card_serving`` deliberately bypasses it and drives the engine
+    directly, returning IDs and scores only — so shadow cannot become injection by wiring.
+    """
+
     src = Path(__file__).resolve().parents[3] / "src" / "orchestrator"
-    consumers = []
+    engine_consumers = []
+    adapter_consumers = []
     for path in src.rglob("*.py"):
         if path.name == "card_retrieval.py":
             continue
         text = path.read_text(encoding="utf-8")
-        if "CardRegistryBrokerAdapter" in text or "knowledge.card_retrieval" in text:
-            consumers.append(path)
-    assert consumers == []
+        if "CardRegistryBrokerAdapter" in text:
+            adapter_consumers.append(path.name)
+        if "knowledge.card_retrieval" in text:
+            engine_consumers.append(path.name)
+    assert adapter_consumers == []
+    assert engine_consumers == ["card_serving.py"]
 
 
 def test_in_memory_retrieval_latency_is_observed_not_wall_clock_gated(

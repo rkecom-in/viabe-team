@@ -60,3 +60,14 @@ def owner_emission_choke_mode() -> str:
     effect gate (consent/opt-out/approval/money) are untouched upstream. Prod flip is Fazal-only."""
     v = os.environ.get("TEAM_OWNER_EMISSION_CHOKE", "").strip().lower()
     return v if v in {"shadow", "enforce"} else "off"
+
+
+def knowledge_serving_mode() -> str:
+    """VT-725 — the O8 card-retrieval serving mode: ``'off'`` (default) | ``'shadow'``.
+
+    ``'active'`` (injecting retrieved cards into the prompt) is deliberately NOT reachable from
+    this env var: the flip to injection is D3, gated on the treatment run beating the sealed
+    no-O8 baseline, and it needs a code change so it cannot happen by setting a variable on a
+    box. Shadow retrieves, scores and records attribution; it cannot change a single prompt."""
+    v = os.environ.get("TEAM_KNOWLEDGE_SERVING", "").strip().lower()
+    return "shadow" if v == "shadow" else "off"
