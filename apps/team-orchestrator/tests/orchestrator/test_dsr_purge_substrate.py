@@ -109,11 +109,16 @@ def _seed_full_tenant_data(dsn: str, tenant_id: UUID) -> dict[str, UUID]:
             "INSERT INTO knowledge_cards "
             "(card_key, version, claim, claim_key, claim_value, distillation_note, "
             " jurisdictions, effective_from, authority, confidence, scope, status, "
-            " retention_class, tainted, default_assignment) "
+            " retention_class, tainted, default_assignment, domain, source_class, usage_rights, "
+            " independence_cluster, provenance) "
             "VALUES (%s, 1, 'DSR assignment test claim', %s, "
             "'{\"value_type\":\"boolean\",\"value\":true}'::jsonb, 'DSR test', "
             "ARRAY['IN'], now(), 'verified_system', 'medium', 'global', 'candidate', "
-            "'lifecycle_managed', true, 'manager_global') RETURNING id",
+            "'lifecycle_managed', true, 'manager_global', 'operations', 't2', "
+            "'{\"status\":\"public_domain\"}'::jsonb, 'cluster:dsr-test', "
+            "'{\"source_ids\":[\"dsr-test\"],\"publisher\":\"DSR test\","
+            "\"retrieved_at\":\"2026-08-03T00:00:00Z\",\"tainted\":true}'::jsonb) "
+            "RETURNING id",
             (str(uuid4()), f"dsr|assignment|{uuid4()}|smb|all"),
         ).fetchone()[0]
         conn.execute(

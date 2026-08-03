@@ -20,6 +20,7 @@ from datetime import UTC, datetime
 from functools import lru_cache
 from html.parser import HTMLParser
 from pathlib import Path
+from collections.abc import Sequence
 from typing import Any, Literal
 from urllib.parse import urlparse
 from uuid import NAMESPACE_URL, uuid5
@@ -403,7 +404,14 @@ def _build_source_inventory(
     return rows, decisions
 
 
-def convert() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+def convert(
+    *, tenant_identifiers: Sequence[str] = ()
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Run all 118 source records through the real VT-710 pipeline.
+
+    ``tenant_identifiers`` is supplied by the dev canary so the existing global-purity gate is
+    exercised against the same real tenant used by the retrieval proof. It is never persisted.
+    """
     cards = _read_cards()
     if len(cards) != 118 or len({str(card["id"]) for card in cards}) != 118:
         raise ValueError("VT-710 conversion requires exactly 118 unique audited cards")
@@ -486,6 +494,7 @@ def convert() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
             ),
             card_id=str(uuid5(NAMESPACE_URL, f"viabe:o8:card:{legacy_id}")),
             card_version_id=str(uuid5(NAMESPACE_URL, f"viabe:o8:card-version:{legacy_id}:1")),
+            tenant_identifiers=tenant_identifiers,
         )
         warnings: list[str] = []
         if candidate.embedding_state.value == "pending":
