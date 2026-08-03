@@ -535,8 +535,17 @@ def test_compose_classified_reply_discards_extractions_and_is_none_without_key(m
 
     monkeypatch.setattr(turn_brain, "_anthropic_key_present", lambda: True)
     monkeypatch.setattr(turn_brain, "_build_prompts", lambda *a, **k: ("sys", "usr"))
-    monkeypatch.setattr(turn_brain, "_invoke_llm", lambda s, u: '{"reply_text": "Almost done."}')
+    seen_timeout = {}
+
+    def _fake_invoke(system, user, *, timeout_s=None):
+        seen_timeout["t"] = timeout_s
+        return '{"reply_text": "Almost done."}'
+
+    monkeypatch.setattr(turn_brain, "_invoke_llm", _fake_invoke)
     plan_fields = turn_brain.compose_classified_reply(
         {}, {}, "are we set up?", eg._classify_status_turn(_journey_with_pending_city_confirm(), "x")
     )
     assert plan_fields == "Almost done.", "only the composed TEXT crosses the seam"
+    assert seen_timeout["t"] == turn_brain._CLASSIFIED_TIMEOUT_S, (
+        "a converted route composes on the TIGHTER budget — it is additive to an already-spent turn"
+    )

@@ -369,7 +369,20 @@ def _build_prompts(
     return system, user
 
 
-def _invoke_llm(system_prompt: str, user_prompt: str) -> str:
+_CLASSIFIED_TIMEOUT_S = 10.0
+"""VT-720 — the converted-route compose budget, DELIBERATELY tighter than ``_TURN_TIMEOUT_S``.
+
+A converted route runs AFTER the turn's own work (the emission-gate veto path composes only once
+the brain has already produced a draft), so its cost is additive to an already-spent turn. Measured
+on dev: the S4 conversion pushed `owner_corrects_inline_direct` run 1 to sample `terminal=running`
+where all three runs had been `completed` across three prior x3 baselines — the first cross-run
+divergence this scenario has ever shown. A veto rewrite is one short WhatsApp message; 10s is
+ample for sonnet, and exceeding it degrades to the caller's honest deterministic line, which is
+strictly better than stretching the owner's turn.
+"""
+
+
+def _invoke_llm(system_prompt: str, user_prompt: str, *, timeout_s: float | None = None) -> str:
     """The single LLM call (lazy anthropic import — keeps module import dep-less for the smoke suite).
     Separated so tests monkeypatch THIS and the prompt-build + parse path stay pure + deterministic.
 
@@ -385,7 +398,7 @@ def _invoke_llm(system_prompt: str, user_prompt: str) -> str:
         max_tokens=_MAX_TOKENS,
         system=[_cached_system_block(system_prompt)],
         messages=[{"role": "user", "content": user_prompt}],
-        timeout=_TURN_TIMEOUT_S,
+        timeout=timeout_s or _TURN_TIMEOUT_S,
     )
     # VT-720 (live diag): index 0 is NOT necessarily the text. With extended thinking on, content[0]
     # is a ThinkingBlock and ``.text`` raises AttributeError — which killed compose_classified_reply
@@ -897,7 +910,9 @@ def compose_classified_reply(
                 "for the ONE outstanding item above, in your own words. Do not repeat an earlier "
                 "message word-for-word."
             )
-        plan = _parse_turn_plan(_invoke_llm(system, "\n\n".join(blocks)))
+        plan = _parse_turn_plan(
+            _invoke_llm(system, "\n\n".join(blocks), timeout_s=_CLASSIFIED_TIMEOUT_S)
+        )
         if plan is None:
             return None
         text = (plan.reply_text or "").strip()
