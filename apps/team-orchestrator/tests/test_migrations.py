@@ -200,12 +200,16 @@ def _insert_o8_card(conn):  # type: ignore[no-untyped-def]
     card_id = conn.execute(
         "INSERT INTO knowledge_cards "
         "(card_key, version, claim, claim_key, claim_value, distillation_note, jurisdictions, "
-        " effective_from, authority, confidence, scope, status, retention_class, tainted) "
+        " effective_from, authority, confidence, scope, status, retention_class, tainted, "
+        " domain, source_class, usage_rights, independence_cluster, provenance) "
         "VALUES (%s, 1, 'A test operating claim', 'test|improves|in|smb|all', "
         " '{\"value_type\":\"boolean\",\"value\":true}'::jsonb, 'Test distillation', "
         " ARRAY['IN'], now(), 'verified_system', 'medium', 'global', 'candidate', "
-        " 'lifecycle_managed', true) RETURNING id",
-        (card_key,),
+        " 'lifecycle_managed', true, 'operations', 't2', "
+        " '{\"status\":\"public_domain\"}'::jsonb, %s, "
+        " '{\"source_ids\":[\"test-source\"],\"publisher\":\"VT-709 test\","
+        "\"retrieved_at\":\"2026-08-03T00:00:00Z\",\"tainted\":true}'::jsonb) RETURNING id",
+        (card_key, f"cluster:{uuid4()}"),
     ).fetchone()[0]
     conn.execute(
         "INSERT INTO knowledge_card_sources (card_id, source_id, independence_cluster_id) "
@@ -247,13 +251,40 @@ def test_vt709_card_versions_immutable_lifecycle_append_only_and_rights_removal_
             "INSERT INTO knowledge_cards "
             "(card_key, version, claim, claim_key, claim_value, distillation_note, jurisdictions, "
             " effective_from, authority, confidence, scope, status, retention_class, tainted, "
-            " supersedes_card_id) VALUES "
+            " supersedes_card_id, domain, source_class, usage_rights, independence_cluster, "
+            " provenance, retrieval_eligible) VALUES "
             "(%s, 2, 'A test operating claim', 'test|improves|in|smb|all', "
             " '{\"value_type\":\"boolean\",\"value\":true}'::jsonb, 'Validated after review', "
             " ARRAY['IN'], now(), 'verified_system', 'high', 'global', 'validated', "
-            " 'lifecycle_managed', true, %s) RETURNING id",
-            (card_key, card_id),
+            " 'lifecycle_managed', true, %s, 'operations', 't2', "
+            " '{\"status\":\"public_domain\"}'::jsonb, %s, "
+            " '{\"source_ids\":[\"test-source\"],\"publisher\":\"VT-709 test\","
+            "\"retrieved_at\":\"2026-08-03T00:00:00Z\",\"tainted\":true}'::jsonb, true) "
+            "RETURNING id",
+            (card_key, card_id, f"cluster:{uuid4()}"),
         ).fetchone()[0]
+        # A caller cannot imitate the narrow nested-FK exception added by migration 189.
+        with pytest.raises(psycopg.errors.RaiseException, match="immutable"):
+            conn.execute(
+                "UPDATE knowledge_cards SET supersedes_card_id = NULL WHERE id = %s",
+                (version_2,),
+            )
+
+        # Rights-removing the older immutable version must let its ON DELETE SET NULL FK action
+        # tombstone v2's supersedes pointer; migration 182's blanket trigger previously blocked it.
+        conn.execute(
+            "INSERT INTO knowledge_lifecycle_events "
+            "(card_id, card_version_ref, event_type, from_status, to_status, actor_id, reason, "
+            " idempotency_key) VALUES "
+            "(%s, %s, 'rights_removal', 'candidate', 'expired', 'rights-reviewer', "
+            " 'source rights withdrawn from candidate version', %s)",
+            (card_id, card_id, f"rights-removal:{card_id}"),
+        )
+        conn.execute("DELETE FROM knowledge_cards WHERE id = %s", (card_id,))
+        assert conn.execute(
+            "SELECT supersedes_card_id FROM knowledge_cards WHERE id = %s", (version_2,)
+        ).fetchone()[0] is None
+
         event_id = conn.execute(
             "INSERT INTO knowledge_lifecycle_events "
             "(card_id, card_version_ref, event_type, from_status, to_status, actor_id, reason, "

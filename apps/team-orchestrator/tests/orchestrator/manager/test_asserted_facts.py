@@ -274,12 +274,17 @@ def test_card_sweep_read(substrate):
         card = conn.execute(
             "INSERT INTO knowledge_cards "
             "(card_key, version, claim, claim_key, claim_value, distillation_note, "
-            " authority, confidence, scope, status, retention_class) "
+            " authority, confidence, scope, status, retention_class, domain, source_class, "
+            " usage_rights, independence_cluster, provenance, retrieval_eligible) "
             "VALUES (gen_random_uuid(), 1, 'Lapsed means 45 days without a purchase', "
             " 'dormancy_window_days', "
             " '{\"value_type\": \"integer\", \"value\": 45}'::jsonb, "
             " 'VT-719 substrate test card', 'seed', 'high', 'global', 'validated', "
-            " 'global_indefinite') RETURNING id"
+            " 'global_indefinite', 'sales', 't2', '{\"status\":\"public_domain\"}'::jsonb, "
+            " 'cluster:vt719', "
+            " '{\"source_ids\":[\"vt719-test\"],\"publisher\":\"VT-719 test\","
+            "\"retrieved_at\":\"2026-08-03T00:00:00Z\",\"tainted\":true}'::jsonb, true) "
+            "RETURNING id"
         ).fetchone()[0]
     af.record_assertion(
         t, "dormancy_definition", "45d", derived_from_card_id=card,
