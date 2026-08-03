@@ -65,6 +65,8 @@ class RunObservation:
     grounded_count: int | None  # cohort_size for that route's campaign, or None if no campaign
     terminal_outcome: str | None  # the LAST step's run_status
     transcript_hash: str
+    # VT-728: set when the orchestrator redeployed mid-scenario (see deployed_version).
+    contaminated: bool = False
 
 
 # --- pure functions (unit-tested; no DB/network) -------------------------------------------------
@@ -211,6 +213,34 @@ def _teardown_tenant(tenant_id: str) -> None:
     ch.cmd_teardown(argparse.Namespace(tenant_id=tenant_id))
 
 
+def deployed_version(dsn: str) -> str | None:
+    """VT-728 — the orchestrator's currently-deployed DBOS application version, or None.
+
+    Railway's NATIVE auto-deploy fires on EVERY push to dev — including docs-only pushes, which the
+    VT-245 CI trigger-diet deliberately skips. A skipped CI run does NOT skip the deploy, so a
+    harmless-looking `docs(sprint): …` push restarts the orchestrator mid-measurement, and the
+    scenarios in flight report TIMEOUT / `terminal=running` / an unobserved route. Those read as
+    product defects and are not: they are the measurement being cut in half.
+
+    DBOS writes one `dbos.application_versions` row per deployed version, so comparing this value
+    before and after a run tells us whether we measured one service or two.
+    """
+    try:
+        import re as _re
+
+        import psycopg as _psycopg
+
+        sysdsn = _re.sub(r"/([^/?]+)(\?|$)", r"/postgres_dbos_sys\2", dsn, count=1)
+        with _psycopg.connect(sysdsn, connect_timeout=10) as sc:
+            row = sc.execute(
+                "SELECT version_name FROM dbos.application_versions "
+                "ORDER BY version_timestamp DESC LIMIT 1"
+            ).fetchone()
+        return None if row is None else str(row[0])
+    except Exception:  # noqa: BLE001 — the guard must never fail a run; unknown version => no claim
+        return None
+
+
 def run_scenario_x3(
     path: Path, scenario: dict[str, Any], *,
     ingress_url: str | None, timeout: float, keep_tenants: bool,
@@ -222,6 +252,8 @@ def run_scenario_x3(
     setup_args = scenario.get("setup_args", [])
     scenario_xfail = bool(scenario.get("expected_fail", False))
     steps = scenario.get("steps", [])
+
+    version_before = deployed_version(dsn)
 
     observations: list[RunObservation] = []
     for i in range(1, 4):
@@ -244,6 +276,20 @@ def run_scenario_x3(
                 _teardown_tenant(tenant_id)
             else:
                 _quiesce_kept_tenant(dsn, tenant_id)
+
+    # VT-728 — CONTAMINATION CHECK. A redeploy mid-run means these observations describe two
+    # different services. Say so loudly: a contaminated run must never be read as a product result,
+    # in either direction (a false failure wastes a debugging cycle; a false pass is worse).
+    version_after = deployed_version(dsn)
+    if version_before and version_after and version_before != version_after:
+        print(
+            f"    !! CONTAMINATED: the orchestrator REDEPLOYED during this scenario "
+            f"({version_before[:12]}… -> {version_after[:12]}…). TIMEOUT / terminal=running / "
+            f"unobserved-route results below are measurement artifacts, NOT product behavior. "
+            f"Re-run on a stable service before drawing any conclusion.",
+        )
+        for obs in observations:
+            obs.contaminated = True
     return observations
 
 
@@ -334,6 +380,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"=== VT-611 Package C: {len(pairs)} critical scenario(s), ×3 each ===")
 
     blocked: list[str] = []
+    contaminated: list[str] = []
     summaries: list[dict[str, Any]] = []
     for path, scenario in pairs:
         name = str(scenario.get("name", path.stem))
@@ -344,7 +391,13 @@ def main(argv: list[str] | None = None) -> int:
         )
         for o in obs:
             bad = check_all_3_clean(o.results)
-            if bad:
+            if bad and o.contaminated:
+                # VT-728: the service redeployed mid-run. Report it as CONTAMINATED, never as a
+                # BLOCK — a measurement artifact recorded as a product defect sends the next
+                # session chasing a bug that was never there. It still exits non-zero.
+                contaminated.append(f"{name} run {o.run_index}/3: {'; '.join(bad)}")
+                print(f"    run {o.run_index}/3: CONTAMINATED (redeploy mid-run) — {'; '.join(bad)}")
+            elif bad:
                 blocked.append(f"{name} run {o.run_index}/3: {'; '.join(bad)}")
                 print(f"    run {o.run_index}/3: BLOCK — {'; '.join(bad)}")
             else:
@@ -357,13 +410,28 @@ def main(argv: list[str] | None = None) -> int:
 
         consistency_failures = check_cross_run_consistency(obs)
         for f in consistency_failures:
-            blocked.append(f)
-            print(f"    CROSS-RUN DIVERGENCE: {f}")
+            # A redeploy mid-scenario makes cross-run divergence expected, not informative.
+            if any(o.contaminated for o in obs):
+                contaminated.append(f)
+                print(f"    CROSS-RUN DIVERGENCE (CONTAMINATED — redeploy mid-run): {f}")
+            else:
+                blocked.append(f)
+                print(f"    CROSS-RUN DIVERGENCE: {f}")
         summaries.append(build_run_summary(name, obs))
 
-    print(f"\n=== summary: {len(pairs)} critical scenario(s), {len(blocked)} block(s) ===")
+    print(
+        f"\n=== summary: {len(pairs)} critical scenario(s), {len(blocked)} block(s)"
+        + (f", {len(contaminated)} CONTAMINATED ===" if contaminated else " ===")
+    )
     for b in blocked:
         print(f"  - {b}")
+    if contaminated:
+        print(
+            "  !! the orchestrator redeployed mid-run. These are measurement artifacts, not "
+            "product results — re-run on a stable service:"
+        )
+        for c in contaminated:
+            print(f"  - [contaminated] {c}")
     if args.json_report:
         print(f"    json-report: appended to {args.json_report} — feed into transcript_judge.py next")
     if args.summary_json:
@@ -372,7 +440,7 @@ def main(argv: list[str] | None = None) -> int:
             fh.write("\n")
         print(f"    summary-json: wrote {args.summary_json} — for the evidence manifest")
 
-    return 0 if not blocked else 1
+    return 0 if not (blocked or contaminated) else 1
 
 
 if __name__ == "__main__":
