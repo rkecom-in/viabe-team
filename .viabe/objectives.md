@@ -6,6 +6,10 @@
 > status-changing event, same moment as the to-cowork signal). Cowork audits (Rule #14).
 > Bar lines are Fazal's — never edited without a ruling; Now/Gate/status lines are CC's.
 > Statuses: MET · MET–INCIDENT OPEN · IN PROGRESS · AT RISK · PENDING · HELD/PARKED.
+> **STALENESS RULE (Clau, 2026-08-05):** an objective whose `Now` line is >7 days older than the
+> newest CL/VT touching it is STALE and must be reconciled BEFORE any status claim is made from
+> this file. The scoreboard exists so Fazal can see the war in one page; a stale scoreboard is
+> worse than none — it launders drift as status.
 > Last updated: 2026-08-05 (**single-voice program complete on dev**: S2 choke PROD-LIVE, S3 ledger + S3b enforce-parity + S4 route-unification DEV-PROVEN, all 4 casebook classes 3/3. First trustworthy FULL PACK: 79/79 distinct scenarios, 237 entries, zero duplicates, zero contaminated. O8 un-parked and REACHABLE for the first time — migration 189 on dev, 15-card seed through the VT-710 pipeline, retrieval canary PASS. O11 sealed set independently authored + validated. OPEN: the SR approval/send lane — the 90s harness deadline sat BELOW the product's own ~96s in-turn wait, so those gates were never measured; re-drive at 150s in flight, and `sr_consequential_bulk_send_requires_approval` is a REAL defect (silent first turn >150s), not an instrument artifact. Next: finish the re-drive → sealed no-O8 baseline → promotion on Fazal's word → VT-730.)
 
 ## O0 · NORTH STAR — Claude Code for Business — IN PROGRESS (the objective all others compose into)
@@ -81,7 +85,7 @@
   is O9 (held). *(Cowork audit-patch 2026-07-18: header + this line reconciled to the gate-2
   Now — the old "Missing" line contradicted it. CC: verify on next write.)*
 
-## O5 · Owner's language, owner's register — IN PROGRESS (CC-side DONE)
+## O5 · Owner's language, owner's register — IN PROGRESS (CC-side DONE; blocked only on Fazal/Meta)
 - Bar: every reply and agent-initiated message in the owner's language/register (en/hinglish/hi);
   mirroring wins live turns; preference governs agent-initiated.
 - Now: VT-677 CLOSED — all phases landed + ×3 full-journey gate CLEAN (33 runs, hinglish
@@ -95,6 +99,12 @@
 
 ## O6 · Real-tenant reliability — AT RISK (the honest one)
 - Bar: what passes on harness tenants must pass on REAL tenants with accumulated state.
+- **CADENCE CALL MADE (Clau 2026-08-05, after sitting unmade since July):** the `--dirty` seed
+  slice folds into the STANDING full-pack cadence, **alternating clean/dirty per ×3 cycle** — not
+  doubling the pack, because a ~10-hour serial run is fragile enough already (two were lost to
+  environmental faults on 2026-08-03/04). First dirty cycle = the first standing pack AFTER the
+  promotion. **When one dirty cycle completes with no new failure class, O6 lifts AT RISK** per its
+  own bar. An unmade roster call is how an objective gets overlooked while looking tracked.
 - Now: diagnosis re-scored the pattern — canary-2 was HONEST behavior (no false claim; the
   scary read was wrong), canary-1 was a REAL harness-green≠real-green miss (integration state
   hijacked the export route) — fixed 42bd7e6, live re-proof pending (O2 gate). Score: 1 real
@@ -147,6 +157,33 @@
 ## O9 · Dynamic sensing (Phase 1.2) — HELD (by design)
 - Bar: watchers/pollers/listeners the Manager configures; event-driven autonomy.
 - Now: spec written + held from CC until Phase 1.1's gate is met (Fazal's sequencing).
+- **DELIBERATE, not forgotten.** O9 is the ONE objective with no work in flight and that is
+  correct — Fazal's explicit sequencing. Recorded here so "held" is visibly different from
+  "overlooked" (the orphan check below cuts both ways).
+
+---
+
+## Objective ↔ in-flight map (every line of work must trace to an objective)
+
+| In flight | Objective it serves |
+|---|---|
+| SR re-drive @150s (COMPLETE — 6/9 gates observed clean) | O0/O2 — send-gate floors, observed not assumed |
+| `sr_consequential_bulk_send_requires_approval` silent-turn defect | **O2** — the bulk always-confirm floor is still UNVERIFIED |
+| No-O8 baseline (next dev-queue stage) | **O11** — and it unblocks D3 + D7 |
+| VT-725 flip/narrowing canary | **O8** — serving, shadow |
+| VT-727 full ingestion (Codex, after canary) | **O8** — the moat's corpus |
+| VT-723 (Codex, after baseline) | O8 × O11 — coverage aimed at measured weak slices |
+| dev→main promotion (Fazal's word, after pack) | **O7** |
+| VT-634 containment design → build | **O7** bar item (7 decisions pending with Fazal) |
+| VT-730 ask-readiness + mailbox + liveness | **O2 hardening + O0 reliability** (post-promotion) |
+| Hardcoded-Sonnet call sites bypassing `resolve_chat_model` | O7 cost/ops — Fazal's burn question |
+| D1/D2 Meta console | **O5 + O10** (Fazal-side; the only human-gated items) |
+| O6 dirty-cadence (alternating, post-promotion) | **O6** — lifts AT RISK on one clean dirty cycle |
+
+**Orphan check, both directions:** work with no objective ⇒ stop and ask why we are doing it.
+An objective with no work AND no owner ⇒ flag same-day. Currently every objective is covered
+EXCEPT **O9** (held by Fazal's sequencing) and **O11's C4 graduation linkage** (lands with
+O8/D7) — both deliberate, both stated rather than silent.
 
 ## O11 · Business judgment quality — measured, not asserted — IN PROGRESS (baseline is the next dev-queue stage)
 - Bar (phase1-plan Track D, reshaped 2026-07-01): the quality of the Manager's business
@@ -168,6 +205,10 @@
   linkage lands with O8/C4.
 
 ## O10 · Phase-1 launch roster — agents + tools READY — IN PROGRESS
+- **VT-681 registry gate CLOSED (2026-08-05):** the line read "×3 re-drive pending"; gate-2 passed
+  2026-07-18 and the capability-truth seam has since ridden every full pack, including the first
+  complete 79/79 run (2026-08-05) with zero capability-promise failures. Nothing genuinely left on
+  that gate. Remaining O10 work is D1/D2 Meta-side, which is Fazal's, not CC's.
 - Bar (phase1-plan LOCKED, "Function scope at launch" + ACF §5): every launch agent, function
   mode, and tool live and correctly labelled at Concierge launch — the Manager may promise
   ONLY capabilities marked live for that tenant/environment.
