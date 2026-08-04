@@ -10,7 +10,7 @@
 > newest CL/VT touching it is STALE and must be reconciled BEFORE any status claim is made from
 > this file. The scoreboard exists so Fazal can see the war in one page; a stale scoreboard is
 > worse than none — it launders drift as status.
-> Last updated: 2026-08-05 (**single-voice program complete on dev**: S2 choke PROD-LIVE, S3 ledger + S3b enforce-parity + S4 route-unification DEV-PROVEN, all 4 casebook classes 3/3. First trustworthy FULL PACK: 79/79 distinct scenarios, 237 entries, zero duplicates, zero contaminated. O8 un-parked and REACHABLE for the first time — migration 189 on dev, 15-card seed through the VT-710 pipeline, retrieval canary PASS. O11 sealed set independently authored + validated. OPEN: the SR approval/send lane — the 90s harness deadline sat BELOW the product's own ~96s in-turn wait, so those gates were never measured; re-drive at 150s in flight, and `sr_consequential_bulk_send_requires_approval` is a REAL defect (silent first turn >150s), not an instrument artifact. Next: finish the re-drive → sealed no-O8 baseline → promotion on Fazal's word → VT-730.)
+> Last updated: 2026-08-05 (**single-voice program complete on dev**: S2 choke PROD-LIVE, S3 ledger + S3b enforce-parity + S4 route-unification DEV-PROVEN, 3 of 4 casebook classes 3/3 in the completed pack (the 4th's target defect is fixed; its scenario is blocked by the SR/load timeout class, NOT rounded up). First trustworthy FULL PACK: 79/79 distinct scenarios, 237 entries, zero duplicates, zero contaminated. O8 un-parked and REACHABLE for the first time — migration 189 on dev, 15-card seed through the VT-710 pipeline, retrieval canary PASS. O11 sealed set independently authored + validated. OPEN: the SR approval/send lane. Re-drive at 150s COMPLETE — 6 of 9 gates now OBSERVED clean (a timeout is not a pass; these are real gate holds). **Root cause NOT established:** I proposed a 90s harness deadline sitting under the product's ~96s in-turn wait, then retracted it — measured latency shows NO successful turn above 90s (max 62.9s, approval-ask p90 61.3s), so the extra headroom was never used. The variable that actually changed was LOAD (79 back-to-back scenarios vs one in isolation). Residue: `sr_consequential_bulk_send_requires_approval` 0/3 with NO owner-visible reply — a real defect, reproducible in isolation, and the bulk always-confirm floor stays UNVERIFIED. Next: finish the re-drive → sealed no-O8 baseline → promotion on Fazal's word → VT-730.)
 
 ## O0 · NORTH STAR — Claude Code for Business — IN PROGRESS (the objective all others compose into)
 - Bar (Fazal, ratified 2026-07-01 — Track C first-class): an owner hands the Team-Manager a
@@ -27,8 +27,9 @@
   judgment measured (IN PROGRESS — harness + sealed set built).
 - **Single voice (2026-08-05, new O0 property):** the Manager no longer contradicts itself
   durably. One emission choke (S2, prod-live), a ledger of what it has already asserted (S3),
-  enforce-path parity (S3b), and gates that CLASSIFY while only the composer SPEAKS (S4). The
-  four measured self-contradiction classes are dead 3/3 on dev. "Speaks with one voice" moved
+  enforce-path parity (S3b), and gates that CLASSIFY while only the composer SPEAKS (S4). THREE of
+  the four measured self-contradiction classes are dead 3/3 in the completed full pack; the
+  fourth's target defect is fixed but its scenario still blocks under load, so it is NOT counted. "Speaks with one voice" moved
   from an aspiration to a property with a test behind it.
 - Honest stage: **a trustworthy reactive-plus-planned OPERATOR is real on dev today.** The
   gap to the full north star is exactly O8 + O9 + soak-proven depth: it does not yet LEARN
