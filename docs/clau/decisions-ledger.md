@@ -411,3 +411,32 @@ Prefer a guard that does not depend on remembering.
 **Known follow-on (not fixed):** harness teardown cascades `pipeline_runs` away, so after-the-fact
 latency forensics on a finished run are impossible; this diagnosis had to be reconstructed from
 deploy timestamps.
+
+## CL-2026-08-04-report-bundles-are-append-only — Standing (CC finding; Clau error)
+
+**Fact.** `run_critical_x3 --json-report` is **APPEND-ONLY and never truncates.** A bundle reused
+across attempts silently accumulates entries from BOTH runs.
+
+**What it caused.** Clau read 186 entries ÷ 3 = "62 of 79 scenarios, ~78% done" and reported that
+to Fazal. The bundle held two attempts: 129 distinct runs across 43 scenarios, 13 of them recorded
+twice. **Real progress was ~44 of 79 (~55%).**
+
+**The worse consequence, avoided.** The same polluted bundle feeds `transcript_judge.py`, which
+would have scored 13 scenarios **twice** and inflated the aggregate. The measurement substrate
+silently merged two different runs — a corrupted conclusion, not merely a wrong progress number.
+
+**Rules.**
+1. **A fresh measurement uses a FRESH report path.** Never reuse a bundle path across attempts.
+2. **Derive progress from DISTINCT scenario names, never from entry count ÷ 3.**
+3. Before trusting any aggregate, check the bundle for duplicate scenario entries.
+
+**Class.** Third instance in one week of *"something we assumed was inert, wasn't"* — after
+`CL-2026-08-03-docs-push-is-a-deploy` (a docs push redeploys) and the DBOS `compute_app_version`
+finding (a restart re-recovers PENDING rows). Clau's own error here is the same shape as
+`CL-2026-08-03-green-on-fallback-is-not-green`: an artifact read without asking what produced it.
+
+**Resolution (VT-729 follow-on, built by CC).** `--resume` reuses a prior scenario ONLY if all three
+runs are recorded, all three clean, and all three carry the SAME `dbos.application_versions` value
+the service is running now. Version mismatch ⇒ re-driven, reason printed. A resumed pack prints
+`!! RESUMED RUN: N scenario(s) came from a PRIOR segment` — both guards are **refusals, not
+annotations**, because an annotation is what a tired reader skips.

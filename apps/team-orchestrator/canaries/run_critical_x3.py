@@ -67,6 +67,8 @@ class RunObservation:
     transcript_hash: str
     # VT-728: set when the orchestrator redeployed mid-scenario (see deployed_version).
     contaminated: bool = False
+    #: The deployed app version this run measured — the key --resume merges (or refuses) on.
+    app_version: str | None = None
 
 
 # --- pure functions (unit-tested; no DB/network) -------------------------------------------------
@@ -270,6 +272,7 @@ def run_scenario_x3(
                 scenario_name=name, run_index=i, tenant_id=tenant_id, results=results,
                 route=route, grounded_count=grounded_count, terminal_outcome=terminal_outcome,
                 transcript_hash=transcript_hash(results),
+                app_version=version_before,
             ))
         finally:
             if not keep_tenants:
@@ -347,7 +350,60 @@ def _write_json_report(path: str, path_stem: str, scenario: dict[str, Any], obs:
     entry = ch._build_json_report(uniquified, path_stem, obs.tenant_id, steps, obs.results, summary)
     entry["transcript_hash"] = obs.transcript_hash
     entry["run_index"] = obs.run_index
+    # VT-729b — stamp the SERVICE this run measured. The bundle is append-only, so without this a
+    # later attempt's entries sit indistinguishably beside an earlier one's: reading 186 entries as
+    # "62 of 79 scenarios" is exactly the arithmetic that produced a wrong completion figure in a
+    # brief. --resume uses this to decide what is genuinely done, and to refuse to merge segments
+    # that measured different code.
+    entry["app_version"] = obs.app_version
     ch._append_json_report(path, entry)
+
+
+def completed_scenarios(report_path: str, current_version: str | None) -> tuple[set[str], list[str]]:
+    """VT-729b — scenarios a prior segment already finished, and the ones deliberately NOT reused.
+
+    A scenario counts as done only when the bundle holds THREE entries for it, every one clean, and
+    every one stamped with the SAME app version the service is running now. Anything else re-runs.
+
+    The version equality is the load-bearing part. A resumed pack straddles time, so if the service
+    redeployed between segments the segments describe different services — the same disease the
+    in-run contamination guard catches, one level up. Rather than merge and annotate, this refuses
+    to reuse those scenarios at all: a merged number that reads as one clean run is precisely the
+    green nobody traced.
+
+    Returns ``(reusable_scenario_names, skipped_reasons)``.
+    """
+    try:
+        with open(report_path, encoding="utf-8") as fh:
+            entries = json.load(fh)
+    except Exception:  # noqa: BLE001 — no readable prior bundle → nothing to resume, run everything
+        return set(), []
+
+    by_scenario: dict[str, list[dict[str, Any]]] = {}
+    for entry in entries if isinstance(entries, list) else []:
+        raw = str(entry.get("name", ""))
+        base = raw.split(" [run ", 1)[0]
+        by_scenario.setdefault(base, []).append(entry)
+
+    reusable: set[str] = set()
+    skipped: list[str] = []
+    for name, rows in by_scenario.items():
+        indices = {r.get("run_index") for r in rows if r.get("run_index")}
+        if indices != {1, 2, 3}:
+            skipped.append(f"{name}: only runs {sorted(i for i in indices if i)} recorded")
+            continue
+        versions = {r.get("app_version") for r in rows}
+        if versions != {current_version} or current_version is None:
+            skipped.append(
+                f"{name}: measured on a different service version ({sorted(str(v)[:12] for v in versions)})"
+            )
+            continue
+        summaries = [r.get("summary") or {} for r in rows]
+        if any(s.get("failed") or s.get("timed_out") or s.get("xpassed") for s in summaries):
+            skipped.append(f"{name}: prior segment was not clean")
+            continue
+        reusable.add(name)
+    return reusable, skipped
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -361,6 +417,13 @@ def main(argv: list[str] | None = None) -> int:
         help="skip teardown (debug — inspect the synthetic tenants after the run)",
     )
     p.add_argument("--json-report", default=None, help="bundle path for transcript_judge.py")
+    p.add_argument(
+        "--resume", action="store_true",
+        help="skip scenarios the --json-report bundle already records as 3/3 clean ON THE SAME "
+             "deployed app version. A ten-hour serial run has now been lost twice to environmental "
+             "faults (a session stop, a DNS failure); this turns that into losing the scenario that "
+             "was in flight. Refuses to reuse anything measured on a different service version.",
+    )
     p.add_argument(
         "--summary-json", default=None,
         help="write the persisted per-run route/grounded_count/terminal_outcome/transcript_hash + "
@@ -376,6 +439,19 @@ def main(argv: list[str] | None = None) -> int:
         if not pairs:
             print(f"run_critical_x3: no critical scenario named {args.only!r}", file=sys.stderr)
             return 2
+
+    resumed_names: set[str] = set()
+    if args.resume:
+        if not args.json_report:
+            print("run_critical_x3: --resume requires --json-report", file=sys.stderr)
+            return 2
+        current = deployed_version(ch._dsn())
+        resumed_names, skipped_reasons = completed_scenarios(args.json_report, current)
+        print(f"=== RESUMED RUN — reusing {len(resumed_names)} scenario(s) from a prior segment ===")
+        print(f"    current app version: {str(current)[:12]}…")
+        for reason in skipped_reasons:
+            print(f"    re-running {reason}")
+        pairs = [(path, s) for path, s in pairs if str(s.get("name", path.stem)) not in resumed_names]
 
     print(f"=== VT-611 Package C: {len(pairs)} critical scenario(s), ×3 each ===")
 
@@ -419,6 +495,11 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"    CROSS-RUN DIVERGENCE: {f}")
         summaries.append(build_run_summary(name, obs))
 
+    if resumed_names:
+        print(
+            f"\n!! RESUMED RUN: {len(resumed_names)} scenario(s) came from a PRIOR segment and were "
+            f"not re-driven here. This is not a single continuous pack; report it as resumed."
+        )
     print(
         f"\n=== summary: {len(pairs)} critical scenario(s), {len(blocked)} block(s)"
         + (f", {len(contaminated)} CONTAMINATED ===" if contaminated else " ===")
