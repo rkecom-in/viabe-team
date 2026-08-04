@@ -156,6 +156,22 @@ _TIER_DEFAULTS: dict[str, tuple[str, str]] = {
 }
 
 _DEFAULT_MAX_TOKENS = 4096
+# VT-732 — the REASONING-MODEL OUTPUT FLOOR.
+#
+# On the Responses API the cap covers REASONING tokens as well as visible output, so a small cap can
+# be spent entirely on reasoning and the call returns with NO text at all (status=incomplete,
+# incomplete_details.reason=max_output_tokens). Anthropic's ``max_tokens`` does not behave this way,
+# so every hand-tuned cap in this codebase was sized for Anthropic: the classifiers ask for 60, the
+# taxonomy reconcile 16, the field-mapping label 10. Pointed at gpt-5.6 those return empty, each site
+# fails soft to its fallback, and the system looks fine while quietly running without its classifiers
+# — the exact "green on a fallback is not green" class. Observed on dev as
+# ``empty response from triage (complex) call`` (triage asks for 200), which dropped the turn to
+# legacy dispatch and cost the run its SR delegation.
+#
+# The floor is a CAP, not a spend: raising it bills nothing extra unless the model actually emits
+# more, whereas truncation bills the reasoning AND throws the answer away. Applied only to the
+# Responses-API providers (openai / xai); anthropic, google and GLM keep the caller's number.
+_REASONING_MIN_MAX_TOKENS = 1024
 # GLM (Z.ai) OpenAI-compatible endpoint. GLM_BASE_URL is the SINGLE self-host switch (see
 # _build_glm_chat_model); this is only the managed-z.ai fallback when that env var is unset.
 _GLM_DEFAULT_BASE_URL = "https://api.z.ai/api/paas/v4/"
@@ -339,11 +355,34 @@ def assert_tier_vars_configured() -> dict[str, str]:
             "A deployed box must never fall back to a built-in default — that silently changes "
             "vendor. Set the variable(s) and redeploy."
         )
-    logger.info(
-        "llm tier conformance: %s",
-        ", ".join(f"{tier}={model_id}" for tier, model_id in sorted(resolved.items())),
-    )
+    summary = ", ".join(f"{tier}={model_id}" for tier, model_id in sorted(resolved.items()))
+    logger.info("llm tier conformance: %s", summary)
+    # ...and print it. VT-732: the logger line above is INVISIBLE on the deployed box — the app's
+    # loggers are not configured in the Railway process (only DBOS's own logger and uvicorn's emit),
+    # so VT-731 shipped a boot line nobody could read, and "the boot log shows every tier" was an
+    # unverifiable exit gate. stdout is the channel that demonstrably reaches the deploy log — the
+    # sibling env-guard sentinel line arrives the same way. Model ids are configuration names, not
+    # secrets (Rule 18 governs credential VALUES), and this is what makes the next burn-hunt one
+    # `railway logs | grep` long instead of a day.
+    print(f"llm tier conformance: {summary}", flush=True)
     return resolved
+
+
+def _effective_max_tokens(provider: str, max_tokens: int, *, call_site: str) -> int:
+    """Raise a too-small cap to the reasoning floor on the Responses-API providers.
+
+    See ``_REASONING_MIN_MAX_TOKENS``. Logged when it fires so the adjustment is visible rather than
+    magic — a site whose cap is routinely floored is a site whose cap was written for a different
+    provider, which is worth knowing.
+    """
+    if provider not in ("openai", "xai") or max_tokens >= _REASONING_MIN_MAX_TOKENS:
+        return max_tokens
+    logger.info(
+        "raising max_tokens %d -> %d for call_site=%s on provider=%s: the cap covers REASONING "
+        "tokens there, and a cap this small returns no visible text at all",
+        max_tokens, _REASONING_MIN_MAX_TOKENS, call_site, provider,
+    )
+    return _REASONING_MIN_MAX_TOKENS
 
 
 def resolve_chat_model(
@@ -411,6 +450,8 @@ def resolve_chat_model(
         logger.info(
             "betas %s requested for provider %r — Anthropic-only; building without them", betas, provider
         )
+
+    max_tokens = _effective_max_tokens(provider, max_tokens, call_site=call_site or tier)
 
     if provider == "anthropic":
         from langchain_anthropic import ChatAnthropic

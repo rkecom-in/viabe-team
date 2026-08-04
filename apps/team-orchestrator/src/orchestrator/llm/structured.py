@@ -182,7 +182,15 @@ def structured_text_call(
     content = getattr(resp, "content", "")
     text = _last_text_block(content) if text_mode == "last" else _content_to_text(content)
     if not text.strip():
-        raise ValueError(f"empty response from {call_site} ({tier}) call")
+        # Name the MODEL and the stop reason. "empty response from triage (complex)" cost real time
+        # on dev because it did not say WHICH model answered or WHY it stopped — the answer was
+        # "gpt-5.6-luna, incomplete: the max_output_tokens cap was spent on reasoning".
+        meta = getattr(resp, "response_metadata", None) or {}
+        stop = meta.get("stop_reason") or meta.get("finish_reason") or "unknown"
+        raise ValueError(
+            f"empty response from {call_site} ({tier}) call: model={resolve_model_id(tier)!r} "
+            f"stop_reason={stop!r} max_tokens={max_tokens}"
+        )
     return text
 
 

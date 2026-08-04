@@ -131,6 +131,46 @@ def test_no_timeout_leaves_client_default() -> None:
     assert p.resolve_chat_model("complex", agent="t").default_request_timeout is None
 
 
+# --------------------------------------------------------------------------- reasoning-cap floor
+def test_small_cap_is_floored_on_the_responses_api_providers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 60-token cap sized for Anthropic returns NO TEXT on a reasoning model — the cap covers
+    reasoning there. Observed on dev as an empty triage response that cost the turn its SR
+    delegation, so the seam raises it rather than letting each site fail soft into a fallback."""
+    monkeypatch.setenv("TEAM_MODEL_CLASSIFIER", "gpt-5.6-luna")
+    assert p.resolve_chat_model("classifier", agent="t", max_tokens=60).max_tokens == (
+        p._REASONING_MIN_MAX_TOKENS
+    )
+    monkeypatch.setenv("TEAM_MODEL_CLASSIFIER", "grok-4.5")
+    assert p.resolve_chat_model("classifier", agent="t", max_tokens=10).max_tokens == (
+        p._REASONING_MIN_MAX_TOKENS
+    )
+
+
+def test_generous_cap_is_left_alone(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TEAM_MODEL_CLASSIFIER", "gpt-5.6-luna")
+    assert p.resolve_chat_model("classifier", agent="t", max_tokens=4096).max_tokens == 4096
+
+
+def test_anthropic_and_google_and_glm_keep_the_callers_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only the Responses-API providers spend the cap on reasoning; everywhere else the caller's
+    hand-tuned number is the contract (a 16-token taxonomy key must stay 16 tokens)."""
+    assert p.resolve_chat_model("classifier", agent="t", max_tokens=16).max_tokens == 16
+    monkeypatch.setenv("TEAM_MODEL_CLASSIFIER", "gemini-3.5-flash")
+    assert p.resolve_chat_model("classifier", agent="t", max_tokens=16).max_output_tokens == 16
+    monkeypatch.setenv("TEAM_MODEL_CLASSIFIER", "glm-5.2")
+    assert p.resolve_chat_model("classifier", agent="t", max_tokens=16).max_tokens == 16
+
+
+def test_empty_response_error_names_the_model_and_stop_reason(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The failure that cost a dev run its delegation said only 'empty response from triage'."""
+    monkeypatch.setenv("TEAM_MODEL_COMPLEX", "gpt-5.6-luna")
+    stub = _StubModel(_StubResponse(""))
+    stub.response.response_metadata = {"finish_reason": "length"}
+    _patch_model(monkeypatch, stub)
+    with pytest.raises(ValueError, match="gpt-5.6-luna.*length"):
+        s.structured_text_call("complex", user="u", max_tokens=200, agent="a", call_site="triage")
+
+
 # --------------------------------------------------------------------------- betas
 def test_betas_passed_on_anthropic() -> None:
     m = p.resolve_chat_model("complex", agent="t", betas=["web-fetch-2025-09-10"])
