@@ -37,15 +37,13 @@ validation.
 from __future__ import annotations
 
 import logging
-import os
 import re
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, cast
 
-import yaml
-from anthropic import Anthropic, APITimeoutError
+from anthropic import APITimeoutError
 
 from orchestrator.agent.cost import compute_cost_paise
 from orchestrator.agent.limits import (
@@ -248,11 +246,6 @@ _RUN_LEVEL_TOKEN_HARD_LIMIT = 80_000
 _MAX_TURNS_PER_RUN = 50
 
 
-_MODELS_YAML = (
-    Path(__file__).resolve().parents[3] / "config" / "models.yaml"
-)
-
-
 # Exec-6.85 reconciliation: the agent's context IS the orchestrator-side
 # Context Composer bundle. The minimal three-field wedge (tenant_id /
 # run_id / user_request) is gone — the agent receives the full bundle
@@ -264,19 +257,25 @@ _MODELS_YAML = (
 from orchestrator.context_builder import SalesRecoveryContext  # noqa: E402
 
 
-def _resolve_model(agent_name: str = "sales_recovery") -> str:
-    """Return the model id for ``agent_name`` per ``VIABE_ENV``.
+# VT-732 — the SPECIALIST tier (TEAM_MODEL_SPECIALIST). This replaced
+# ``config/models.yaml[sales_recovery][VIABE_ENV-slot]``, whose dev slot was
+# ``claude-sonnet-5``: every SR draft on dev burned Sonnet while all five
+# TEAM_MODEL_* vars read gpt-5.6-luna. That is the Sonnet-burn finding's other
+# half — the yaml was a SECOND model-governance surface the tier seam never saw.
+# SR drafting is a specialist lane doing grounded reasoning, so it takes the
+# specialist tier (same tier as the other lanes), per environment.
+_SR_TIER = "specialist"
 
-    ``VIABE_ENV in {'production'}`` → ``production`` slot; everything else
-    (test/dev/canary or unset) → ``test`` slot. The unset default is
-    test/Haiku — never silently fall through to Opus in a development
-    environment.
+
+def _resolve_model(agent_name: str = "sales_recovery") -> str:
+    """The concrete model id the SR tier resolves to — for cost attribution + logs.
+
+    ``agent_name`` is retained for call-site compatibility; every SR-family caller
+    runs on the same tier now (which model that means is the deployed env's call).
     """
-    env = os.environ.get("VIABE_ENV", "test").lower()
-    slot = "production" if env == "production" else "test"
-    with open(_MODELS_YAML) as f:
-        config = yaml.safe_load(f)
-    return cast(str, config[agent_name][slot])
+    from orchestrator.llm import resolve_model_id
+
+    return resolve_model_id(_SR_TIER)
 
 
 def _dispatch_tool(
@@ -307,16 +306,30 @@ def _dispatch_tool(
         return {"tool_name": tool_name, "is_error": True, "content": str(exc)}
 
 
+def _model_client() -> Any | None:
+    """The TEST injection seam for this loop's transport.
+
+    Production returns ``None``, which means "use the tier seam" — the model, provider and
+    credential all come from ``TEAM_MODEL_SPECIALIST`` (VT-732). The VT-35 hard-limit,
+    token-meter and continuation tests drive this loop with SDK-shaped response doubles
+    (``.usage`` / ``.content`` blocks / ``.stop_reason``); they monkeypatch THIS to hand back
+    such a double, and ``_run_one_turn`` then uses it verbatim. Keeping that one branch is what
+    lets ~23 behavioural assertions about budget enforcement keep testing the real loop rather
+    than being rewritten alongside a transport swap.
+    """
+    return None
+
+
 @with_reasoning_capture
 def _run_one_turn(
-    client: Anthropic,
+    client: Any,
     *,
     model: str,
     system_prompt: list[dict[str, Any]],
     messages: list[dict[str, Any]],
     timeout: float = PER_TURN_HTTP_TIMEOUT_S,
 ) -> Any:
-    """One Messages.create round-trip. VT-35 per-turn / token-meter seam.
+    """One model round-trip through the tier seam. VT-35 per-turn / token-meter seam.
 
     ``system_prompt`` is the ``_render_sr_system_prompt`` BLOCK LIST (cache
     batch 2026-07-18): [static cache_control block, volatile date block] —
@@ -341,18 +354,52 @@ def _run_one_turn(
     logs a warning and skips the write (observability is best-effort per
     CL-122).
     """
-    # mypy: anthropic.Messages.create's overloads are TypedDict-heavy
-    # (MessageParam, ThinkingConfigEnabledParam) — typing the plain-dict
-    # messages list to match would add noise without value for a Phase 1
-    # placeholder loop. The shape is asserted at runtime by the SDK.
-    return client.messages.create(
-        model=model,
-        max_tokens=_MAX_OUTPUT_TOKENS_PER_TURN,
-        system=system_prompt,
-        messages=messages,  # type: ignore[arg-type]
-        tools=[],
-        timeout=timeout,
+    # VT-732: the transport is the multi-provider seam. ``client`` is kept in the
+    # signature ONLY as the test/mock injection point this function has always been
+    # (VT-35's enforcer tests patch here); when it is None the seam is used. The
+    # return is adapted BACK to the SDK shape (``.content`` blocks / ``.stop_reason``
+    # / ``.usage``) because this loop's budget accounting, max_tokens continuation
+    # and cost attribution all read those attributes — swapping the transport must
+    # not quietly change the loop's behaviour.
+    from orchestrator.llm.structured import as_sdk_response, messages_call
+
+    if client is not None:
+        return client.messages.create(
+            model=model,
+            max_tokens=_MAX_OUTPUT_TOKENS_PER_TURN,
+            system=system_prompt,
+            messages=messages,  # type: ignore[arg-type]
+            tools=[],
+            timeout=timeout,
+        )
+    return as_sdk_response(
+        messages_call(
+            _SR_TIER,
+            messages=_to_lc_messages(messages),
+            system=system_prompt,
+            max_tokens=_MAX_OUTPUT_TOKENS_PER_TURN,
+            agent="sales_recovery",
+            call_site="sr_draft_turn",
+            timeout_s=timeout,
+        )
     )
+
+
+def _to_lc_messages(messages: list[dict[str, Any]]) -> list[Any]:
+    """Anthropic-shaped ``{"role", "content"}`` dicts -> langchain messages.
+
+    The loop builds its own transcript (user request, assistant turns, tool results,
+    self-evaluate feedback) in the SDK's dict form. Content that is already a block
+    list passes through — langchain's adapters translate text blocks per provider.
+    """
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    out: list[Any] = []
+    for m in messages:
+        role = str(m.get("role") or "user")
+        content = m.get("content")
+        out.append(AIMessage(content=content) if role == "assistant" else HumanMessage(content=content))
+    return out
 
 
 def _extract_text(content_blocks: list[Any]) -> str:
@@ -877,7 +924,7 @@ def run_sales_recovery_agent(
     caller starts passing it.
     """
     start = time.monotonic()
-    client = Anthropic()
+    client = _model_client()
     model = _resolve_model("sales_recovery")
     # VT-493 A1: render the date-anchored template ONCE per dispatch so the
     # proposed example + campaign_window instruction carry today's date (not the

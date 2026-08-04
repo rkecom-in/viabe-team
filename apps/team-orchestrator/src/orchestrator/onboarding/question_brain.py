@@ -22,7 +22,7 @@ from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
 
-_GAP_MODEL = "claude-haiku-4-5-20251001"
+_GAP_TIER = "classifier"  # VT-732: the cheap tier, resolved per call from TEAM_MODEL_CLASSIFIER
 _MAX_GAPS = 6  # minimal — never a 20-question dump
 # VT-693 (Fazal 2026-07-22, first-customer screenshots: "endless questions"): once ONLINE
 # discovery has produced a draft, the residual the owner is asked shrinks hard — the
@@ -352,10 +352,10 @@ def compose_onboarding_questions(
 def _llm_compose_gaps(
     business_type: str, draft_attrs: dict[str, Any], answered: list[str]
 ) -> list[dict[str, Any]]:
-    """Ask Haiku which required onboarding fields a business of ``business_type`` STILL needs (given
-    what's already known), as bilingual question objects. Returns [] on any failure (the confirm
-    questions still stand). CL-390: business context only — never ask for third-party PII."""
-    from anthropic import Anthropic
+    """Ask the classifier tier which required onboarding fields a business of ``business_type`` STILL
+    needs (given what's already known), as bilingual question objects. Returns [] on any failure (the
+    confirm questions still stand). CL-390: business context only — never ask for third-party PII."""
+    from orchestrator.llm.structured import structured_text_call
 
     # VT-693: give the model the VALUES, not just opaque field names — semantic coverage is
     # what stops "what do you sell?" after a GST nature_of_business already answered it. Values
@@ -386,15 +386,16 @@ def _llm_compose_gaps(
         'question with a concrete example>", "help_hi": "<same in Hindi>"}. JSON array only, no prose.'
     )
     try:
-        resp = Anthropic().messages.create(
-            model=_GAP_MODEL,
+        raw = structured_text_call(
+            _GAP_TIER,
+            user=prompt,
             max_tokens=700,
-            messages=[{"role": "user", "content": prompt}],
-            timeout=_COMPOSE_TIMEOUT_S,  # VT-367: bound the call — this runs on the owner-inbound hot
+            agent="onboarding_question_brain",
+            call_site="gap_compose",
+            timeout_s=_COMPOSE_TIMEOUT_S,  # VT-367: bound the call — this runs on the owner-inbound hot
             # path (the journey pending-fill branch); a hang must degrade to [] (confirms/opener), not
             # stall the webhook pipeline. try/except catches the timeout exception → [].
         )
-        raw = resp.content[0].text if resp.content else "[]"
         start, end = raw.find("["), raw.rfind("]")
         data = json.loads(raw[start : end + 1]) if start != -1 and end != -1 else []
         return data if isinstance(data, list) else []

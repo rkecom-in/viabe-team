@@ -199,7 +199,7 @@ def test_scope_discipline_envelope_routing(
     response = _fake_response(text=json.dumps(envelope))
     fake_client = _patched_client(response)
     monkeypatch.setattr(
-        "orchestrator.agent.sales_recovery.Anthropic",
+        "orchestrator.agent.sales_recovery._model_client",
         lambda *a, **kw: fake_client,
     )
     # Patch route_failure so we don't hit DB substrate on terminal envelopes

@@ -238,12 +238,19 @@ def test_turn_brain_search_payload_and_routing(monkeypatch):
     assert schema["name"] == "search_conversation_history"
     assert "query" in schema["input_schema"]["properties"]
 
-    # _handle_client_tool_uses routes the tool_use block to the payload.
-    from types import SimpleNamespace
+    # _handle_client_tool_uses routes the tool call to the payload. VT-732: the loop reads the
+    # provider-neutral AIMessage.tool_calls and answers with a ToolMessage.
+    from langchain_core.messages import AIMessage
 
-    block = SimpleNamespace(type="tool_use", name="search_conversation_history", id="tu1", input={"query": "gst"})
-    results = tb._handle_client_tool_uses(
-        [block], journey_state={}, provenance=None, pinnable_domains=[], tenant_id=uuid4()
+    resp = AIMessage(
+        content="",
+        tool_calls=[{
+            "name": "search_conversation_history", "args": {"query": "gst"},
+            "id": "tu1", "type": "tool_call",
+        }],
     )
-    assert results[0]["tool_use_id"] == "tu1"
-    assert "your GST is registered" in results[0]["content"]
+    results = tb._handle_client_tool_uses(
+        resp, journey_state={}, provenance=None, pinnable_domains=[], tenant_id=uuid4()
+    )
+    assert results[0].tool_call_id == "tu1"
+    assert "your GST is registered" in results[0].content

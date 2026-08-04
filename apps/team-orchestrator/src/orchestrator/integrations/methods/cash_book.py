@@ -26,15 +26,12 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 from uuid import UUID
 
-import yaml
-from anthropic import Anthropic
 
 from orchestrator.integrations.methods._image_adapter import (
     TARGET_FIELDS,
@@ -53,7 +50,6 @@ from orchestrator.integrations.voice_transcription import TranscriptionResult, t
 
 logger = logging.getLogger(__name__)
 
-_MODELS_YAML = Path(__file__).resolve().parents[4] / "config" / "models.yaml"
 _MERGE_PROMPT = (
     Path(__file__).resolve().parents[2] / "agent" / "prompts" / "cash_book_merge_v1.md"
 )
@@ -62,12 +58,16 @@ _MAX_OUTPUT_TOKENS = 2048
 TranscribeFn = Callable[..., TranscriptionResult]
 
 
+# VT-732 — the SPECIALIST tier (TEAM_MODEL_SPECIALIST), replacing the
+# ``config/models.yaml[cash_book_merge][VIABE_ENV-slot]`` pin. Reconciling a photo's entries against
+# the owner's spoken narration is capable-tier work; the tier var carries the per-env split.
+_MERGE_TIER = "specialist"
+
+
 def _resolve_merge_model() -> str:
-    env = os.environ.get("VIABE_ENV", "test").lower()
-    slot = "production" if env == "production" else "test"
-    with open(_MODELS_YAML) as f:
-        config = yaml.safe_load(f)
-    return cast(str, config["cash_book_merge"][slot])
+    from orchestrator.llm import resolve_model_id
+
+    return resolve_model_id(_MERGE_TIER)
 
 
 def _fields_from_rows(rows: list[dict[str, Any]]) -> tuple[ExtractedField, ...]:
@@ -120,10 +120,10 @@ def _merge_photo_and_voice(
     vision_results: list[ExtractionResult],
     transcript: str,
     *,
-    client: Anthropic | None,
-    model: str | None,
+    text_call: Callable[..., str] | None,
+    tier: str | None,
 ) -> list[ExtractionResult]:
-    """Sonnet reconcile of photo entries vs narration → merged ExtractionResults."""
+    """Capable-tier reconcile of photo entries vs narration → merged ExtractionResults."""
     base = _MERGE_PROMPT.read_text(encoding="utf-8")
     photo_json = json.dumps(
         {"entries": [
@@ -138,15 +138,15 @@ def _merge_photo_and_voice(
         f"{base}\n\nPHOTO EXTRACTION (JSON):\n{photo_json}\n\n"
         f"OWNER NARRATION (transcript):\n{transcript}\n"
     )
-    if client is None:
-        client = Anthropic()
-    resolved = model or _resolve_merge_model()
-    resp = client.messages.create(
-        model=resolved, max_tokens=_MAX_OUTPUT_TOKENS,
-        messages=[{"role": "user", "content": [{"type": "text", "text": prompt}]}],
-    )
-    text = "".join(
-        getattr(b, "text", "") for b in resp.content if getattr(b, "type", "") == "text"
+    from orchestrator.llm.structured import structured_text_call
+
+    resolved = _resolve_merge_model()
+    text = (text_call or structured_text_call)(
+        tier or _MERGE_TIER,
+        user=prompt,
+        max_tokens=_MAX_OUTPUT_TOKENS,
+        agent="cash_book",
+        call_site="photo_voice_merge",
     ).strip()
     return _parse_merge_response(text, resolved)
 
@@ -161,16 +161,17 @@ def ingest_cash_book(
     now: datetime | None = None,
     run_id: str | None = None,
     consent_check: Callable[[UUID], bool] | None = None,
-    anthropic_client: Anthropic | None = None,
+    llm_call: Callable[..., Any] | None = None,
     transcribe_fn: TranscribeFn | None = None,
     image_extract_fn: Callable[..., list[ExtractionResult]] = extract_entries_from_image,
-    merge_model: str | None = None,
+    merge_tier: str | None = None,
 ) -> IngestionSummary:
     """Ingest a cash-book photo and/or voice note. tenant_id from context (P3).
 
     At least one of image_bytes / audio_bytes is required. Returns counts only.
-    Injectables (consent_check / anthropic_client / transcribe_fn / image_extract_fn
-    / merge_model) keep it testable without network or keys.
+    Injectables (consent_check / llm_call / transcribe_fn / image_extract_fn /
+    merge_tier) keep it testable without network or keys. VT-732: ``llm_call`` is the
+    multi-provider seam's transport (vision + text), replacing the raw Anthropic client.
     """
     if not image_bytes and not audio_bytes:
         raise ValueError("ingest_cash_book: need image_bytes and/or audio_bytes")
@@ -183,7 +184,7 @@ def ingest_cash_book(
             tenant_id, image_bytes, acquired_via="cash_book",
             media_type=image_media_type, now=now, park_unattributed=True,
             extract_fn=image_extract_fn,
-            consent_check=consent_check, client=anthropic_client,
+            consent_check=consent_check, call=llm_call,
         )
 
     assert audio_bytes is not None  # past the image-only return ⇒ audio present
@@ -196,7 +197,7 @@ def ingest_cash_book(
     if audio_bytes and not image_bytes:
         entries = extract_owner_typed(
             transcript.transcript_text, tenant_id=tenant_id, now=now,
-            client=anthropic_client, consent_check=consent_check,
+            text_call=llm_call, consent_check=consent_check,
         )
         return ingest_entries(
             tenant_id, entries, acquired_via="cash_book", now=now,
@@ -207,11 +208,11 @@ def ingest_cash_book(
     vision_results = image_extract_fn(
         image_bytes, tenant_id=tenant_id, target_fields=TARGET_FIELDS,
         acquired_via="cash_book", media_type=image_media_type,
-        consent_check=consent_check, client=anthropic_client,
+        consent_check=consent_check, call=llm_call,
     )
     merged = _merge_photo_and_voice(
         vision_results, transcript.transcript_text,
-        client=anthropic_client, model=merge_model,
+        text_call=llm_call, tier=merge_tier,
     )
     logger.info(
         "ingest_cash_book: tenant=%s photo_entries=%d merged_entries=%d",

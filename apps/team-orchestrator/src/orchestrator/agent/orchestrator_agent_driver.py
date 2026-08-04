@@ -116,8 +116,12 @@ class OrchestratorAgentDriver:
         from orchestrator.agent.orchestrator_agent import build_orchestrator_agent
         from orchestrator.agent.orchestrator_agent_driver import OrchestratorAgentDriver
 
+        # model_name is for COST ATTRIBUTION only — the driver never selects a model. Take it from
+        # the seam (VT-732) so the docstring cannot teach a hardcoded id back into the codebase.
+        from orchestrator.llm import resolve_model_id
+
         agent = build_orchestrator_agent(model)
-        driver = OrchestratorAgentDriver(agent, model_name="claude-opus-4-7")
+        driver = OrchestratorAgentDriver(agent, model_name=resolve_model_id("complex"))
         with observability_context(run_id=run_id, tenant_id=tenant_id):
             result = driver.invoke(
                 messages=[{"role": "user", "content": event_payload}],

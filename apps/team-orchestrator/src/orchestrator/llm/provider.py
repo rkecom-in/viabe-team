@@ -255,6 +255,36 @@ def require_anthropic_model(model_id: str, *, site: str) -> str:
     return model_id
 
 
+# Per-provider credential env var — the key a call on that provider actually needs. Names are the
+# canonical ones the builders already pass explicitly (no env-suffix per env, standing rule).
+_PROVIDER_KEY_VARS: dict[str, str] = {
+    "anthropic": "ANTHROPIC_API_KEY",
+    "openai": "OPENAI_API_KEY",
+    "google": "GEMINI_API_KEY",
+    "zai": "GLM_API_KEY",
+    "xai": "XAI_API_KEY",
+}
+# A unit/CI run sets a placeholder rather than leaving the var unset; treat those as "no key" so a
+# test run never makes a live call. Same prefixes the hand-rolled guards used before VT-732.
+_SENTINEL_KEY_PREFIXES = ("test", "sentinel", "dummy", "sk-ant-test", "sk-test")
+
+
+def api_key_present(tier: str) -> bool:
+    """True iff a usable (non-sentinel) credential is set for the provider ``tier`` RESOLVES TO.
+
+    VT-732: the fail-soft call sites used to ask ``ANTHROPIC_API_KEY?`` before invoking. Once a tier
+    can resolve to any of five providers that question is the wrong one — on a gpt-tiered box it
+    answers "no key" and silently disables an LLM path that would have worked (and on an Anthropic
+    box with a stale key it answers "yes" for a provider the call never touches). Ask about the
+    provider the call will ACTUALLY use.
+    """
+    var = _PROVIDER_KEY_VARS.get(provider_for(resolve_model_id(tier)))
+    if not var:
+        return False
+    key = (os.environ.get(var) or "").strip()
+    return bool(key) and not key.lower().startswith(_SENTINEL_KEY_PREFIXES)
+
+
 def _configured_service_tier() -> str:
     """The Viabe-facing OpenAI service tier from ``TEAM_OPENAI_SERVICE_TIER`` (standard|flex|auto,
     default standard). 'standard' means "no special tier" — the OpenAI request omits service_tier."""
@@ -325,6 +355,8 @@ def resolve_chat_model(
     enable_web_search: bool = False,
     enable_x_search: bool = False,
     call_site: str | None = None,
+    timeout_s: float | None = None,
+    betas: list[str] | None = None,
 ) -> BaseChatModel:
     """Build the langchain chat model for ``tier`` (ChatAnthropic / ChatOpenAI-on-Responses-API /
     Gemini / GLM / Grok).
@@ -333,6 +365,19 @@ def resolve_chat_model(
     and the usage-recording ledger callback (Migration-173 ``LlmUsageCallback`` → ``record_llm_call``,
     lazy + fail-soft). ``agent`` / ``tenant_id`` are the metering attribution for this model's calls
     (``call_site`` == ``tier``).
+
+    ``timeout_s`` (VT-732) bounds ONE request at the client — the hot-path sites that used to call the
+    Anthropic SDK directly all passed ``timeout=`` and a hang on the owner-inbound path is a stalled
+    WhatsApp turn, so the seam must carry it rather than make porting a downgrade. Mapped per provider:
+    ``default_request_timeout`` (anthropic), ``request_timeout`` (openai / xai / GLM), ``timeout``
+    (google). ``None`` leaves each client's own default in place.
+
+    ``betas`` (VT-732) are Anthropic beta headers (e.g. the ``web_fetch`` server tool) — passed ONLY on
+    the anthropic path and ONLY when non-empty (VT-662: an empty list emits a blank ``anthropic-beta``
+    header and the API 400s it, which silently killed the turn-brain on every no-web-fetch turn). On any
+    other provider a requested beta is logged + dropped: a beta is Anthropic-native by definition, and
+    the alternative — refusing to build the model — would make a documented-exception call site fail
+    closed on a perfectly serviceable provider.
 
     ``enable_web_search`` / ``enable_x_search`` opt this model into the provider's NATIVE server-side
     search tool (Migration-176). BOTH are gated by the master ``TEAM_ENABLE_WEB_SEARCH`` flag (default
@@ -362,26 +407,46 @@ def resolve_chat_model(
         call_site=call_site or tier,
     )
 
+    if betas and provider != "anthropic":
+        logger.info(
+            "betas %s requested for provider %r — Anthropic-only; building without them", betas, provider
+        )
+
     if provider == "anthropic":
         from langchain_anthropic import ChatAnthropic
 
         # mypy --strict needs the call-arg ignore for ChatAnthropic's pydantic kwargs (parity with
         # the pre-seam ctors in dispatch / the lanes). sampling_kwargs pins temp=0 only on haiku.
+        anthropic_kwargs: dict[str, Any] = {}
+        if betas:  # VT-662 — never an empty list (blank anthropic-beta header -> 400).
+            anthropic_kwargs["betas"] = list(betas)
         model: BaseChatModel = ChatAnthropic(  # type: ignore[call-arg]
             model=model_id,
             max_tokens=max_tokens,
             callbacks=callbacks,
+            default_request_timeout=timeout_s,
+            **anthropic_kwargs,
             **sampling_kwargs(model_id),
         )
     elif provider == "google":
-        model = _build_google_chat_model(model_id, max_tokens=max_tokens, callbacks=callbacks)
+        model = _build_google_chat_model(
+            model_id, max_tokens=max_tokens, callbacks=callbacks, timeout_s=timeout_s
+        )
     elif provider == "zai":
-        model = _build_glm_chat_model(model_id, max_tokens=max_tokens, callbacks=callbacks)
+        model = _build_glm_chat_model(
+            model_id, max_tokens=max_tokens, callbacks=callbacks, timeout_s=timeout_s
+        )
     elif provider == "xai":
-        model = _build_grok_chat_model(model_id, max_tokens=max_tokens, callbacks=callbacks)
+        model = _build_grok_chat_model(
+            model_id, max_tokens=max_tokens, callbacks=callbacks, timeout_s=timeout_s
+        )
     else:
         model = _build_openai_chat_model(
-            model_id, max_tokens=max_tokens, configured_tier=configured_tier, callbacks=callbacks,
+            model_id,
+            max_tokens=max_tokens,
+            configured_tier=configured_tier,
+            callbacks=callbacks,
+            timeout_s=timeout_s,
         )
 
     # Master kill switch gates the WHOLE capability (Fazal): both forced off when TEAM_ENABLE_WEB_SEARCH
@@ -399,6 +464,7 @@ def _build_grok_chat_model(
     *,
     max_tokens: int,
     callbacks: list[BaseCallbackHandler],
+    timeout_s: float | None = None,
 ) -> BaseChatModel:
     from langchain_openai import ChatOpenAI
 
@@ -418,6 +484,7 @@ def _build_grok_chat_model(
         api_key=api_key,
         max_tokens=max_tokens,
         max_retries=_OPENAI_MAX_RETRIES,
+        request_timeout=timeout_s,
         callbacks=callbacks,
         **sampling_kwargs(model_id),
     )
@@ -428,6 +495,7 @@ def _build_glm_chat_model(
     *,
     max_tokens: int,
     callbacks: list[BaseCallbackHandler],
+    timeout_s: float | None = None,
 ) -> BaseChatModel:
     from langchain_openai import ChatOpenAI
 
@@ -450,6 +518,7 @@ def _build_glm_chat_model(
         api_key=api_key,
         max_tokens=max_tokens,
         max_retries=_OPENAI_MAX_RETRIES,
+        request_timeout=timeout_s,
         callbacks=callbacks,
         **sampling_kwargs(model_id),
     )
@@ -460,6 +529,7 @@ def _build_google_chat_model(
     *,
     max_tokens: int,
     callbacks: list[BaseCallbackHandler],
+    timeout_s: float | None = None,
 ) -> BaseChatModel:
     from langchain_google_genai import ChatGoogleGenerativeAI
 
@@ -478,6 +548,7 @@ def _build_google_chat_model(
         model=model_id,
         google_api_key=os.environ.get("GEMINI_API_KEY") or None,
         max_output_tokens=max_tokens,
+        timeout=timeout_s,
         callbacks=callbacks,
         **sampling_kwargs(model_id),
     )
@@ -489,13 +560,18 @@ def _build_openai_chat_model(
     max_tokens: int,
     configured_tier: str,
     callbacks: list[BaseCallbackHandler],
+    timeout_s: float | None = None,
 ) -> BaseChatModel:
     from langchain_openai import ChatOpenAI
 
     api_tier = _api_service_tier(configured_tier)
     # Widen the request timeout to the 15-min flex ceiling only for flex; else leave the client
     # default (None). max_retries mirrors the SDK's 408-class auto-retry (twice).
-    request_timeout = _FLEX_TIMEOUT_S if configured_tier == "flex" else None
+    # An EXPLICIT caller timeout wins over the flex ceiling (VT-732): a hot-path site asking for 10s
+    # means 10s — its fallback is a live owner turn, and a 15-min flex wait is not a fallback.
+    request_timeout = timeout_s if timeout_s is not None else (
+        _FLEX_TIMEOUT_S if configured_tier == "flex" else None
+    )
     return ChatOpenAI(  # type: ignore[call-arg]
         model=model_id,
         # GPT-5.6 needs the Responses API for reasoning / tool-calling / multi-turn.
@@ -522,6 +598,16 @@ def _web_search_master_on() -> bool:
     """The single master kill switch (Fazal): ``TEAM_ENABLE_WEB_SEARCH`` (default OFF, read fresh).
     While off, BOTH web + X search are forced off regardless of the resolve_chat_model kwargs."""
     return (os.environ.get("TEAM_ENABLE_WEB_SEARCH") or "").strip().lower() in {"1", "true", "yes"}
+
+
+def web_search_enabled() -> bool:
+    """Public read of the master search switch, for the call sites where server-side search is
+    LOAD-BEARING rather than advisory (entity discovery / identity adjudication / thin-signal type
+    reconcile). Those sites called the Anthropic SDK with a web_search tool unconditionally before
+    VT-732; routed through the seam they inherit Fazal's kill switch, and a silently search-less
+    adjudication is a quality regression that looks like a model regression. They log when it is off
+    — the switch stays authoritative, the consequence stops being invisible."""
+    return _web_search_master_on()
 
 
 def _search_tools(provider: str, *, web: bool, x: bool) -> list[dict[str, Any]]:

@@ -1,6 +1,6 @@
 """VT-63 — owner-typed natural-language entries (Method 9).
 
-PURE: Haiku-reply → ExtractionResult parsing (fake client), phone→E.164
+PURE: model-reply → ExtractionResult parsing (injected transport), phone→E.164
 normalisation, consent fail-closed, masked-phone confirmation wording. DB: a
 typed entry → customer + attributed ledger row; cross-tenant isolation;
 idempotent re-ingest. Real Postgres, no mock cursors. CANARY: a real Haiku call
@@ -37,16 +37,16 @@ def _entry(**fields: tuple[str | None, float]) -> dict:
 
 
 class _FakeClient:
-    """Anthropic stand-in: returns a canned JSON body; records call count."""
+    """Transport stand-in (VT-732: the extractor calls the multi-provider seam, so this is a
+    ``structured_text_call``-shaped callable): returns a canned JSON body; records call count."""
 
     def __init__(self, body: str):
         self._body = body
         self.calls = 0
-        self.messages = SimpleNamespace(create=self._create)
 
-    def _create(self, **_kwargs):
+    def __call__(self, tier: str, **_kwargs):
         self.calls += 1
-        return SimpleNamespace(content=[SimpleNamespace(type="text", text=self._body)])
+        return self._body
 
 
 def _client(*entries: dict) -> _FakeClient:
@@ -64,7 +64,7 @@ def test_english_happy_path_normalises_phone():
         amount=("800", 0.9), entry_date=("2026-05-31", 0.9),
     ))
     [res] = extract_owner_typed("Add Rajesh, 9876543210, yesterday, 800",
-                                tenant_id=uuid4(), client=body, **_OK)
+                                tenant_id=uuid4(), text_call=body, **_OK)
     f = {x.name: x for x in res.fields}
     assert f["phone"].value == "+919876543210"  # normalised to E.164
     assert f["customer_name"].value == "Rajesh"
@@ -78,7 +78,7 @@ def test_hindi_unicode_name_preserved():
         amount=("1200", 0.85), entry_date=("2026-05-30", 0.85),
     ))
     [res] = extract_owner_typed("नया customer सुनीता, 8765432109, परसों आया, 1200",
-                                tenant_id=uuid4(), client=body, **_OK)
+                                tenant_id=uuid4(), text_call=body, **_OK)
     f = {x.name: x.value for x in res.fields}
     assert f["customer_name"] == "सुनीता" and f["phone"] == "+918765432109"
 
@@ -91,7 +91,7 @@ def test_multiple_entries_in_one_message():
                amount=("500", 0.9), entry_date=(None, 0.0)),
     )
     res = extract_owner_typed("Add Rajesh 98765 800, also Mahesh 87654 500",
-                              tenant_id=uuid4(), client=body, **_OK)
+                              tenant_id=uuid4(), text_call=body, **_OK)
     assert len(res) == 2
     assert {r.fields[0].value for r in res} == {"Rajesh", "Mahesh"}
 
@@ -102,7 +102,7 @@ def test_bare_name_low_confidence_and_null_fields():
         customer_name=("Rajesh", 0.5), phone=(None, 0.0),
         amount=(None, 0.0), entry_date=(None, 0.0),
     ))
-    [res] = extract_owner_typed("Add Rajesh", tenant_id=uuid4(), client=body, **_OK)
+    [res] = extract_owner_typed("Add Rajesh", tenant_id=uuid4(), text_call=body, **_OK)
     f = {x.name: x for x in res.fields}
     assert f["customer_name"].confidence == 0.5
     assert f["phone"].value is None and f["amount"].value is None
@@ -113,7 +113,7 @@ def test_foreign_phone_gets_low_confidence():
     body = _client(_entry(customer_name=("Bob", 0.9), phone=("+14155550123", 0.9),
                           amount=(None, 0.0), entry_date=(None, 0.0)))
     [res] = extract_owner_typed("Add Bob +14155550123",
-                                tenant_id=uuid4(), client=body, **_OK)
+                                tenant_id=uuid4(), text_call=body, **_OK)
     phone = next(x for x in res.fields if x.name == "phone")
     assert phone.confidence < 0.7
 
@@ -121,12 +121,12 @@ def test_foreign_phone_gets_low_confidence():
 def test_malformed_reply_raises():
     with pytest.raises(OwnerTypedExtractionError):
         extract_owner_typed("x", tenant_id=uuid4(),
-                            client=_FakeClient("not json at all"), **_OK)
+                            text_call=_FakeClient("not json at all"), **_OK)
 
 
 def test_empty_reply_raises():
     with pytest.raises(OwnerTypedExtractionError):
-        extract_owner_typed("x", tenant_id=uuid4(), client=_FakeClient("   "), **_OK)
+        extract_owner_typed("x", tenant_id=uuid4(), text_call=_FakeClient("   "), **_OK)
 
 
 def test_consent_absent_fails_closed_no_transmission():
@@ -135,7 +135,7 @@ def test_consent_absent_fails_closed_no_transmission():
     fake = _client(_entry(customer_name=("Rajesh", 0.9)))
     with pytest.raises(ConsentRejectedError):
         extract_owner_typed("Add Rajesh", tenant_id=uuid4(),
-                            client=fake, consent_check=lambda _t: False)
+                            text_call=fake, consent_check=lambda _t: False)
     assert fake.calls == 0  # never transmitted
 
 
@@ -214,7 +214,7 @@ def test_typed_entry_commits_customer_and_ledger(db_ctx):
     phone = _phone()
     body = _client(_entry(customer_name=("Rajesh", 0.9), phone=(phone, 0.9),
                           amount=("800", 0.9), entry_date=("2026-05-31", 0.9)))
-    summary = ingest_owner_typed(tenant, "Add Rajesh", client=body, **_OK)
+    summary = ingest_owner_typed(tenant, "Add Rajesh", text_call=body, **_OK)
     assert summary.committed == 1
     with tenant_connection(tenant) as conn:
         c = conn.execute("SELECT count(*) AS n FROM customers WHERE phone_e164=%s",
@@ -233,8 +233,8 @@ def test_reingest_idempotent(db_ctx):
     phone = _phone()
     body = _client(_entry(customer_name=("Asha", 0.9), phone=(phone, 0.9),
                           amount=("500", 0.9), entry_date=("2026-05-31", 0.9)))
-    ingest_owner_typed(tenant, "Add Asha", client=body, **_OK)
-    ingest_owner_typed(tenant, "Add Asha", client=body, **_OK)  # same entry again
+    ingest_owner_typed(tenant, "Add Asha", text_call=body, **_OK)
+    ingest_owner_typed(tenant, "Add Asha", text_call=body, **_OK)  # same entry again
     with tenant_connection(tenant) as conn:
         led = conn.execute(
             "SELECT count(*) AS n FROM customer_ledger_entries").fetchone()["n"]
@@ -250,7 +250,7 @@ def test_cross_tenant_isolation(db_ctx):
     phone = _phone()
     body = _client(_entry(customer_name=("Rita", 0.9), phone=(phone, 0.9),
                           amount=("700", 0.9), entry_date=("2026-05-31", 0.9)))
-    ingest_owner_typed(a, "Add Rita", client=body, **_OK)
+    ingest_owner_typed(a, "Add Rita", text_call=body, **_OK)
     with tenant_connection(b) as conn:
         seen = conn.execute("SELECT count(*) AS n FROM customers WHERE phone_e164=%s",
                             ("+91" + phone,)).fetchone()["n"]

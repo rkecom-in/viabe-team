@@ -31,14 +31,11 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Any, cast
+from typing import Any
 from uuid import UUID, uuid4
 
-import yaml
 from anthropic import Anthropic
 
 from orchestrator.db.wrappers import OwnerInputsWrapper
@@ -46,9 +43,6 @@ from orchestrator.types import WebhookEvent
 
 _logger = logging.getLogger(__name__)
 
-_MODELS_YAML = (
-    Path(__file__).resolve().parents[3] / "config" / "models.yaml"
-)
 
 # VT-146 classifier — Haiku in both slots (production parity with the
 # canary). Keep the per-turn output cap small: the classifier emits a
@@ -112,19 +106,17 @@ class OwnerInputClassification:
     occasion: str | None = None
 
 
-def _resolve_classifier_model() -> str:
-    """Return the classifier model id per ``VIABE_ENV``.
+# VT-732 — the CLASSIFIER tier (TEAM_MODEL_CLASSIFIER), replacing the
+# ``config/models.yaml[owner_input_classifier][VIABE_ENV-slot]`` pin (both slots were the same
+# cheap model; extracting intent/segment/occasion from a message is classification).
+_CLASSIFIER_TIER = "classifier"
 
-    Per ``models.yaml``, both slots resolve to Haiku for VT-146 — the
-    helper still respects the same env split so the resolver shape
-    matches the sales_recovery / self_evaluate pattern and a future
-    slot demotion does not require touching this writer.
-    """
-    env = os.environ.get("VIABE_ENV", "test").lower()
-    slot = "production" if env == "production" else "test"
-    with open(_MODELS_YAML) as f:
-        config = yaml.safe_load(f)
-    return cast(str, config["owner_input_classifier"][slot])
+
+def _resolve_classifier_model() -> str:
+    """The concrete model the classifier tier resolves to — for logs/attribution only."""
+    from orchestrator.llm import resolve_model_id
+
+    return resolve_model_id(_CLASSIFIER_TIER)
 
 
 def classify_message(
@@ -141,28 +133,38 @@ def classify_message(
     raising — the writer's contract is best-effort, the inbound
     pipeline must not fail.
 
-    ``client``: dependency injection for tests; the production path
-    constructs ``Anthropic()`` per call (cheap; the SDK keeps the HTTP
-    pool internally).
+    ``client``: dependency injection for tests (an SDK-shaped double); the
+    production path goes through the multi-provider tier seam (VT-732).
     """
     if not body or not body.strip():
         return OwnerInputClassification(intent=_UNCLASSIFIED_SENTINEL)
 
-    sdk = client if client is not None else Anthropic()
     try:
-        response = sdk.messages.create(
-            model=_resolve_classifier_model(),
-            max_tokens=_CLASSIFIER_MAX_OUTPUT_TOKENS,
-            system=_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": body}],
-        )
+        if client is not None:
+            response = client.messages.create(
+                model=_resolve_classifier_model(),
+                max_tokens=_CLASSIFIER_MAX_OUTPUT_TOKENS,
+                system=_SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": body}],
+            )
+            text = _extract_text(response)
+        else:
+            from orchestrator.llm.structured import structured_text_call
+
+            text = structured_text_call(
+                _CLASSIFIER_TIER,
+                system=_SYSTEM_PROMPT,
+                user=body,
+                max_tokens=_CLASSIFIER_MAX_OUTPUT_TOKENS,
+                agent="owner_inputs",
+                call_site="owner_input_classifier",
+            )
     except Exception:  # noqa: BLE001 — best-effort observability seam
         _logger.warning(
-            "owner_input_classifier: SDK call failed", exc_info=True
+            "owner_input_classifier: model call failed", exc_info=True
         )
         return OwnerInputClassification(intent=_UNCLASSIFIED_SENTINEL)
 
-    text = _extract_text(response)
     parsed = _parse_classifier_json(text)
     if parsed is None:
         _logger.warning(
@@ -257,12 +259,14 @@ def run_extraction_for_event(
         return None
     if not event.body or not event.body.strip():
         return None
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        # No classifier configured for this environment — skip cleanly
-        # rather than piling up ``unclassified`` rows. Production sets
-        # the key; CI's orchestrator job intentionally does not (the
-        # real-API canary supplies it under its own env-gate). Keeps
-        # the inbound webhook tests free of writer side effects.
+    from orchestrator.llm.provider import api_key_present
+
+    if not api_key_present(_CLASSIFIER_TIER):
+        # No classifier credential for THIS environment's tier provider (VT-732 — asking about
+        # ANTHROPIC_API_KEY specifically would skip the classifier on a gpt-tiered box). Skip
+        # cleanly rather than piling up ``unclassified`` rows. Production sets the key; CI's
+        # orchestrator job intentionally does not (the real-API canary supplies it under its own
+        # env-gate). Keeps the inbound webhook tests free of writer side effects.
         return None
 
     try:

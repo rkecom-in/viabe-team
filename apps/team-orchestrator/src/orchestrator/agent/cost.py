@@ -90,21 +90,49 @@ RATES: dict[str, _Rate] = {
 def compute_cost_paise(*, model: str, input_tokens: int, output_tokens: int) -> int:
     """Return cost in paise for the given token usage on ``model``.
 
-    Raises ``KeyError`` if ``model`` is not in ``RATES`` — that surfaces an
-    unconfigured model immediately rather than silently zeroing the cost
-    (which would corrupt budget telemetry).
+    Raises ``KeyError`` if ``model`` is unknown to BOTH this table and the VT-619
+    multi-provider price registry — an unconfigured model surfaces immediately rather
+    than silently zeroing the cost (which would corrupt budget telemetry).
+
+    VT-732 — this table is Anthropic-only by construction (it predates the provider
+    seam). Once a tier can resolve to gpt-5.6 / gemini / GLM / grok, an unlisted model
+    here is NOT a misconfiguration: it is a correctly-configured non-Anthropic tier,
+    and raising would take down the sales-recovery run at cost-attribution time, AFTER
+    the API spend, on the money path. So a miss falls through to the registry
+    (``llm.pricing``, which prices every supported provider) and converts USD → paise
+    at the same fixed FX. A model neither source knows still raises.
     """
     if input_tokens < 0 or output_tokens < 0:
         raise ValueError(
             f"token counts must be non-negative; got input={input_tokens}, "
             f"output={output_tokens}"
         )
-    rate = RATES[model]
+    rate = RATES.get(model)
+    if rate is None:
+        return _registry_cost_paise(model, input_tokens, output_tokens)
     total = (
         input_tokens * rate.input_paise_per_million
         + output_tokens * rate.output_paise_per_million
     )
     return round(total / 1_000_000)
+
+
+def _registry_cost_paise(model: str, input_tokens: int, output_tokens: int) -> int:
+    """Price a non-Anthropic model off the VT-619 registry, in paise at the same FX.
+
+    ``compute_cost_usd`` returns 0 for a model IT does not know either (and logs it);
+    that combination — absent here AND absent there — is the real "unconfigured model"
+    signal this function is contracted to raise on.
+    """
+    from orchestrator.llm.pricing import compute_cost_usd
+
+    usd = compute_cost_usd(model, "standard", input_tokens, output_tokens)
+    if usd == 0 and (input_tokens or output_tokens):
+        raise KeyError(
+            f"{model!r} is priced by neither agent.cost.RATES nor the llm.pricing registry — "
+            f"add a price row before pointing a tier at it"
+        )
+    return round(float(usd) * _USD_TO_INR * _PAISE_PER_INR)
 
 
 __all__ = ["RATES", "compute_cost_paise"]

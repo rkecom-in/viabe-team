@@ -225,7 +225,7 @@ def test_vt4_ship_thin_first_real_end_to_end_run(rls_ctx: Any, monkeypatch: pyte
 
     monkeypatch.setenv("VIABE_ENV", "production")  # → Opus
     monkeypatch.setattr(
-        "orchestrator.agent.sales_recovery.Anthropic", _LedgerClient
+        "orchestrator.agent.sales_recovery._model_client", _LedgerClient
     )
 
     result = run_sales_recovery_agent(bundle, evaluator=None)

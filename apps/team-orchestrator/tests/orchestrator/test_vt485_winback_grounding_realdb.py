@@ -272,7 +272,7 @@ def _drive(bundle, *, agent_client, gate_client, monkeypatch):
     from team_shared.mcp.test_harness import no_op_db_factory
 
     monkeypatch.setenv("VIABE_ENV", "test")
-    monkeypatch.setattr(sr_mod, "Anthropic", lambda: agent_client)
+    monkeypatch.setattr(sr_mod, "_model_client", lambda: agent_client)
     monkeypatch.setattr(
         SelfEvaluateTool, "_make_client", classmethod(lambda cls: gate_client)
     )

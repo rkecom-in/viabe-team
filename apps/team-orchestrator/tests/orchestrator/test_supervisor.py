@@ -174,7 +174,7 @@ def test_orchestrator_spawns_sales_recovery_returns_campaign_plan(
     # ChatAnthropic (langchain) which has its own SDK plumbing — that
     # path is proven indirectly via active_agent below.
     monkeypatch.setattr(
-        "orchestrator.agent.sales_recovery.Anthropic", _CountingClient
+        "orchestrator.agent.sales_recovery._model_client", _CountingClient
     )
     monkeypatch.setenv("VIABE_ENV", "production")  # _resolve_model → Opus
 
@@ -369,7 +369,7 @@ def test_orchestrator_spawns_sales_recovery_bundle_wire_through_canary_haiku(
 
     _CountingClient.calls = []
     monkeypatch.setattr(
-        "orchestrator.agent.sales_recovery.Anthropic", _CountingClient
+        "orchestrator.agent.sales_recovery._model_client", _CountingClient
     )
     monkeypatch.setenv("VIABE_ENV", "test")  # _resolve_model → Haiku
 

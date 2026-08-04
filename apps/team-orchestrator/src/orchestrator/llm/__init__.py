@@ -19,6 +19,7 @@ from orchestrator.llm.provider import (
     SUPPORTED_MODELS,
     BudgetExceededError,
     UnknownModelError,
+    api_key_present,
     enforce_budget,
     invoke_with_flex_fallback,
     provider_for,
@@ -26,6 +27,7 @@ from orchestrator.llm.provider import (
     resolve_chat_model,
     resolve_model_id,
 )
+from orchestrator.llm.structured import messages_call, response_text, structured_text_call
 
 __all__ = [
     "ANTHROPIC_MODELS",
@@ -33,10 +35,14 @@ __all__ = [
     "SUPPORTED_MODELS",
     "BudgetExceededError",
     "UnknownModelError",
+    "api_key_present",
     "enforce_budget",
     "invoke_with_flex_fallback",
+    "messages_call",
     "provider_for",
     "require_anthropic_model",
     "resolve_chat_model",
     "resolve_model_id",
+    "response_text",
+    "structured_text_call",
 ]

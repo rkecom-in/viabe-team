@@ -1,6 +1,6 @@
 """VT-267 PR-B — first-data-step machinery canary (Rule #15).
 
-method_selector (fake Anthropic client — no network) + floor state machine (real PG,
+method_selector (injected transport — no network) + floor state machine (real PG,
 synthetic tenant, no mock cursors) + classify intent (Literal + externalised prompt).
 CL-422 synthetic. DR-15: real DB for the floor persistence.
 """
@@ -17,20 +17,16 @@ import pytest
 pytest.importorskip("pydantic")
 
 
-# --- fake Anthropic client ----------------------------------------------------
+# --- transport double (VT-732: the selector calls the multi-provider seam) -----
 
-class _FakeMessages:
-    def __init__(self, payload: dict):
-        self._payload = payload
+def _FakeClient(payload: dict):  # noqa: N802 — factory name keeps the call sites readable
+    text = json.dumps(payload)
 
-    def create(self, **kwargs):
-        block = SimpleNamespace(type="text", text=json.dumps(self._payload))
-        return SimpleNamespace(content=[block])
+    def _call(tier: str, **kwargs):  # noqa: ANN003, ANN202 — test double
+        assert tier == "classifier", "method selection is classification, on the env-governed tier"
+        return text
 
-
-class _FakeClient:
-    def __init__(self, payload: dict):
-        self.messages = _FakeMessages(payload)
+    return _call
 
 
 # --- method_selector (no network) --------------------------------------------
@@ -48,7 +44,7 @@ def test_method_selector_recommends_candidate(monkeypatch):
     )
     out = rank_method(
         MethodSelectorInput(tenant_id=str(uuid4()), business_context="small kirana, no POS"),
-        client=client,
+        text_call=client,
     )
     assert out.recommended_method == "owner_typed"
     assert out.alternatives == ["contacts", "upi"]
@@ -64,7 +60,7 @@ def test_method_selector_rejects_scrape(monkeypatch):
     # model wrongly recommends a scrape method → MUST be rejected.
     client = _FakeClient({"recommended_method": "zomato", "confidence": 0.9, "alternatives": []})
     with pytest.raises(ValueError, match="not in candidates"):
-        rank_method(MethodSelectorInput(tenant_id=str(uuid4())), client=client)
+        rank_method(MethodSelectorInput(tenant_id=str(uuid4())), text_call=client)
 
 
 def test_method_selector_drops_scrape_alternatives(monkeypatch):
@@ -77,7 +73,7 @@ def test_method_selector_drops_scrape_alternatives(monkeypatch):
     client = _FakeClient(
         {"recommended_method": "upi", "confidence": 0.7, "alternatives": ["gbp", "contacts"]}
     )
-    out = rank_method(MethodSelectorInput(tenant_id=str(uuid4())), client=client)
+    out = rank_method(MethodSelectorInput(tenant_id=str(uuid4())), text_call=client)
     assert "gbp" not in out.alternatives and "contacts" in out.alternatives
 
 

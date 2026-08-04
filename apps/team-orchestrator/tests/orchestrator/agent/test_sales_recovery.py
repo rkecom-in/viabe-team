@@ -156,7 +156,7 @@ def test_max_tokens_stop_continues_and_stitches_terminal_text(monkeypatch):
 
     monkeypatch.setenv("VIABE_ENV", "test")
     monkeypatch.setattr(
-        "orchestrator.agent.sales_recovery.Anthropic", lambda: fake
+        "orchestrator.agent.sales_recovery._model_client", lambda: fake
     )
     result = run_sales_recovery_agent(
         SalesRecoveryContext(tenant_id="t1", run_id="r1", user_request="test request")
@@ -187,7 +187,7 @@ def test_max_tokens_continuation_budget_exhausts_to_invalid_not_hang(monkeypatch
 
     monkeypatch.setenv("VIABE_ENV", "test")
     monkeypatch.setattr(
-        "orchestrator.agent.sales_recovery.Anthropic", lambda: fake
+        "orchestrator.agent.sales_recovery._model_client", lambda: fake
     )
     result = run_sales_recovery_agent(
         SalesRecoveryContext(tenant_id="t1", run_id="r1", user_request="test request")
@@ -212,7 +212,7 @@ def test_run_sales_recovery_agent_placeholder_happy_path(monkeypatch):
 
     monkeypatch.setenv("VIABE_ENV", "test")  # → Haiku
     monkeypatch.setattr(
-        "orchestrator.agent.sales_recovery.Anthropic", lambda: fake_client
+        "orchestrator.agent.sales_recovery._model_client", lambda: fake_client
     )
 
     result = run_sales_recovery_agent(
@@ -237,26 +237,35 @@ def test_run_sales_recovery_agent_placeholder_happy_path(monkeypatch):
     )
 
 
-def test_run_sales_recovery_agent_uses_resolved_model_from_env(monkeypatch):
-    """VIABE_ENV='production' → Opus; default/dev/test → the CAPABLE tier (Sonnet,
-    VT-501 — NOT Haiku: SR-draft is complex grounded reasoning per VT-480). The
-    model id is read from config/models.yaml, never hardcoded in the runner."""
+def test_run_sales_recovery_agent_uses_the_specialist_tier_var(monkeypatch):
+    """VT-732 — the SR draft model comes from TEAM_MODEL_SPECIALIST, per environment.
+
+    It used to come from ``config/models.yaml[sales_recovery][VIABE_ENV-slot]``, a SECOND
+    governance surface the tier seam could not see: dev pinned claude-sonnet-5 there while every
+    TEAM_MODEL_* var read gpt-5.6-luna, so each SR draft burned Sonnet invisibly. VIABE_ENV must
+    no longer influence the choice at all."""
     response = _fake_response(text='{"status": "placeholder"}')
     fake_client = _patched_client(response)
     monkeypatch.setattr(
-        "orchestrator.agent.sales_recovery.Anthropic", lambda: fake_client
+        "orchestrator.agent.sales_recovery._model_client", lambda: fake_client
     )
 
-    monkeypatch.setenv("VIABE_ENV", "production")
+    monkeypatch.setenv("TEAM_MODEL_SPECIALIST", "gpt-5.6-luna")
+    monkeypatch.setenv("VIABE_ENV", "production")  # must NOT override the tier var
     run_sales_recovery_agent(SalesRecoveryContext(tenant_id="t1", run_id="r1", user_request="test request"))
-    assert fake_client.messages.create.call_args.kwargs["model"] == "claude-opus-4-7"
+    assert fake_client.messages.create.call_args.kwargs["model"] == "gpt-5.6-luna"
 
     fake_client.messages.create.reset_mock()
+    monkeypatch.setenv("TEAM_MODEL_SPECIALIST", "claude-opus-4-8")
+    run_sales_recovery_agent(SalesRecoveryContext(tenant_id="t1", run_id="r1", user_request="test request"))
+    assert fake_client.messages.create.call_args.kwargs["model"] == "claude-opus-4-8"
+
+    fake_client.messages.create.reset_mock()
+    monkeypatch.delenv("TEAM_MODEL_SPECIALIST", raising=False)
     monkeypatch.setenv("VIABE_ENV", "test")
     run_sales_recovery_agent(SalesRecoveryContext(tenant_id="t1", run_id="r1", user_request="test request"))
-    # VT-501: dev/test SR-draft now resolves to the capable model, never Haiku —
-    # complex grounded reasoning must not fall to the cheap slot (misclassification fix).
-    # VT-596: capable tier bumped sonnet-4-6 → sonnet-5 (Fazal general upgrade).
+    # the tier DEFAULT (capable, VT-501/VT-596) — not a yaml slot, and never Haiku: SR-draft is
+    # complex grounded reasoning per VT-480.
     resolved = fake_client.messages.create.call_args.kwargs["model"]
     assert resolved == "claude-sonnet-5"
     assert resolved != "claude-haiku-4-5"
@@ -277,7 +286,7 @@ def test_run_sales_recovery_agent_passes_brief_required_params(monkeypatch):
     fake_client = _patched_client(response)
     monkeypatch.setenv("VIABE_ENV", "test")
     monkeypatch.setattr(
-        "orchestrator.agent.sales_recovery.Anthropic", lambda: fake_client
+        "orchestrator.agent.sales_recovery._model_client", lambda: fake_client
     )
 
     run_sales_recovery_agent(SalesRecoveryContext(tenant_id="t1", run_id="r1", user_request="test request"))
@@ -327,7 +336,7 @@ def test_run_sales_recovery_agent_status_invalid_when_output_unparseable(monkeyp
     fake_client = _patched_client(response)
     monkeypatch.setenv("VIABE_ENV", "test")
     monkeypatch.setattr(
-        "orchestrator.agent.sales_recovery.Anthropic", lambda: fake_client
+        "orchestrator.agent.sales_recovery._model_client", lambda: fake_client
     )
     monkeypatch.setattr(
         "orchestrator.agent.sales_recovery.route_failure", MagicMock()
@@ -355,7 +364,7 @@ def test_run_sales_recovery_agent_tolerates_markdown_json_fence(monkeypatch):
     fake_client = _patched_client(response)
     monkeypatch.setenv("VIABE_ENV", "test")
     monkeypatch.setattr(
-        "orchestrator.agent.sales_recovery.Anthropic", lambda: fake_client
+        "orchestrator.agent.sales_recovery._model_client", lambda: fake_client
     )
 
     result = run_sales_recovery_agent(
@@ -373,7 +382,7 @@ def test_run_sales_recovery_agent_tolerates_bare_code_fence(monkeypatch):
     fake_client = _patched_client(response)
     monkeypatch.setenv("VIABE_ENV", "test")
     monkeypatch.setattr(
-        "orchestrator.agent.sales_recovery.Anthropic", lambda: fake_client
+        "orchestrator.agent.sales_recovery._model_client", lambda: fake_client
     )
 
     result = run_sales_recovery_agent(
@@ -400,7 +409,7 @@ def test_run_sales_recovery_agent_does_not_loose_extract_from_prose(monkeypatch)
     fake_client = _patched_client(response)
     monkeypatch.setenv("VIABE_ENV", "test")
     monkeypatch.setattr(
-        "orchestrator.agent.sales_recovery.Anthropic", lambda: fake_client
+        "orchestrator.agent.sales_recovery._model_client", lambda: fake_client
     )
     monkeypatch.setattr(
         "orchestrator.agent.sales_recovery.route_failure", MagicMock()
@@ -430,7 +439,7 @@ def test_run_sales_recovery_agent_path_a_emits_failure_record(monkeypatch):
     fake_client = _patched_client(response)
     monkeypatch.setenv("VIABE_ENV", "test")
     monkeypatch.setattr(
-        "orchestrator.agent.sales_recovery.Anthropic", lambda: fake_client
+        "orchestrator.agent.sales_recovery._model_client", lambda: fake_client
     )
     router = MagicMock()
     monkeypatch.setattr(
@@ -480,7 +489,7 @@ def test_run_sales_recovery_agent_variant_discriminator_invalid_emits_failure(
     fake_client = _patched_client(response)
     monkeypatch.setenv("VIABE_ENV", "test")
     monkeypatch.setattr(
-        "orchestrator.agent.sales_recovery.Anthropic", lambda: fake_client
+        "orchestrator.agent.sales_recovery._model_client", lambda: fake_client
     )
     router = MagicMock()
     monkeypatch.setattr(
@@ -528,7 +537,7 @@ def test_schema_rejection_corrective_retry_recovers(monkeypatch):
     fake = MagicMock()
     fake.messages.create.side_effect = [bad, good]
     monkeypatch.setenv("VIABE_ENV", "test")
-    monkeypatch.setattr("orchestrator.agent.sales_recovery.Anthropic", lambda: fake)
+    monkeypatch.setattr("orchestrator.agent.sales_recovery._model_client", lambda: fake)
     monkeypatch.setattr("orchestrator.agent.sales_recovery.route_failure", MagicMock())
 
     evaluator = FakeSelfEvaluator(verdicts=[])
@@ -574,7 +583,7 @@ def test_run_sales_recovery_agent_schema_rejection_emits_failure(monkeypatch):
     fake_client = _patched_client(response)
     monkeypatch.setenv("VIABE_ENV", "test")
     monkeypatch.setattr(
-        "orchestrator.agent.sales_recovery.Anthropic", lambda: fake_client
+        "orchestrator.agent.sales_recovery._model_client", lambda: fake_client
     )
     router = MagicMock()
     monkeypatch.setattr(
@@ -653,7 +662,7 @@ def test_run_sales_recovery_agent_cost_uses_compute_cost_paise(monkeypatch):
     fake_client = _patched_client(response)
     monkeypatch.setenv("VIABE_ENV", "test")  # dev/test slot (Sonnet 4.6, VT-501)
     monkeypatch.setattr(
-        "orchestrator.agent.sales_recovery.Anthropic", lambda: fake_client
+        "orchestrator.agent.sales_recovery._model_client", lambda: fake_client
     )
 
     result = run_sales_recovery_agent(
@@ -735,7 +744,7 @@ def test_sales_recovery_node_returns_agent_result_under_agent_result_key(monkeyp
     fake_client = _patched_client(response)
     monkeypatch.setenv("VIABE_ENV", "test")
     monkeypatch.setattr(
-        "orchestrator.agent.sales_recovery.Anthropic", lambda: fake_client
+        "orchestrator.agent.sales_recovery._model_client", lambda: fake_client
     )
 
     bundle = build_sales_recovery_context(
@@ -1679,7 +1688,7 @@ def test_cl288_real_opus_emit_shape_round_trips_through_parse(monkeypatch):
 
     monkeypatch.setenv("VIABE_ENV", "production")  # _resolve_model -> Opus
     monkeypatch.setattr(
-        "orchestrator.agent.sales_recovery.Anthropic", _SubstitutingClient
+        "orchestrator.agent.sales_recovery._model_client", _SubstitutingClient
     )
 
     wallclock_start = time.monotonic()
