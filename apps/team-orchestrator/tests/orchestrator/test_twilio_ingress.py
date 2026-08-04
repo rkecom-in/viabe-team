@@ -755,11 +755,13 @@ def test_owner_inputs_extraction_writes_structured_row(ingress, monkeypatch):
     from orchestrator.owner_inputs.writer import OwnerInputClassification
 
     monkeypatch.setattr(runner_mod, "OWNER_INPUTS_EXTRACTION_ENABLED", True)
-    # The writer's classifier seam is gated on the env var (see
-    # ``run_extraction_for_event``'s early-skip) — set a sentinel so
-    # the gate opens; the real SDK call is bypassed by the
-    # ``classify_message`` patch below.
+    # The writer's classifier seam is gated on a credential for the tier's RESOLVED provider
+    # (VT-732 ``api_key_present``). Open THAT gate directly rather than planting a real-looking
+    # key: the sentinel key must stay in place so every OTHER live-call guard in the pipeline
+    # (dispatch's brain, the edge-case router) still sees "no key" and stays off the network.
+    # The classifier call itself is bypassed by the ``classify_message`` patch below.
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-sentinel")
+    monkeypatch.setattr("orchestrator.llm.provider.api_key_present", lambda tier: True)
     monkeypatch.setattr(
         "orchestrator.owner_inputs.writer.classify_message",
         lambda body, client=None: OwnerInputClassification(
@@ -972,6 +974,10 @@ def test_ingress_resilient_on_classifier_failure(ingress, monkeypatch):
 
     monkeypatch.setattr(runner_mod, "OWNER_INPUTS_EXTRACTION_ENABLED", True)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-sentinel")
+    # VT-732: open the credential gate explicitly so the classifier REALLY runs and raises — with
+    # the sentinel key alone the writer would skip before reaching it, and this test would pass
+    # without exercising the try/except contract it names.
+    monkeypatch.setattr("orchestrator.llm.provider.api_key_present", lambda tier: True)
     monkeypatch.setattr(
         "orchestrator.owner_inputs.writer.classify_message", _boom
     )

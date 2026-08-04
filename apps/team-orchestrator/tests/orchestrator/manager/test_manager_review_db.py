@@ -67,32 +67,15 @@ def _create_and_claim(pool, tid: str):
     return task_id, step["step_id"]
 
 
-class _FakeTextBlock:
-    type = "text"
+def _FakeClient(payload: dict):  # noqa: N802 — factory keeps the call sites readable
+    """VT-732 transport double: the extraction call goes through the multi-provider seam, so the
+    injected object is a text-returning callable rather than an Anthropic SDK client."""
+    text = json.dumps(payload)
 
-    def __init__(self, text: str) -> None:
-        self.text = text
+    def _call(tier: str, **kwargs):  # noqa: ANN003, ANN202 — test double
+        return text
 
-
-class _FakeResp:
-    def __init__(self, content: list) -> None:
-        self.content = content
-
-
-class _FakeClient:
-    def __init__(self, payload: dict) -> None:
-        self._payload = payload
-
-    @property
-    def messages(self):
-        payload = self._payload
-
-        class _M:
-            @staticmethod
-            def create(**kwargs):  # noqa: ANN003, ANN201
-                return _FakeResp([_FakeTextBlock(json.dumps(payload))])
-
-        return _M()
+    return _call
 
 
 def test_manager_review_continue_persists_evidence_and_advances(pool):
@@ -107,7 +90,7 @@ def test_manager_review_continue_persists_evidence_and_advances(pool):
         situation="s", desired_outcome="d", acceptance_criteria=["done"],
         raw_output="did the thing",
         has_next_step=True,
-        client=_FakeClient(
+        text_call=_FakeClient(
             {"status": "completed", "action_summary": "did it", "outcome_summary": "ok",
              "evidence_refs": [{"kind": "pipeline_run", "ref": str(uuid4())}]}
         ),
@@ -134,7 +117,7 @@ def test_manager_review_decision_audit_row_joins_to_the_turns_reasoning(pool):
         situation="s", desired_outcome="d", acceptance_criteria=["done"],
         raw_output="did the thing",
         has_next_step=True,
-        client=_FakeClient(
+        text_call=_FakeClient(
             {"status": "completed", "action_summary": "did it", "outcome_summary": "ok"}
         ),
         run_id=ctx_run_id,
@@ -163,7 +146,7 @@ def test_manager_review_complete_settles_task_verifying(pool):
         situation="s", desired_outcome="d", acceptance_criteria=["done"],
         raw_output="finished everything",
         has_next_step=False,
-        client=_FakeClient({"status": "completed", "action_summary": "finished", "outcome_summary": "done"}),
+        text_call=_FakeClient({"status": "completed", "action_summary": "finished", "outcome_summary": "done"}),
     )
     assert result.outcome == "complete"
     assert task_store.get_task(tid, task_id)["status"] == "verifying"
@@ -181,7 +164,7 @@ def test_manager_review_revise_step_resets_pending(pool):
         situation="s", desired_outcome="d", acceptance_criteria=["done"],
         raw_output="pushed back",
         has_next_step=True,
-        client=_FakeClient(
+        text_call=_FakeClient(
             {"status": "blocked", "action_summary": "", "outcome_summary": "wrong framing",
              "reason_code": "wrong_framing", "proposed_outcome": "try a narrower cohort"}
         ),
@@ -203,7 +186,7 @@ def test_manager_review_ask_owner_opens_pending_question(pool):
         situation="s", desired_outcome="d", acceptance_criteria=["done"],
         raw_output="needs input",
         has_next_step=True,
-        client=_FakeClient({"status": "needs_owner_input", "owner_question": "which cohort?"}),
+        text_call=_FakeClient({"status": "needs_owner_input", "owner_question": "which cohort?"}),
     )
     assert result.outcome == "ask_owner"
     assert task_store.get_task(tid, task_id)["status"] == "waiting_owner"
@@ -232,7 +215,7 @@ def test_manager_review_clarify_without_question_text_redirects_to_revise_not_wa
         situation="s", desired_outcome="original framing", acceptance_criteria=["done"],
         raw_output="the specialist reported nothing actionable, no question either",
         has_next_step=True,
-        client=_FakeClient(
+        text_call=_FakeClient(
             {"status": "completed", "action_summary": "", "outcome_summary": "nothing to report"}
         ),
     )
@@ -261,7 +244,7 @@ def test_manager_review_escalate_blocks_task_and_creates_incident(pool):
         situation="s", desired_outcome="d", acceptance_criteria=["done"],
         raw_output="no path forward",
         has_next_step=True,
-        client=_FakeClient(
+        text_call=_FakeClient(
             {"status": "blocked", "reason_code": "no_consent", "outcome_summary": "cannot proceed"}
         ),
     )
@@ -282,18 +265,15 @@ def test_manager_review_extraction_failure_fails_closed_to_escalate(pool):
     tid = _seed_tenant(pool)
     task_id, step_id = _create_and_claim(pool, tid)
 
-    class _BrokenClient:
-        class messages:  # noqa: N801
-            @staticmethod
-            def create(**kwargs):  # noqa: ANN003, ANN201
-                return _FakeResp([_FakeTextBlock("not json")])
+    def _broken_call(tier: str, **kwargs):  # noqa: ANN003, ANN202 — test double
+        return "not json"
 
     result = manager_review(
         tid, task_id, step_id,
         situation="s", desired_outcome="d", acceptance_criteria=["done"],
         raw_output="whatever",
         has_next_step=True,
-        client=_BrokenClient(),
+        text_call=_broken_call,
     )
     assert result.outcome == "escalate"
     assert task_store.get_task(tid, task_id)["status"] == "blocked"
