@@ -9,16 +9,16 @@
 
 ## 🔴 BLOCKING — work stops until you act
 
-**B0 — Hand Codex its brief.** `docs/agent-framework/CODEX-BRIEF-2026-08-03-seed-corpus-then-full-ingestion.md`
-(pushed with CC's next push). Codex has been idle and now has real work: migration 189 + the
-seed ingestion, then the full 118.
+*(B0 Codex brief — DONE. B1 sealed dataset — DONE 2026-08-04: independently authored, placed at
+`~/development/vt-dataset`, pending CC's validator run.)*
 
-**B1 — Place the sealed eval dataset on the Mac, outside the repo.** Clau has authored it
-(12 cases, digest `96304705…`, harness-validated PASS, family-isolated). The VT-705 contract
-forbids it entering the repo, a branch, or any builder-visible artifact — so it cannot be
-handed over through git. Drop the folder somewhere outside `~/development/viabe-team` and tell
-CC the path. **This is the single item gating D3 (O8 activation), D7 (promotion bars) and
-Codex's VT-723** — and it was Clau's overdue item, now ready.
+*(B2 — CLOSED BY MEASUREMENT 2026-08-04. CC's read-only prod audit: all twelve O8 tables EXIST on
+prod and every one holds ZERO rows, so 189's no-DEFAULT NOT NULL column is safe. The prod→main
+migration gap is exactly **188 + 189**, both additive. Prod env sentinel reads `prod`, so
+`--expected-env prod` will match when Fazal authorises the run. Migrations 54/109/139 are absent on
+BOTH prod and dev — retired numbers, not drift.)*
+
+*(none right now)*
 
 ---
 
