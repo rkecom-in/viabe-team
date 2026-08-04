@@ -274,6 +274,48 @@ def _api_service_tier(configured: str) -> str | None:
     return None if configured == "standard" else configured
 
 
+def assert_tier_vars_configured() -> dict[str, str]:
+    """VT-731 boot conformance — every LLM tier var must be SET on a deployed env, and the
+    resolved model id per tier is logged by NAME.
+
+    Fail-loud, not fallback. ``_TIER_DEFAULTS`` exists for local runs and dev tooling; on a
+    deployed box a MISSING var silently selects a different VENDOR, which is a config error
+    wearing the costume of a default. That is exactly what it looked like on 2026-08-05 when
+    Fazal saw Sonnet burn on the dev orchestrator key while every tier was believed to be Luna.
+    (The vars turned out to be set — the burn came from direct SDK call sites bypassing this seam
+    entirely — but the hole is real and cost a day of hunting either way.)
+
+    Model ids are NOT secrets: Rule 18 governs VALUES of credentials, and a model id is a
+    configuration name. Logging it by name is what makes the next hunt one grep long.
+
+    Returns ``{tier: model_id}``. Raises ``UnknownModelError`` on a deployed env when a var is
+    unset or names an unsupported model. A local run (no ``EXPECTED_ENV``) only logs.
+    """
+    deployed = bool((os.environ.get("EXPECTED_ENV") or "").strip())
+    resolved: dict[str, str] = {}
+    missing: list[str] = []
+    for tier, (env_var, default) in _TIER_DEFAULTS.items():
+        raw = (os.environ.get(env_var) or "").strip()
+        if not raw and deployed:
+            missing.append(env_var)
+            continue
+        model_id = raw or default
+        _assert_supported(model_id)
+        resolved[tier] = model_id
+    if missing:
+        raise UnknownModelError(
+            "LLM tier vars unset on a deployed environment (EXPECTED_ENV="
+            f"{os.environ.get('EXPECTED_ENV')!r}): {', '.join(sorted(missing))}. "
+            "A deployed box must never fall back to a built-in default — that silently changes "
+            "vendor. Set the variable(s) and redeploy."
+        )
+    logger.info(
+        "llm tier conformance: %s",
+        ", ".join(f"{tier}={model_id}" for tier, model_id in sorted(resolved.items())),
+    )
+    return resolved
+
+
 def resolve_chat_model(
     tier: str,
     *,

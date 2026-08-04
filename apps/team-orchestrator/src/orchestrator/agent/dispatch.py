@@ -172,16 +172,22 @@ def select_brain_model(intent: dict[str, Any]) -> tuple[str, str]:
     skipped or failed. This REUSES that classification — it does NOT make a
     second classify / LLM call.
 
-    Returns ``(model_id, tier)`` where ``tier`` is ``"haiku"`` | ``"sonnet"`` (a
+    Returns ``(model_id, tier)`` where ``tier`` is ``"routine"`` | ``"complex"`` (a
     PII-safe label for observability — never the owner body). CORRECTNESS-FIRST:
-    a routine classification in ``_ROUTINE_INTENTS`` → Haiku; ANY other value,
-    including a missing/empty signal, fails safe to Sonnet (the capable model).
+    a routine classification in ``_ROUTINE_INTENTS`` → the routine tier; ANY other
+    value, including a missing/empty signal, fails safe to the complex tier.
+
+    The labels are the TIER, not a vendor. They used to read "haiku"/"sonnet", which
+    became a lie in the traces the moment the tiers were pointed at Luna — and that
+    lie is what made the 2026-08-05 Sonnet-burn hunt hard: a Luna call labelled
+    "sonnet" sends you looking for a model that was never invoked. Names that track
+    the tier survive a provider change; names that track a vendor do not.
     """
     classification = intent.get("classification")
     if isinstance(classification, str) and classification in _ROUTINE_INTENTS:
-        return (_BRAIN_MODEL_HAIKU, "haiku")
+        return (_BRAIN_MODEL_HAIKU, "routine")
     # Complex, ambiguous, or signal-absent → the capable model (fail-safe).
-    return (_BRAIN_MODEL_SONNET, "sonnet")
+    return (_BRAIN_MODEL_SONNET, "complex")
 
 
 def _build_manager_intent_block(intent: dict[str, Any]) -> str | None:
@@ -1041,7 +1047,7 @@ def dispatch_brain(
             # completes within the ₹5 cap); complex/ambiguous/absent → Opus.
             brain_model_id, brain_tier = select_brain_model(_manager_intent)
             # PII-safe observability: the TIER + the (typed) intent label only —
-            # never the owner body. Lets Ops see the Sonnet/Opus split.
+            # never the owner body. Lets Ops see the routine/complex split.
             logger.info(
                 "dispatch_brain: brain model tier selected",
                 extra={
