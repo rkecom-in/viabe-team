@@ -184,18 +184,24 @@ def _is_domain_attempt(body: str) -> bool:
 # gated by the authoritative DB shopify_is_connected re-check), the owner who wants a fresh link ("send
 # again", "link nahi mila") gets it re-minted, and a question/other gets an HONEST status reply — never
 # the canned re-prompt and never silence. Fail-soft → None (caller then treats it as a non-done reply).
-_AUTH_INTENT_MODEL = "claude-haiku-4-5-20251001"  # cheap classifier tier (parity with question_brain)
+_AUTH_INTENT_TIER = "classifier"  # cheap classifier tier (parity with question_brain), env-resolved
 _AUTH_INTENT_TIMEOUT_S = 12.0
 _VALID_AUTH_INTENTS = frozenset({"done", "link", "other"})
 
 
 def _anthropic_key_present() -> bool:
-    """A usable (non-sentinel) Anthropic key is on the env — so a unit/CI run with no key never makes a
-    live call (the classifier degrades to None and the caller keeps the deterministic non-done path)."""
-    import os
+    """A usable (non-sentinel) key is on the env FOR THE PROVIDER THIS TIER RESOLVES TO — so a unit/CI
+    run with no key never makes a live call (the classifier degrades to None and the caller keeps the
+    deterministic non-done path). VT-732: asking specifically about ANTHROPIC_API_KEY would answer
+    "no key" on a gpt-tiered box and silently disable a working path. Fail-soft to True on its own
+    error — a resolve failure is not evidence of a missing credential."""
+    from orchestrator.llm.provider import api_key_present
 
-    key = (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
-    return bool(key) and not key.lower().startswith(("test", "sentinel", "dummy", "sk-ant-test"))
+    try:
+        return api_key_present(_AUTH_INTENT_TIER)
+    except Exception:  # noqa: BLE001
+        logger.warning("shopify: key-presence check failed; proceeding")
+        return True
 
 
 def _llm_classify_auth_intent(body: str) -> str | None:
@@ -206,7 +212,7 @@ def _llm_classify_auth_intent(body: str) -> str | None:
     try:
         import json as _json
 
-        from anthropic import Anthropic
+        from orchestrator.llm.structured import structured_text_call
 
         prompt = (
             "A small Indian business owner was asked to tap a link, connect their Shopify store, and "
@@ -221,13 +227,14 @@ def _llm_classify_auth_intent(body: str) -> str | None:
             f'Reply: "{(body or "").strip()[:400]}"\n'
             'Return ONLY a JSON object: {"intent": "done|link|other"}. No prose.'
         )
-        resp = Anthropic().messages.create(
-            model=_AUTH_INTENT_MODEL,
+        raw = structured_text_call(
+            _AUTH_INTENT_TIER,
+            user=prompt,
             max_tokens=60,
-            messages=[{"role": "user", "content": prompt}],
-            timeout=_AUTH_INTENT_TIMEOUT_S,
+            agent="shopify_onboarding",
+            call_site="auth_intent",
+            timeout_s=_AUTH_INTENT_TIMEOUT_S,
         )
-        raw = resp.content[0].text if resp.content else ""
         start, end = raw.find("{"), raw.rfind("}")
         if start == -1 or end == -1 or end <= start:
             return None

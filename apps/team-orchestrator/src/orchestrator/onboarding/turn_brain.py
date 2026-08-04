@@ -40,7 +40,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 import time
 from dataclasses import dataclass, field
@@ -48,7 +47,12 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-_TURN_MODEL = "claude-sonnet-5"  # house conversational tier (parity with dispatch _BRAIN_MODEL_SONNET)
+# VT-732 — the house CONVERSATIONAL tier, resolved per call from TEAM_MODEL_COMPLEX (never a literal
+# here). This module was the single biggest bypass of the tier seam: it built its own Anthropic client
+# on every onboarding turn, so all five TEAM_MODEL_* vars could read gpt-5.6-luna while the bill said
+# sonnet. Tier NAME, not model id — which model a tier means is an env decision, per environment.
+_TURN_TIER = "complex"
+_TURN_AGENT = "onboarding_turn_brain"  # metering attribution (ledger agent column)
 _MAX_TOKENS = 1024  # a short WhatsApp reply + a small JSON envelope — never a wall of text
 _TURN_TIMEOUT_S = 20.0  # bound the call — runs on the owner-inbound hot path (parity with question_brain)
 _MAX_BUTTONS = 3  # Meta quick-reply hard limit (WhatsApp in-session)
@@ -383,36 +387,31 @@ strictly better than stretching the owner's turn.
 
 
 def _invoke_llm(system_prompt: str, user_prompt: str, *, timeout_s: float | None = None) -> str:
-    """The single LLM call (lazy anthropic import — keeps module import dep-less for the smoke suite).
-    Separated so tests monkeypatch THIS and the prompt-build + parse path stay pure + deterministic.
+    """The single LLM call, through the multi-provider tier seam (lazy import — keeps module import
+    dep-less for the smoke suite). Separated so tests monkeypatch THIS and the prompt-build + parse
+    path stay pure + deterministic.
 
-    Cache batch 2026-07-18: the system prompt rides as ONE cache_control block. It is stable
-    per-owner (the only substitution — {locale} — is per-owner-stable, so it belongs INSIDE the
-    cached prefix); everything volatile (conversation, answers, owner message) already rides the
-    user prompt, AFTER the cached prefix. Per-turn requests within an onboarding then read the
-    ~6KB system from cache instead of re-paying full input price."""
-    from anthropic import Anthropic
+    Cache batch 2026-07-18 (preserved through the VT-732 port): the system prompt rides as ONE
+    cache_control block on anthropic. It is stable per-owner (the only substitution — {locale} — is
+    per-owner-stable, so it belongs INSIDE the cached prefix); everything volatile (conversation,
+    answers, owner message) already rides the user prompt, AFTER the cached prefix. Per-turn requests
+    within an onboarding then read the ~6KB system from cache instead of re-paying full input price.
 
-    resp = Anthropic().messages.create(
-        model=_TURN_MODEL,
+    VT-720 (live diag) stays fixed by construction: the seam concatenates TEXT blocks, so a leading
+    ThinkingBlock can no longer raise ``AttributeError`` and silently degrade every converted route
+    to its fallback line."""
+    from orchestrator.llm.structured import structured_text_call
+
+    return structured_text_call(
+        _TURN_TIER,
+        system=system_prompt,
+        user=user_prompt,
         max_tokens=_MAX_TOKENS,
-        system=[_cached_system_block(system_prompt)],
-        messages=[{"role": "user", "content": user_prompt}],
-        timeout=timeout_s or _TURN_TIMEOUT_S,
+        agent=_TURN_AGENT,
+        call_site="turn_brain",
+        timeout_s=timeout_s or _TURN_TIMEOUT_S,
+        cache_system=True,
     )
-    # VT-720 (live diag): index 0 is NOT necessarily the text. With extended thinking on, content[0]
-    # is a ThinkingBlock and ``.text`` raises AttributeError — which killed compose_classified_reply
-    # on EVERY dev turn ("compose_classified_reply failed (AttributeError: 'ThinkingBlock' object has
-    # no attribute 'text')"), silently degrading every converted route to its fallback line. Same
-    # class as the VT-662 empty-beta death. Concatenate the TEXT blocks, exactly like _final_text.
-    return _final_text(resp)
-
-
-def _cached_system_block(system_prompt: str) -> dict[str, Any]:
-    """The system prompt as a cache_control text block (cache batch 2026-07-18). Shared by BOTH
-    model seams (single-call ``_invoke_llm`` + tool-loop ``_invoke_llm_tools``) so the two paths
-    never diverge on the cache shape."""
-    return {"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}
 
 
 def _coerce_str_list(value: Any) -> tuple[str, ...]:
@@ -672,83 +671,103 @@ def _refresh_discovery(url: str, pinnable_domains: list[str], tenant_id: Any) ->
 
 
 def _handle_client_tool_uses(
-    content: Any,
+    resp: Any,
     *,
     journey_state: dict[str, Any],
     provenance: dict[str, Any] | None,
     pinnable_domains: list[str],
     tenant_id: Any,
-) -> list[dict[str, Any]]:
-    """Execute the CLIENT tool_use blocks in one assistant response and return their tool_result blocks.
-    Server-side blocks (server_tool_use / web_fetch_tool_result / text) are skipped — the server already
-    resolved them. An unknown tool name gets a benign error result (never crashes the loop)."""
-    results: list[dict[str, Any]] = []
-    for block in (content or []):
-        if getattr(block, "type", "") != "tool_use":
-            continue
-        name = getattr(block, "name", "")
-        tool_use_id = getattr(block, "id", "")
-        tool_input = getattr(block, "input", None) or {}
+) -> list[Any]:
+    """Execute the CLIENT tool calls in one assistant response and return their ``ToolMessage`` results.
+
+    VT-732 — reads the provider-neutral ``AIMessage.tool_calls`` (langchain normalises Anthropic's
+    ``tool_use`` blocks and OpenAI's ``tool_calls`` into the same shape), so the loop is identical on
+    every provider. Server-side tools (web_fetch) never appear here — the server already resolved
+    them. An unknown tool name gets a benign error result (never crashes the loop)."""
+    from langchain_core.messages import ToolMessage
+
+    results: list[Any] = []
+    for call in (getattr(resp, "tool_calls", None) or []):
+        name = call.get("name", "") if isinstance(call, dict) else getattr(call, "name", "")
+        call_id = call.get("id", "") if isinstance(call, dict) else getattr(call, "id", "")
+        args = (call.get("args", None) if isinstance(call, dict) else getattr(call, "args", None)) or {}
         if name == "read_journey_history":
             out = _read_journey_history_payload(journey_state, provenance)
         elif name == "search_conversation_history":
-            out = _search_conversation_payload(tenant_id, str(tool_input.get("query", "")))
+            out = _search_conversation_payload(tenant_id, str(args.get("query", "")))
         elif name == "refresh_discovery":
-            out = _refresh_discovery(str(tool_input.get("url", "")), pinnable_domains, tenant_id)
+            out = _refresh_discovery(str(args.get("url", "")), pinnable_domains, tenant_id)
         else:
             out = f"Unknown tool '{name}'."
-        results.append({"type": "tool_result", "tool_use_id": tool_use_id, "content": out})
+        results.append(ToolMessage(content=out, tool_call_id=str(call_id)))
     return results
 
 
 def _wants_tools(resp: Any) -> bool:
-    """A response that stopped to call a tool (client) or to let the server tool loop resume."""
-    return getattr(resp, "stop_reason", "") in ("tool_use", "pause_turn")
+    """A response that stopped to call a client tool, or to let the server tool loop resume.
+
+    ``tool_calls`` is the provider-neutral signal; ``pause_turn`` is the Anthropic server-tool
+    continuation, which arrives with no client tool call and is carried in response_metadata."""
+    if getattr(resp, "tool_calls", None):
+        return True
+    meta = getattr(resp, "response_metadata", None) or {}
+    return str(meta.get("stop_reason") or "") == "pause_turn"
 
 
 def _final_text(resp: Any) -> str:
-    """Concatenate the text blocks of the final response (the TurnPlan JSON the model emitted)."""
-    parts = [
-        getattr(b, "text", "")
-        for b in (getattr(resp, "content", None) or [])
-        if getattr(b, "type", "") == "text" and getattr(b, "text", "")
-    ]
-    return "\n".join(parts).strip()
+    """The text of the final response (the TurnPlan JSON the model emitted), text blocks concatenated."""
+    from orchestrator.llm.structured import response_text
+
+    return response_text(resp).strip()
 
 
 def _invoke_llm_tools(
-    system_prompt: str, messages: list[dict[str, Any]], tools: list[dict[str, Any]], betas: list[str]
+    system_prompt: str,
+    messages: list[Any],
+    tools: list[dict[str, Any]],
+    betas: list[str],
+    native_tools: dict[str, list[dict[str, Any]]] | None = None,
 ) -> Any:
-    """One tool-enabled model call (lazy anthropic import — keeps the module dep-less for the smoke
-    suite). The beta endpoint carries BOTH the tool calls and the forced final (empty ``tools``) so the
-    accumulated beta content blocks stay valid. Tests monkeypatch THIS to drive the loop deterministically."""
-    from anthropic import Anthropic
+    """One tool-enabled model call through the tier seam (lazy import — keeps the module dep-less for
+    the smoke suite). Returns the raw response so the loop can read ``.tool_calls``. Tests monkeypatch
+    THIS to drive the loop deterministically.
 
-    # VT-662 — pass ``betas`` ONLY when non-empty. An empty list makes the SDK emit an
-    # ``anthropic-beta:`` header with a blank value, which the API rejects with a 400
-    # ("Unexpected value(s) `` for the `anthropic-beta` header"). That silently killed the
-    # turn-brain on EVERY no-web-fetch onboarding turn (the common case) → walker fallback →
-    # ignored_speech_act re-asks (j05). Omit the kwarg entirely when there are no betas.
-    # Cache batch 2026-07-18: system rides as ONE cache_control block (the full string the caller
-    # assembled — compose_turn already appended the static _TOOLS_ADDENDUM, so it is INSIDE the
-    # cached prefix). Same shape as the single-call seam via _cached_system_block.
-    kwargs: dict[str, Any] = {
-        "model": _TURN_MODEL,
-        "max_tokens": _MAX_TOKENS,
-        "system": [_cached_system_block(system_prompt)],
-        "messages": messages,
-        "tools": tools,
-        "timeout": _TURN_TIMEOUT_S,
-    }
-    if betas:
-        kwargs["betas"] = betas
-    return Anthropic().beta.messages.create(**kwargs)
+    ``tools`` are the PORTABLE client tools (converted per provider by langchain); ``native_tools`` +
+    ``betas`` carry the Anthropic server-side ``web_fetch``, which has no cross-provider equivalent —
+    on a non-Anthropic tier the seam drops it and the turn runs with the client tools only (documented
+    degradation, logged; the brain still has journey history + conversation search + refresh).
+
+    VT-662 lives in the seam now: ``betas=[]`` is passed as ``None`` and never reaches the client, so
+    the blank ``anthropic-beta`` header that silently killed the turn-brain on every no-web-fetch turn
+    cannot recur. Cache batch 2026-07-18: the caller-assembled system string (with _TOOLS_ADDENDUM
+    already appended) rides as ONE cache_control block — same shape as the single-call seam."""
+    from orchestrator.llm.structured import messages_call
+
+    return messages_call(
+        _TURN_TIER,
+        messages=messages,
+        system=system_prompt,
+        max_tokens=_MAX_TOKENS,
+        agent=_TURN_AGENT,
+        call_site="turn_brain_tools",
+        timeout_s=_TURN_TIMEOUT_S,
+        cache_system=True,
+        tools=tools or None,
+        native_tools=native_tools or None,
+        betas=betas or None,
+    )
 
 
-def _force_final(system_prompt: str, messages: list[dict[str, Any]], betas: list[str]) -> Any:
+def _force_final(
+    system_prompt: str,
+    messages: list[Any],
+    betas: list[str],
+) -> Any:
     """The iteration/wall-clock escape hatch: re-ask with NO tools for the final JSON now."""
+    from langchain_core.messages import HumanMessage
+
     nudge = messages + [
-        {"role": "user", "content": "Produce the final JSON response now. Do not call any tool."}
+        HumanMessage(content="Produce the final JSON response now. Do not call any tool.")
     ]
     return _invoke_llm_tools(system_prompt, nudge, [], betas)
 
@@ -767,43 +786,48 @@ def _run_tool_loop(
     final TurnPlan JSON text. Bounded by ``_MAX_TOOL_ITERS`` client round-trips + a ``_TOOL_LOOP_WALL_S``
     wall clock; on the cap it forces a final no-tools answer. Any exception propagates to compose_turn's
     fail-soft (→ None → the deterministic walker)."""
+    from langchain_core.messages import HumanMessage
+
     tools: list[dict[str, Any]] = [_read_journey_tool()]
     if tenant_id is not None:
         # VT-579: the lifetime-conversation search needs a tenant context (client tool) — offer it only
         # when the turn carries one, mirroring the refresh_discovery gating.
         tools.append(_search_conversation_tool())
     betas: list[str] = []
+    native_tools: dict[str, list[dict[str, Any]]] = {}
     if pinnable_domains:
         tools.append(_refresh_discovery_tool())
-        tools.append(_web_fetch_tool(pinnable_domains))
+        # web_fetch is an Anthropic SERVER-side builtin — provider-native by definition, so it rides
+        # native_tools (bound only when the tier resolves to anthropic) rather than the portable belt.
+        native_tools["anthropic"] = [_web_fetch_tool(pinnable_domains)]
         betas.append(_WEB_FETCH_BETA)
 
-    messages: list[dict[str, Any]] = [{"role": "user", "content": user_prompt}]
+    messages: list[Any] = [HumanMessage(content=user_prompt)]
     deadline = time.monotonic() + _TOOL_LOOP_WALL_S
 
-    resp = _invoke_llm_tools(system_prompt, messages, tools, betas)
+    resp = _invoke_llm_tools(system_prompt, messages, tools, betas, native_tools)
     iters = 0
     while _wants_tools(resp) and iters < _MAX_TOOL_ITERS and time.monotonic() < deadline:
-        messages.append({"role": "assistant", "content": resp.content})
-        results = _handle_client_tool_uses(
-            resp.content, journey_state=journey_state, provenance=provenance,
-            pinnable_domains=pinnable_domains, tenant_id=tenant_id,
+        messages.append(resp)
+        messages.extend(
+            _handle_client_tool_uses(
+                resp, journey_state=journey_state, provenance=provenance,
+                pinnable_domains=pinnable_domains, tenant_id=tenant_id,
+            )
         )
-        if results:
-            messages.append({"role": "user", "content": results})
         iters += 1
-        resp = _invoke_llm_tools(system_prompt, messages, tools, betas)
+        resp = _invoke_llm_tools(system_prompt, messages, tools, betas, native_tools)
 
     if _wants_tools(resp):
-        # Cap/wall exceeded while the brain still wants tools: answer the outstanding tool_use blocks
-        # (an unanswered tool_use would 400 the next call), then force a final no-tools answer.
-        messages.append({"role": "assistant", "content": resp.content})
-        results = _handle_client_tool_uses(
-            resp.content, journey_state=journey_state, provenance=provenance,
-            pinnable_domains=pinnable_domains, tenant_id=tenant_id,
+        # Cap/wall exceeded while the brain still wants tools: answer the outstanding tool calls
+        # (an unanswered tool call would 400 the next request), then force a final no-tools answer.
+        messages.append(resp)
+        messages.extend(
+            _handle_client_tool_uses(
+                resp, journey_state=journey_state, provenance=provenance,
+                pinnable_domains=pinnable_domains, tenant_id=tenant_id,
+            )
         )
-        if results:
-            messages.append({"role": "user", "content": results})
         resp = _force_final(system_prompt, messages, betas)
 
     return _final_text(resp)
@@ -915,18 +939,29 @@ def compose_classified_reply(
 # structured classification (affirm | decline | connect | other), mirroring question_brain's Haiku
 # idiom (bounded, JSON-only, fail-soft). 'other' + any failure map to None so the caller keeps today's
 # behavior exactly — this seam only sharpens the ambiguous middle, it never overrides a clear floor.
-_INTENT_MODEL = "claude-haiku-4-5-20251001"  # the cheap classifier tier (parity with question_brain)
+_INTENT_TIER = "classifier"  # the cheap classifier tier (parity with question_brain), env-resolved
 _INTENT_TIMEOUT_S = 12.0  # bound the call — runs on the owner-inbound hot path
 FlowIntent = str  # one of: "affirm" | "decline" | "connect" | "other"
 _VALID_FLOW_INTENTS = frozenset({"affirm", "decline", "connect", "other"})
 
 
-def _anthropic_key_present() -> bool:
-    """True iff a usable (non-sentinel) Anthropic key is on the env — mirrors dispatch's guard so a
+def _anthropic_key_present(tier: str = _TURN_TIER) -> bool:
+    """True iff a usable (non-sentinel) key is on the env for the provider ``tier`` RESOLVES TO, so a
     unit/CI run with no key (or a test sentinel) never makes a live call; the classifier then degrades
-    to None and the caller keeps its deterministic behavior."""
-    key = (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
-    return bool(key) and not key.lower().startswith(("test", "sentinel", "dummy", "sk-ant-test"))
+    to None and the caller keeps its deterministic behavior.
+
+    VT-732 — the name is kept (it is a monkeypatch point in the journey-gate tests) but the question
+    is no longer "is there an ANTHROPIC key": on a gpt-tiered box that answered "no" and silently
+    disabled a path that would have worked. Fail-soft on its own failure: an unknown tier or a broken
+    resolve must not decide "no key" for a live turn, so it answers True and lets the call itself be
+    the judge."""
+    from orchestrator.llm.provider import api_key_present
+
+    try:
+        return api_key_present(tier)
+    except Exception:  # noqa: BLE001 — a resolve error is not evidence of a missing credential
+        logger.warning("turn_brain: key-presence check failed for tier %s; proceeding", tier)
+        return True
 
 
 def _llm_classify_flow_intent(body: str) -> FlowIntent | None:
@@ -934,12 +969,12 @@ def _llm_classify_flow_intent(body: str) -> FlowIntent | None:
     affirm|decline|connect|other. JSON-only, bounded, fail-soft → None on ANY failure (no key, LLM
     error, timeout, unparseable, off-label). Business-context only; the body is the owner's own short
     reply (no third-party PII by construction — this fires on the paced-flow yes/later beat)."""
-    if not _anthropic_key_present():
+    if not _anthropic_key_present(_INTENT_TIER):
         return None
     try:
         import json as _json
 
-        from anthropic import Anthropic
+        from orchestrator.llm.structured import structured_text_call
 
         prompt = (
             "A small Indian business owner is being asked whether to set up their data connections now "
@@ -953,13 +988,14 @@ def _llm_classify_flow_intent(body: str) -> FlowIntent | None:
             f'Reply: "{(body or "").strip()[:400]}"\n'
             'Return ONLY a JSON object: {"intent": "affirm|decline|connect|other"}. No prose.'
         )
-        resp = Anthropic().messages.create(
-            model=_INTENT_MODEL,
+        raw = structured_text_call(
+            _INTENT_TIER,
+            user=prompt,
             max_tokens=60,
-            messages=[{"role": "user", "content": prompt}],
-            timeout=_INTENT_TIMEOUT_S,
+            agent=_TURN_AGENT,
+            call_site="flow_intent",
+            timeout_s=_INTENT_TIMEOUT_S,
         )
-        raw = resp.content[0].text if resp.content else ""
         start, end = raw.find("{"), raw.rfind("}")
         if start == -1 or end == -1 or end <= start:
             return None

@@ -2,15 +2,16 @@
 
 Two phases per Package 3's diagram ("consume structured result -> Manager review decision"):
 
-  1. STRUCTURED EXTRACTION — ONE sonnet-5 LLM call (amendment A5: "manager triage + review nodes
-     default to the Sonnet-5 tier"). A specialist's raw graph output (messages / tool calls /
-     campaign_plan) is not itself a validated return — real specialists emit whatever their own
+  1. STRUCTURED EXTRACTION — ONE LLM call on the manager's review tier (amendment A5: "manager triage
+     + review nodes default to the Sonnet-5 tier" — VT-732 makes that a TIER, so which model the tier
+     means is the env's call, per environment). A specialist's raw graph output (messages / tool calls
+     / campaign_plan) is not itself a validated return — real specialists emit whatever their own
      sub-graph produces. ``extract_specialist_return`` reads that raw output + the step's
      acceptance_criteria and produces a ``PlanSpecialistReturn`` (manager/plan_models.py) — a
-     grounded, "trust but verify" read of what actually happened. Mirrors
-     ``agent.tools.classify_owner_message``'s house pattern EXACTLY: a raw ``Anthropic().messages.
-     create`` call + JSON parse + pydantic validation (NOT ``with_structured_output`` — unused
-     anywhere in this codebase; this keeps one convention, testable with a mock client).
+     grounded, "trust but verify" read of what actually happened. Mirrors ``manager.triage``'s house
+     pattern EXACTLY: ``structured_text_call`` + JSON parse + pydantic validation (NOT
+     ``with_structured_output`` — unused anywhere in this codebase; this keeps one convention,
+     testable by injecting ``text_call``).
 
   2. DETERMINISTIC DECISION SEAM — no LLM. The extracted ``PlanSpecialistReturn`` bridges (amendment
      A1's adapter, ``to_legacy_specialist_return``) into ``roster.SpecialistReturn`` (the LIVE,
@@ -32,14 +33,13 @@ import dataclasses
 import json
 import logging
 import re
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 from uuid import UUID
 
-from anthropic import Anthropic
-
 from orchestrator.agent.schemas.campaign_plan import CampaignStatus
-from orchestrator.llm_config import sampling_kwargs
+from orchestrator.llm.structured import structured_text_call
 from orchestrator.manager import plan_store, task_store
 from orchestrator.manager.decision import ManagerDecision, ManagerDecisionKind, decide_next_action
 from orchestrator.manager.plan_models import EffectIntent, EvidenceRef, PlanSpecialistReturn
@@ -54,11 +54,11 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("orchestrator.manager.review")
 
-# A5: the manager's triage + review nodes default to the Sonnet-5 tier. SAME model id as
-# agent.dispatch._BRAIN_MODEL_SONNET (single source of truth would import it, but dispatch.py has
-# heavy langgraph/langchain deps this module must stay free of for the dep-less smoke suite — the
-# id string is the actual contract, pinned here + asserted equal to dispatch's constant by a test).
-_REVIEW_MODEL = "claude-sonnet-5"
+# A5: the manager's triage + review nodes run on the SAME tier (parity with manager.triage's
+# _TRIAGE_TIER, which is what the "same model as the brain" assertion was really pinning). VT-732 —
+# the tier NAME is the contract now; the concrete model comes from TEAM_MODEL_COMPLEX at call time,
+# so dev and prod can differ without a code change and neither can drift from the brain by accident.
+_REVIEW_TIER = "complex"
 _MAX_TOKENS = 600
 
 _PROMPT_PATH = Path(__file__).parent / "prompts" / "manager_review_extraction.md"
@@ -80,14 +80,17 @@ def extract_specialist_return(
     desired_outcome: str,
     acceptance_criteria: list[str],
     raw_output: str,
-    client: Anthropic | None = None,
+    text_call: Callable[..., str] | None = None,
 ) -> PlanSpecialistReturn:
-    """The ONE sonnet-5 LLM call: turn a specialist's raw output into a grounded, validated
+    """The ONE review-tier LLM call: turn a specialist's raw output into a grounded, validated
     ``PlanSpecialistReturn``. Raises ``ValueError`` on non-JSON / schema-invalid output — the
     caller (``manager_review``) treats an extraction failure as fail-closed ``blocked`` (never a
-    silent guess at what happened)."""
-    if client is None:
-        client = Anthropic()
+    silent guess at what happened).
+
+    VT-732 — ``text_call`` replaces the old injectable ``client``: the transport is now the
+    multi-provider seam (which also owns sampling: temperature is pinned only where the resolved
+    model accepts it), so a test injects a callable, not an SDK stub."""
+    _call = text_call or structured_text_call
 
     user_content = (
         f"## Situation\n{situation}\n\n"
@@ -96,17 +99,14 @@ def extract_specialist_return(
         + "\n".join(f"- {c}" for c in acceptance_criteria)
         + f"\n\n## Specialist raw output\n{raw_output}"
     )
-    resp = client.messages.create(
-        model=_REVIEW_MODEL,
-        max_tokens=_MAX_TOKENS,
-        # VT-628 — pin temp=0 only where accepted (haiku). _REVIEW_MODEL is sonnet-5, which
-        # DEPRECATES temperature (400), so this resolves to {} for it.
-        **sampling_kwargs(_REVIEW_MODEL),
+    raw = _call(
+        _REVIEW_TIER,
         system=_EXTRACTION_SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": user_content}],
-    )
-    text_blocks = [b.text for b in resp.content if getattr(b, "type", "") == "text"]
-    raw = "".join(text_blocks).strip()
+        user=user_content,
+        max_tokens=_MAX_TOKENS,
+        agent="manager_review",
+        call_site="specialist_return_extraction",
+    ).strip()
     if not raw:
         raise ValueError("extract_specialist_return: model returned empty content")
     raw = _strip_code_fence(raw)
@@ -358,7 +358,7 @@ def manager_review(
     acceptance_criteria: list[str],
     raw_output: str,
     has_next_step: bool,
-    client: Anthropic | None = None,
+    text_call: Callable[..., str] | None = None,
     campaign_plan: "CampaignPlan | None" = None,
     run_id: UUID | str | None = None,
     module_result: "ModuleResult | None" = None,
@@ -369,10 +369,10 @@ def manager_review(
 
     ``campaign_plan`` (VT-607, Loop Package 6): when the just-dispatched step is Sales Recovery and
     it produced a structured ``CampaignPlan``, the deterministic ``adapt_campaign_plan_to_
-    specialist_return`` grounding + adapter REPLACES the sonnet-5 ``extract_specialist_return``
+    specialist_return`` grounding + adapter REPLACES the review-tier ``extract_specialist_return``
     call entirely for THIS step (no LLM re-interpretation of already-structured, already-validated
     output — see that function's own docstring for the full grounding rationale). Every other
-    specialist (``campaign_plan is None``) is completely unaffected — the sonnet-5 extraction path
+    specialist (``campaign_plan is None``) is completely unaffected — the review-tier extraction path
     below runs exactly as before.
 
     ``run_id`` (§7D): the caller's ACTIVE ObservabilityContext.run_id — NOT ``state['run_id']``.
@@ -392,7 +392,7 @@ def manager_review(
                 desired_outcome=desired_outcome,
                 acceptance_criteria=acceptance_criteria,
                 raw_output=raw_output,
-                client=client,
+                text_call=text_call,
             )
         except ValueError as exc:
             logger.warning(

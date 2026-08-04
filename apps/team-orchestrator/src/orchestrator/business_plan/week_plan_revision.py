@@ -126,17 +126,19 @@ actions over a full list. Reply with STRICT JSON only: {{"actions": [...], "note
 
 
 def _call_llm(prompt: str, model: str) -> str:
-    from anthropic import Anthropic
+    """One non-streaming call through the tier seam (VT-732 — same tier as the plan generator,
+    whose ``_resolve_plan_model`` this module already borrows). ``model`` stays in the signature
+    for the injectable-``llm`` contract below; the tier decides which model runs."""
+    from orchestrator.business_plan.generator import _PLAN_TIER
+    from orchestrator.llm.structured import structured_text_call
 
-    client = Anthropic(max_retries=0)
-    resp = client.messages.create(
-        model=model,
+    return structured_text_call(
+        _PLAN_TIER,
+        user=prompt,
         max_tokens=_MAX_OUTPUT_TOKENS,
-        messages=[{"role": "user", "content": prompt}],
-        timeout=_LLM_TIMEOUT_SECONDS,
-    )
-    return "".join(
-        getattr(b, "text", "") for b in resp.content if getattr(b, "type", "") == "text"
+        agent="business_plan",
+        call_site="week_plan_revision",
+        timeout_s=_LLM_TIMEOUT_SECONDS,
     ).strip()
 
 

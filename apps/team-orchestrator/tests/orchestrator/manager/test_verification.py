@@ -163,7 +163,7 @@ def test_upward_floor_verifies_an_executed_campaign_without_llm(monkeypatch):
     monkeypatch.setattr(
         CampaignsWrapper, "executed_campaign_exists_for_runs", lambda self, t, r, **k: True
     )
-    v = verification.verify_completion(tid, kid, client=None)
+    v = verification.verify_completion(tid, kid, text_call=None)
     assert v.verdict == "verified"
     assert "executed-effect floor" in v.reason
 
@@ -186,7 +186,7 @@ def test_upward_floor_read_error_falls_through_to_llm(monkeypatch):
     def _boom(self, t, r, **k):
         raise RuntimeError("db down")
     monkeypatch.setattr(CampaignsWrapper, "executed_campaign_exists_for_runs", _boom)
-    v = verification.verify_completion(tid, kid, client=None)
+    v = verification.verify_completion(tid, kid, text_call=None)
     assert v.verdict != "verified" or "executed-effect floor" not in v.reason
 
 
@@ -205,7 +205,7 @@ def test_no_effect_fast_path_verifies_without_llm(monkeypatch):
         verification, "_current_steps",
         lambda t, k, r: [{"id": uuid4(), "step_seq": 1, "status": "done", "evidence_kind": None, "detail": {}}],
     )
-    v = verification.verify_completion(tid, kid, client=None)
+    v = verification.verify_completion(tid, kid, text_call=None)
     assert v.verdict == "verified"
     assert "no-effect fast path" in v.reason
 

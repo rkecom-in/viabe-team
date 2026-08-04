@@ -48,11 +48,10 @@ This module is complete + fully tested standalone so that wiring is a single cal
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 from uuid import UUID
-
-from anthropic import Anthropic
 
 from orchestrator.agents.business_policy import PolicyActionClass, assert_within_policy
 from orchestrator.manager.decision import ManagerDecisionKind, decide_next_action
@@ -173,7 +172,7 @@ def evaluate_turn_shadow(
     campaign_plan: "CampaignPlan | None" = None,
     legacy_final_status: str = "completed",
     run_id: UUID | None = None,
-    client: Anthropic | None = None,
+    text_call: Callable[..., str] | None = None,
 ) -> ShadowEvalResult:
     """The shadow-mode observational manager_review pass for ONE turn. Mirrors ``manager.review.
     manager_review``'s extract+decide halves EXACTLY (same functions, same fail-closed extraction
@@ -192,7 +191,7 @@ def evaluate_turn_shadow(
                 desired_outcome=desired_outcome,
                 acceptance_criteria=acceptance_criteria,
                 raw_output=raw_output,
-                client=client,
+                text_call=text_call,
             )
         except ValueError as exc:
             logger.warning(

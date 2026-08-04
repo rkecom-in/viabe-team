@@ -34,16 +34,17 @@ import os
 import re
 from dataclasses import dataclass, field
 from functools import lru_cache
-from typing import Any, Callable
+from typing import Callable
 from urllib.parse import urlsplit
 
 logger = logging.getLogger(__name__)
 
-# VT-452 LLM pattern reused verbatim: the canonical bare model id (no date suffix) + the env the
-# Anthropic SDK reads (ANTHROPIC_API_KEY, valid on deployed dev). web_search is optional — used only
-# when the deterministic signals are thin (the company name carries no taxonomy keyword).
-_RECONCILE_MODEL = "claude-opus-4-8"
-_WEB_SEARCH_TOOL = {"type": "web_search_20260209", "name": "web_search"}
+# VT-732: the COMPLEX reasoning tier, resolved per call from TEAM_MODEL_COMPLEX (was a hardcoded
+# claude-opus-4-8). Server-side web_search is optional — used only when the deterministic signals are
+# thin (the company name carries no taxonomy keyword) — and is bound by the seam in whatever native
+# form the resolved provider supports (anthropic / openai / xai / google), gated by the
+# TEAM_ENABLE_WEB_SEARCH master flag. A provider with no server search (GLM) simply runs without it.
+_RECONCILE_TIER = "complex"
 _RECONCILE_TIMEOUT_S = 25.0  # bound the call; a hang must degrade to the deterministic fallback
 
 # (business_name, gbp_category, domain, gst_nature) -> the reconciled taxonomy key (a bare string).
@@ -368,11 +369,11 @@ def _llm_reconcile_enabled() -> bool:
 def _default_llm_reconcile(
     business_name: str | None, gbp_category: str | None, domain: str | None, gst_nature: str | None
 ) -> str | None:
-    """VT-452 LLM pattern: ask ``claude-opus-4-8`` (optional server-side web_search when the signals
-    are thin) to reconcile the public signals into ONE taxonomy key. REUSES the lazy ``from anthropic
-    import Anthropic`` SDK (no new client); ANTHROPIC_API_KEY is read from env. Returns the bare key
-    string (the caller range-checks it) or None. Raises on SDK/parse failure → the caller degrades."""
-    from anthropic import Anthropic
+    """VT-452 LLM pattern: ask the COMPLEX tier (optional server-side web_search when the signals are
+    thin) to reconcile the public signals into ONE taxonomy key. Routed through the multi-provider seam
+    (VT-732) so the model is the env's choice and the call is cost-metered. Returns the bare key string
+    (the caller range-checks it) or None. Raises on call/parse failure → the caller degrades."""
+    from orchestrator.llm.structured import structured_text_call
 
     keys = _taxonomy()
     catalogue = "\n".join(f"  {k}: {label}" for k, label in keys.items())
@@ -395,22 +396,16 @@ def _default_llm_reconcile(
         "mis-category; pick the e-commerce/software/online-retail bucket, NOT a telecom one.\n"
         "Reply with ONE key from the taxonomy above."
     )
-    kwargs: dict[str, Any] = {
-        "model": _RECONCILE_MODEL,
-        "max_tokens": 16,
-        "messages": [{"role": "user", "content": prompt}],
-        "timeout": _RECONCILE_TIMEOUT_S,
-    }
-    if thin:
-        kwargs["tools"] = [_WEB_SEARCH_TOOL]
-        kwargs["max_tokens"] = 512  # web_search loop needs room; we still parse only the final key
-    resp = Anthropic().messages.create(**kwargs)
-    parts = [
-        getattr(block, "text", "")
-        for block in (resp.content or [])
-        if getattr(block, "type", None) == "text"
-    ]
-    text = " ".join(p for p in parts if p)
+    text = structured_text_call(
+        _RECONCILE_TIER,
+        user=prompt,
+        # web_search loop needs room; we still parse only the final key.
+        max_tokens=512 if thin else 16,
+        agent="onboarding_business_type_reconcile",
+        call_site="type_reconcile",
+        timeout_s=_RECONCILE_TIMEOUT_S,
+        enable_web_search=thin,
+    )
     # Extract the first taxonomy key token the model emitted (range-checked by the caller).
     for token in re.findall(r"[a-z_]+", text.lower()):
         if token in keys:

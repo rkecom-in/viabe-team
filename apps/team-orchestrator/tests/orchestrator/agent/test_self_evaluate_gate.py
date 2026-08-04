@@ -164,7 +164,7 @@ def _patch_anthropic(monkeypatch, drafts: list[dict[str, Any]]) -> MagicMock:
         _end_turn_response(json.dumps(d)) for d in drafts
     ]
     monkeypatch.setattr(
-        "orchestrator.agent.sales_recovery.Anthropic", lambda: fake
+        "orchestrator.agent.sales_recovery._model_client", lambda: fake
     )
     return fake
 

@@ -103,7 +103,7 @@ def _patch_client(monkeypatch, responses: list[Any]) -> MagicMock:
     fake = MagicMock()
     fake.messages.create.side_effect = list(responses)
     monkeypatch.setattr(
-        "orchestrator.agent.sales_recovery.Anthropic", lambda: fake
+        "orchestrator.agent.sales_recovery._model_client", lambda: fake
     )
     return fake
 
@@ -290,7 +290,7 @@ def test_per_turn_http_timeout_terminates_as_wall_clock(monkeypatch):
     # APITimeoutError needs a request argument in current anthropic SDK.
     fake.messages.create.side_effect = APITimeoutError(request=MagicMock())
     monkeypatch.setattr(
-        "orchestrator.agent.sales_recovery.Anthropic", lambda: fake
+        "orchestrator.agent.sales_recovery._model_client", lambda: fake
     )
     monkeypatch.setenv("VIABE_ENV", "test")
 

@@ -41,13 +41,10 @@ to pass its reasoning gets a validation error — tested.
 from __future__ import annotations
 
 import json
-import os
 import re
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Literal
 
-import yaml
-from anthropic import Anthropic
 from pydantic import BaseModel, ConfigDict, Field
 
 from orchestrator.agent.self_evaluate import (
@@ -80,14 +77,6 @@ _PROMPT_PATH = (
 _MAX_OUTPUT_TOKENS = 1024
 
 # Models config path — the tool reads the model pin from here (Pillar 8:
-# never hardcode a model string). ``self_evaluate.py`` lives at
-# ``src/orchestrator/agent/tools/self_evaluate.py``, four parents deep
-# from ``apps/team-orchestrator/``; ``config/models.yaml`` sits beside
-# ``src/``.
-_MODELS_YAML = (
-    Path(__file__).resolve().parents[4] / "config" / "models.yaml"
-)
-
 # Markdown code-fence stripper — Opus occasionally wraps JSON in a
 # fence even when the prompt forbids it (cf. VT-32 canary failure #3).
 _CODE_FENCE_RE = re.compile(
@@ -165,15 +154,19 @@ class SelfEvaluateOutput(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+# VT-732 — the REVIEW tier (TEAM_MODEL_REVIEW), replacing the
+# ``config/models.yaml[self_evaluate][VIABE_ENV-slot]`` pin. This gate is the loop's quality
+# judgment (its prod slot was the top model precisely because a false negative is expensive), so
+# it takes the same tier as the manager's review/verification checkpoints.
+_SELF_EVALUATE_TIER = "review"
+
+
 def _resolve_self_evaluate_model() -> str:
-    """Read the model pin from config/models.yaml. ``VIABE_ENV=production``
-    selects the ``production`` slot; anything else selects ``test``
-    (Haiku canary). Brief item 6: NO hardcoded model string."""
-    env = os.environ.get("VIABE_ENV", "test").lower()
-    slot = "production" if env == "production" else "test"
-    with open(_MODELS_YAML, encoding="utf-8") as f:
-        config = yaml.safe_load(f)
-    return cast(str, config["self_evaluate"][slot])
+    """The concrete model the review tier resolves to — for logs/attribution. Brief item 6 (NO
+    hardcoded model string) is now structural: the id exists only in the env."""
+    from orchestrator.llm import resolve_model_id
+
+    return resolve_model_id(_SELF_EVALUATE_TIER)
 
 
 def _load_prompt() -> str:
@@ -236,8 +229,9 @@ def _self_evaluate_impl(
     the observability envelope, mirroring how the L0 tools resolve
     ``get_pool()`` internally.
 
-    The client is constructed via ``SelfEvaluateTool._make_client`` so the
-    test injection seam (``classmethod`` patched on the type) keeps working.
+    The transport is obtained via ``SelfEvaluateTool._make_client`` so the test injection seam
+    (``classmethod`` patched on the type) keeps working; in production it returns ``None`` and the
+    call goes through the tier seam (VT-732).
     """
     client = SelfEvaluateTool._make_client()
     model = _resolve_self_evaluate_model()
@@ -252,27 +246,34 @@ def _self_evaluate_impl(
         # deterministic filter is the binding backstop if the model ignores it.
         "grade_tier": grade_tier,
     }
-    # mypy: anthropic Messages.create's overloads are TypedDict-heavy
-    # — typing the plain-dict messages list to match would add
-    # noise without value (same precedent as sales_recovery.py).
-    response = client.messages.create(
-        model=model,
-        max_tokens=_MAX_OUTPUT_TOKENS,
-        system=system_prompt,
-        messages=[
-            {"role": "user", "content": json.dumps(user_payload)},
-        ],
-    )
+    if client is not None:
+        # Test double (SDK-shaped): used verbatim so the gate's own assertions keep exercising
+        # the real parse/verdict path.
+        response = client.messages.create(
+            model=model,
+            max_tokens=_MAX_OUTPUT_TOKENS,
+            system=system_prompt,
+            messages=[
+                {"role": "user", "content": json.dumps(user_payload)},
+            ],
+        )
+        raw_text = ""
+        for block in getattr(response, "content", []) or []:
+            text = getattr(block, "text", None)
+            if isinstance(text, str):
+                raw_text += text
+        raw_text = raw_text.strip()
+    else:
+        from orchestrator.llm.structured import structured_text_call
 
-    # Extract text content from the assistant turn. Anthropic's
-    # response.content is a list of blocks; we want concatenated
-    # text only.
-    raw_text = ""
-    for block in getattr(response, "content", []) or []:
-        text = getattr(block, "text", None)
-        if isinstance(text, str):
-            raw_text += text
-    raw_text = raw_text.strip()
+        raw_text = structured_text_call(
+            _SELF_EVALUATE_TIER,
+            system=system_prompt,
+            user=json.dumps(user_payload),
+            max_tokens=_MAX_OUTPUT_TOKENS,
+            agent="self_evaluate",
+            call_site="self_evaluate_gate",
+        ).strip()
 
     # Tolerate a markdown code-fence wrapper.
     fence_match = _CODE_FENCE_RE.match(raw_text)
@@ -345,12 +346,12 @@ class SelfEvaluateTool(MCPTool[SelfEvaluateInput, SelfEvaluateOutput]):
         # explosion. Cost ~₹10-15/eval, within budget.
         return True
 
-    # Injection seam — tests patch this to a MagicMock; production
-    # constructs a real client. ``classmethod`` so the class can be
-    # patched on the type itself (not per-instance).
+    # Injection seam — tests patch this to a MagicMock; production returns None, meaning
+    # "use the tier seam" (VT-732: the model, provider and credential come from
+    # TEAM_MODEL_REVIEW). ``classmethod`` so the class can be patched on the type itself.
     @classmethod
-    def _make_client(cls) -> Anthropic:
-        return Anthropic()
+    def _make_client(cls) -> Any | None:
+        return None
 
     def execute(
         self,

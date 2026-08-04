@@ -40,7 +40,7 @@ _HTTP_TIMEOUT = 20.0
 _WEBSITE_MAX_CHARS = 12000  # cap the page text fed to the LLM (cost + prompt-injection surface)
 _WEBSITE_MAX_BYTES = 3_000_000  # cap the response body fetched (DoS/cost)
 _WEBSITE_MAX_REDIRECTS = 4
-_EXTRACT_MODEL = "claude-haiku-4-5-20251001"
+_EXTRACT_TIER = "classifier"  # VT-732: cheap structured extraction, resolved from TEAM_MODEL_CLASSIFIER
 
 
 class UnsafeUrlError(ValueError):
@@ -443,33 +443,41 @@ def _extract_via_web_fetch(url: str) -> dict[str, Any]:
     use-capped. Returns {} on ANY failure — the caller falls back to the local fetch path."""
     from urllib.parse import urlsplit
 
-    from anthropic import Anthropic
+    from langchain_core.messages import HumanMessage
+
+    from orchestrator.llm.structured import messages_call, response_text
 
     host = urlsplit(url).hostname
     if not host:
         return {}
     try:
-        resp = Anthropic().beta.messages.create(
-            model=_EXTRACT_MODEL,
+        # VT-732 — web_fetch is an Anthropic SERVER-side builtin with no cross-provider equivalent, so
+        # it rides ``native_tools`` (bound only when the tier resolves to anthropic). On any other
+        # provider the seam drops it, the model has nothing to fetch with, and this returns {} — which
+        # is exactly this function's existing contract: the caller falls back to the LOCAL fetch path,
+        # which is provider-independent. The capability degrades; the discovery does not.
+        resp = messages_call(
+            _EXTRACT_TIER,
+            messages=[
+                HumanMessage(
+                    content=f"Fetch {url} and read what this business's website actually says. "
+                    + _extraction_contract()
+                )
+            ],
             max_tokens=700,
+            agent="onboarding_auto_discovery",
+            call_site="website_web_fetch",
             betas=["web-fetch-2025-09-10"],
-            tools=[{
-                "type": "web_fetch_20250910",
-                "name": "web_fetch",
-                "max_uses": 3,
-                "allowed_domains": [host],
-            }],
-            messages=[{
-                "role": "user",
-                "content": f"Fetch {url} and read what this business's website actually says. "
-                           + _extraction_contract(),
-            }],
+            native_tools={
+                "anthropic": [{
+                    "type": "web_fetch_20250910",
+                    "name": "web_fetch",
+                    "max_uses": 3,
+                    "allowed_domains": [host],
+                }]
+            },
         )
-        raw = ""
-        for block in reversed(resp.content or []):
-            if getattr(block, "type", "") == "text" and getattr(block, "text", ""):
-                raw = block.text
-                break
+        raw = response_text(resp, mode="last")
         return _parse_extraction_json(raw) if raw else {}
     except Exception as exc:  # noqa: BLE001 — tool/beta availability varies; fall back, never fail
         logger.info("discover_website: web_fetch path unavailable (%s) — local fallback", type(exc).__name__)
@@ -485,18 +493,19 @@ def _extract_website(text: str) -> dict[str, Any]:
     now also returns ``category`` (the business's own natural one-line self-description — what the
     confirm turn should present) and ``business_type`` (the closest key from the Viabe taxonomy, or
     'other'). Both are DRAFT fields — owner-confirm-gated downstream, never asserted (CL-390)."""
-    from anthropic import Anthropic
+    from orchestrator.llm.structured import structured_text_call
 
     prompt = (
         "From this business website text: " + _extraction_contract() + f"\n\nTEXT:\n{text}"
     )
     try:
-        resp = Anthropic().messages.create(
-            model=_EXTRACT_MODEL,
+        raw = structured_text_call(
+            _EXTRACT_TIER,
+            user=prompt,
             max_tokens=400,
-            messages=[{"role": "user", "content": prompt}],
+            agent="onboarding_auto_discovery",
+            call_site="website_extract",
         )
-        raw = resp.content[0].text if resp.content else "{}"
         return _parse_extraction_json(raw)
     except Exception as exc:  # noqa: BLE001 — LLM/parse fragile; degrade to no website fields
         logger.warning("discover_website: extract failed (%s)", type(exc).__name__)

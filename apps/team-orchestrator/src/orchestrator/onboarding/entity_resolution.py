@@ -54,12 +54,15 @@ logger = logging.getLogger(__name__)
 # ingestion site too (``auto_discovery_sources._to_candidates``) as defense-in-depth.
 _GBP_FIELD_MAX_LEN = 200
 
-# VT-452/VT-475 house LLM idiom, reused verbatim: the capable reasoning model (identity resolution IS
-# the reasoning-critical step — Fazal: "the LLM needs to reason correctly") + the current dynamic-
-# filtering web_search tool for the Opus-4.x family. ANTHROPIC_API_KEY is read from env (valid on
-# deployed dev/prod; the local key is dead — this validates on dev per CL-2026-06-29).
-_ADJUDICATOR_MODEL = "claude-opus-4-8"
-_WEB_SEARCH_TOOL = {"type": "web_search_20260209", "name": "web_search", "max_uses": 3}
+# VT-732: the COMPLEX reasoning tier (identity resolution IS the reasoning-critical step — Fazal: "the
+# LLM needs to reason correctly"), resolved per call from TEAM_MODEL_COMPLEX; was a hardcoded
+# claude-opus-4-8. Server-side web_search is LOAD-BEARING here, not advisory — the adjudicator finds
+# the owner's real company by searching. The seam binds each provider's native search (anthropic /
+# openai / xai / google); GLM has none, so a GLM tier here would adjudicate blind and is the one
+# provider this site should not be pointed at. Clau's brief listed this file as the Anthropic-only
+# exception pending Fazal's keep/drop call: the cross-provider search binding RESOLVES that question
+# rather than parking it — there is no remaining Anthropic dependency to keep or drop.
+_ADJUDICATOR_TIER = "complex"
 _ADJUDICATOR_MAX_TOKENS = 900  # room for the web_search loop; we parse only the final JSON block
 _ADJUDICATOR_TIMEOUT_S = 30.0  # a hang MUST degrade to fail-closed reject, never wedge discovery
 _MAX_REASONING_CHARS = 600  # bound the reasoning we persist into provenance
@@ -272,11 +275,12 @@ def resolve_entity(
 
 
 def _default_adjudicate(anchors: OwnerAnchors, candidates: list[GbpCandidate]) -> dict[str, Any] | None:
-    """The real LLM leg: ONE ``claude-opus-4-8`` call with the server-side web_search tool. Frames the
-    task as REASONING ("which of these, if any, IS the owner's company"), never a scripted checklist,
-    and returns strict JSON. Lazy ``from anthropic import Anthropic`` (VT-452 pattern); raises on any
-    SDK/parse failure → ``resolve_entity`` degrades it to a fail-closed reject."""
-    from anthropic import Anthropic
+    """The real LLM leg: ONE call on the COMPLEX tier with the provider's server-side web search.
+    Frames the task as REASONING ("which of these, if any, IS the owner's company"), never a scripted
+    checklist, and returns strict JSON. Routed through the multi-provider seam (VT-732); raises on any
+    call/parse failure → ``resolve_entity`` degrades it to a fail-closed reject."""
+    from orchestrator.llm.provider import web_search_enabled
+    from orchestrator.llm.structured import structured_text_call
 
     def _f(source: str, value: str | None) -> str:
         """Fence one candidate field (VT-636); ``!r`` still applied so the rendered value stays a
@@ -319,26 +323,32 @@ def _default_adjudicate(anchors: OwnerAnchors, candidates: list[GbpCandidate]) -
         '{"matched_candidate_index": <int or null>, "resolved_website": <string or null>, '
         '"confidence": "high"|"medium"|"low", "reasoning": "<one or two sentences>"}'
     )
-    resp = Anthropic().messages.create(
-        model=_ADJUDICATOR_MODEL,
-        max_tokens=_ADJUDICATOR_MAX_TOKENS,
+    if not web_search_enabled():
+        # Fazal's TEAM_ENABLE_WEB_SEARCH kill switch also gates THIS call now that it runs through the
+        # seam. Adjudicating without search is materially weaker (the owner's own domain is normally
+        # the top organic result), so say so out loud rather than let it read as a model regression.
+        logger.warning(
+            "entity_resolution: TEAM_ENABLE_WEB_SEARCH is off — adjudicating WITHOUT web search "
+            "(weaker identity resolution; set the flag to restore it)"
+        )
+    # text_mode="last" takes the model's final answer after the search completes (earlier text blocks
+    # may be "I'll search…" preamble) — the same house parse as entity_match._default_llm_search.
+    raw = structured_text_call(
+        _ADJUDICATOR_TIER,
         system=(
             "You are a careful business-identity resolver. You reason about company identity from name "
             "and domain evidence, treat phonetic lookalikes as distinct companies, and reply with ONLY "
             "valid JSON parseable by json.loads()."
         ),
-        tools=[_WEB_SEARCH_TOOL],
-        messages=[{"role": "user", "content": prompt}],
-        timeout=_ADJUDICATOR_TIMEOUT_S,
+        user=prompt,
+        max_tokens=_ADJUDICATOR_MAX_TOKENS,
+        agent="onboarding_entity_resolution",
+        call_site="identity_adjudication",
+        timeout_s=_ADJUDICATOR_TIMEOUT_S,
+        enable_web_search=True,
+        text_mode="last",
     )
-    # The LAST text block is the model's final answer after web_search completes (earlier text blocks
-    # may be "I'll search…" preamble) — the same house parse as entity_match._default_llm_search.
-    parts = [
-        getattr(block, "text", "")
-        for block in (resp.content or [])
-        if getattr(block, "type", None) == "text"
-    ]
-    return _parse_verdict((parts[-1] if parts else "").strip())
+    return _parse_verdict(raw.strip())
 
 
 def _parse_verdict(raw: str) -> dict[str, Any] | None:

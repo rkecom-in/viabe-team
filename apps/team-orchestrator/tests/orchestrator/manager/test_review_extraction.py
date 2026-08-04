@@ -1,7 +1,12 @@
-"""VT-606 (Loop Package 3) — manager_review's PURE pieces: the sonnet-5 structured-extraction call
-(mocked client, no network) + the amendment-A1 legacy adapter + the decision-outcome mapping. No
+"""VT-606 (Loop Package 3) — manager_review's PURE pieces: the review-tier structured-extraction call
+(injected transport, no network) + the amendment-A1 legacy adapter + the decision-outcome mapping. No
 DB required — the DB-backed ``manager_review()`` end-to-end effects are in
 ``test_manager_review_db.py``.
+
+VT-732 — the extraction call goes through the multi-provider seam, so the injection point is
+``text_call`` (a callable returning the raw text) rather than an Anthropic SDK client double. Same
+contract under test: whatever text comes back is fence-stripped, JSON-parsed, and schema-validated,
+and a failure raises ``ValueError`` for the caller's fail-closed path.
 """
 
 from __future__ import annotations
@@ -12,7 +17,6 @@ import pytest
 
 pytest.importorskip("langgraph")
 pytest.importorskip("langchain_anthropic")
-pytest.importorskip("anthropic")
 
 from orchestrator.manager.plan_models import EffectIntent, EvidenceRef, PlanSpecialistReturn  # noqa: E402
 from orchestrator.manager.review import (  # noqa: E402
@@ -22,32 +26,18 @@ from orchestrator.manager.review import (  # noqa: E402
 )
 
 
-class _FakeTextBlock:
-    type = "text"
+def _text_call(text: str):
+    """A transport double: returns ``text`` verbatim and pins the tier the caller asked for."""
 
-    def __init__(self, text: str) -> None:
-        self.text = text
+    def _call(tier: str, **kwargs):  # noqa: ANN003, ANN202 — test double
+        assert tier == "complex", "review runs on the env-governed complex tier"
+        return text
 
-
-class _FakeResp:
-    def __init__(self, content: list) -> None:
-        self.content = content
+    return _call
 
 
-class _FakeMessages:
-    def __init__(self, json_out: dict | None = None, raise_exc: Exception | None = None) -> None:
-        self._json_out = json_out
-        self._raise_exc = raise_exc
-
-    def create(self, **kwargs):  # noqa: ANN003, ANN201 — test double
-        if self._raise_exc is not None:
-            raise self._raise_exc
-        return _FakeResp([_FakeTextBlock(json.dumps(self._json_out))])
-
-
-class _FakeClient:
-    def __init__(self, json_out: dict | None = None, raise_exc: Exception | None = None) -> None:
-        self.messages = _FakeMessages(json_out, raise_exc)
+def _json_call(json_out: dict):
+    return _text_call(json.dumps(json_out))
 
 
 _BASE_KWARGS = {
@@ -61,7 +51,7 @@ _BASE_KWARGS = {
 def test_extract_specialist_return_completed() -> None:
     ret = extract_specialist_return(
         **_BASE_KWARGS,
-        client=_FakeClient(
+        text_call=_json_call(
             {
                 "status": "completed",
                 "action_summary": "proposed campaign",
@@ -79,40 +69,34 @@ def test_extract_specialist_return_completed() -> None:
 
 
 def test_extract_specialist_return_non_json_raises() -> None:
-    class _RawTextClient:
-        class messages:  # noqa: N801 — test double
-            @staticmethod
-            def create(**kwargs):  # noqa: ANN003, ANN201
-                return _FakeResp([_FakeTextBlock("not json at all")])
-
     with pytest.raises(ValueError, match="non-JSON"):
-        extract_specialist_return(**_BASE_KWARGS, client=_RawTextClient())
+        extract_specialist_return(**_BASE_KWARGS, text_call=_text_call("not json at all"))
+
+
+def test_extract_specialist_return_empty_raises() -> None:
+    """An empty response is an extraction FAILURE, not an empty result — the caller fails closed."""
+    with pytest.raises(ValueError, match="empty"):
+        extract_specialist_return(**_BASE_KWARGS, text_call=_text_call("   "))
 
 
 def test_extract_specialist_return_schema_invalid_raises() -> None:
     with pytest.raises(ValueError, match="validation failed"):
         extract_specialist_return(
             **_BASE_KWARGS,
-            client=_FakeClient({"status": "not_a_real_status"}),
+            text_call=_json_call({"status": "not_a_real_status"}),
         )
 
 
 def test_extract_specialist_return_strips_code_fence() -> None:
-    class _FencedClient:
-        class messages:  # noqa: N801
-            @staticmethod
-            def create(**kwargs):  # noqa: ANN003, ANN201
-                body = json.dumps(
-                    {
-                        "status": "failed",
-                        "action_summary": "",
-                        "outcome_summary": "no consent",
-                        "reason_code": "no_consent",
-                    }
-                )
-                return _FakeResp([_FakeTextBlock(f"```json\n{body}\n```")])
-
-    ret = extract_specialist_return(**_BASE_KWARGS, client=_FencedClient())
+    body = json.dumps(
+        {
+            "status": "failed",
+            "action_summary": "",
+            "outcome_summary": "no consent",
+            "reason_code": "no_consent",
+        }
+    )
+    ret = extract_specialist_return(**_BASE_KWARGS, text_call=_text_call(f"```json\n{body}\n```"))
     assert ret.status == "failed"
     assert ret.reason_code == "no_consent"
 

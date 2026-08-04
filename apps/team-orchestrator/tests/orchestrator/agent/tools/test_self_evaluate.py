@@ -409,15 +409,18 @@ def test_tool_is_registered_under_its_name():
 # ---------- 12. Model pin resolution -----------------------------------------
 
 
-def test_model_resolves_per_viabe_env(monkeypatch):
+def test_model_resolves_from_the_review_tier_var(monkeypatch):
+    """VT-732 — the gate's model comes from TEAM_MODEL_REVIEW, not a VIABE_ENV yaml slot: one
+    governance surface, so a deployed env cannot 'set the model' in a place the call ignores."""
     from orchestrator.agent.tools.self_evaluate import (
         _resolve_self_evaluate_model,
     )
 
-    monkeypatch.setenv("VIABE_ENV", "production")
-    assert _resolve_self_evaluate_model() == "claude-opus-4-7"
-    monkeypatch.setenv("VIABE_ENV", "test")
-    assert _resolve_self_evaluate_model() == "claude-haiku-4-5"
+    monkeypatch.setenv("TEAM_MODEL_REVIEW", "gpt-5.6-luna")
+    monkeypatch.setenv("VIABE_ENV", "production")  # must not influence the choice
+    assert _resolve_self_evaluate_model() == "gpt-5.6-luna"
+    monkeypatch.delenv("TEAM_MODEL_REVIEW", raising=False)
+    assert _resolve_self_evaluate_model() == "claude-opus-4-8"  # the tier default
 
 
 # ---------- 13. Fence-wrapped JSON tolerated --------------------------------

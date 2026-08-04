@@ -32,11 +32,9 @@ import os
 import re
 from dataclasses import dataclass
 from datetime import date
-from pathlib import Path
-from typing import Any, cast
+from typing import Any
 from uuid import UUID
 
-import yaml
 
 from orchestrator.agent.tool_guardrail import assert_agent_tools_safe
 from orchestrator.agents.coordinator import AgentItemContext, ItemExecutionResult
@@ -168,13 +166,12 @@ WINBACK_TEMPLATE_NAME = "team_winback_simple"
 # import; agent_send_draft Gate-2b hard-refuses any drift at send time.
 WINBACK_TEMPLATE_PARAMS: tuple[str, ...] = ("customer_name", "business_name")
 
-_MODELS_YAML = Path(__file__).resolve().parents[3] / "config" / "models.yaml"
-# Drafting model slots: a dedicated ``agent_drafting`` models.yaml key wins when present (a
-# DATA-only change to add); fallback is the ``business_plan`` slot — Sonnet prod / Haiku test,
-# exactly the plan §2.2 "Haiku/Sonnet" band. NOT the ``sales_recovery`` slot: that is the VT-35
-# Opus-calibrated agent-loop pin, not param drafting.
-_DRAFTING_SLOT_PRIMARY = "agent_drafting"
-_DRAFTING_SLOT_FALLBACK = "business_plan"
+# VT-732 — param drafting runs on the ROUTINE tier (TEAM_MODEL_ROUTINE). This replaced the
+# ``config/models.yaml`` slot pair (``agent_drafting`` else ``business_plan``, VIABE_ENV-slotted):
+# the yaml was a second model-governance surface the tier seam never saw. Routine, not specialist:
+# filling two template variables from bundle literals is the cheap band the slot pair encoded
+# ("Haiku/Sonnet"), deliberately NOT the SR agent-loop tier.
+_DRAFTING_TIER = "routine"
 _MAX_OUTPUT_TOKENS = 512
 _LLM_TIMEOUT_SECONDS = 30.0
 
@@ -353,30 +350,27 @@ def build_customer_fact_bundle(
 
 
 def _resolve_drafting_model() -> str:
-    """models.yaml slot — VIABE_ENV=production → production model, else test (the house
-    resolver pattern). See _DRAFTING_SLOT_* for the slot-preference rationale."""
-    env = os.environ.get("VIABE_ENV", "test").lower()
-    env_slot = "production" if env == "production" else "test"
-    with open(_MODELS_YAML) as f:
-        config = yaml.safe_load(f)
-    slot = config.get(_DRAFTING_SLOT_PRIMARY) or config[_DRAFTING_SLOT_FALLBACK]
-    return cast(str, slot[env_slot])
+    """The concrete model the drafting tier resolves to — for logs/attribution only."""
+    from orchestrator.llm import resolve_model_id
+
+    return resolve_model_id(_DRAFTING_TIER)
 
 
 def _call_llm(prompt: str, model: str) -> str:
-    """One non-streaming Messages call; returns the concatenated text blocks. max_retries=0:
-    a failed/ungrounded draft is DROPPED (fail-closed), never retried into compliance."""
-    from anthropic import Anthropic
+    """One non-streaming call through the tier seam; returns the concatenated text.
 
-    client = Anthropic(max_retries=0)
-    resp = client.messages.create(
-        model=model,
+    ``model`` is accepted for call-site/log compatibility — the tier decides which model runs
+    (VT-732). A failed/ungrounded draft is DROPPED (fail-closed), never retried into compliance,
+    so this deliberately does not add its own retry."""
+    from orchestrator.llm.structured import structured_text_call
+
+    return structured_text_call(
+        _DRAFTING_TIER,
+        user=prompt,
         max_tokens=_MAX_OUTPUT_TOKENS,
-        messages=[{"role": "user", "content": prompt}],
-        timeout=_LLM_TIMEOUT_SECONDS,
-    )
-    return "".join(
-        getattr(b, "text", "") for b in resp.content if getattr(b, "type", "") == "text"
+        agent="sales_recovery_executor",
+        call_site="param_drafting",
+        timeout_s=_LLM_TIMEOUT_SECONDS,
     ).strip()
 
 

@@ -1,77 +1,27 @@
-# Model configuration (VT-32).
+# Model configuration.
 #
-# Selection is environment-driven (env var ``VIABE_ENV``):
-#   - production            -> ``production`` model
-#   - test / dev / canary   -> ``test`` model
+# VT-732 (2026-08-05) — this file is now ONLY the non-Claude model pins.
 #
-# Resolver: ``orchestrator.agent.sales_recovery._resolve_model``.
+# Every Claude/LLM slot that used to live here (sales_recovery, self_evaluate,
+# owner_input_classifier, vision_extraction, owner_typed_extraction,
+# cash_book_merge, zomato_theme_extraction, method_selector, business_plan) has
+# been RETIRED onto the ``TEAM_MODEL_*`` env tiers resolved by
+# ``orchestrator.llm.provider``. Reason: two governance surfaces meant a
+# deployment could set the model in one place while the call kept picking from
+# the other — on dev, all five TEAM_MODEL_* vars read gpt-5.6-luna while this
+# file quietly kept sales_recovery on claude-sonnet-5, which is where the
+# Sonnet burn came from. A per-environment env var IS the production/test split
+# these slots encoded, so the split is not lost, only unified.
 #
-# Rationale (CL-242):
-# - Haiku (claude-haiku-4-5) is fast and cheap — fine for plumbing-level
-#   canary / dev runs that prove the SDK loop wiring.
-# - Opus (claude-opus-4-7) is the production model. Hard-limit behaviour
-#   validation (VT-35) MUST run on Opus; do NOT let Haiku leak into that
-#   path — the budgets and step-count behaviour differ between models and
-#   we calibrate against Opus.
+# Tier map for the retired keys (each is a named constant at its call site):
+#   sales_recovery / vision_extraction / cash_book_merge / business_plan -> specialist
+#   self_evaluate                                                        -> review
+#   owner_input_classifier / owner_typed_extraction /
+#   zomato_theme_extraction / method_selector                            -> classifier
+#   agent_drafting (sales_recovery_executor)                             -> routine
 #
-# Adding an agent: top-level key is the agent name (string). Both
-# ``production`` and ``test`` are required.
-
-# VT-501: SR-draft is COMPLEX grounded reasoning — a full CampaignPlan with
-# evidence_refs that must satisfy the two-way marker⇄ref consistency + range/
-# honesty validators. The CL-242 Haiku rationale above ("plumbing-level canary /
-# prove the SDK loop wiring") was the PLACEHOLDER-era posture (VT-32) and no
-# longer holds: on dev (the validation env, CL-2026-06-29) Haiku drafted a VALID
-# grounded plan only ~2/6 — it could not reliably emit the structured grounding.
-# Per the VT-480 tiering principle (complex reasoning → the CAPABLE tier, never
-# Haiku), the dev/test slot is the capable Sonnet 4.6 — the same tier the analogous
-# grounded-citation agent ``business_plan`` runs in production. This is a
-# MISCLASSIFICATION-CORRECTION (a now-complex task was falling to the cheap slot),
-# not a new cost call. Cost/fidelity note for Fazal/Cowork: prod stays Opus 4.7; if
-# EXACT dev↔prod model fidelity is required for the re-drive, set test → Opus.
-# VT-596: dev/test slot 4.6 → 5 (Fazal 2026-07-04 general sonnet upgrade; parity
-# with the VT-592 manager conversational tier so dev validates the pair Fazal judges).
-sales_recovery:
-  production: claude-opus-4-7
-  test: claude-sonnet-5
-
-# VT-50 self_evaluate MCP tool — Opus-backed quality gate. The model
-# pin is read by orchestrator.agent.tools.self_evaluate._resolve_self_evaluate_model.
-# Production MUST stay Opus per the LLM-backed rationale (false-negative
-# blast radius); demoting to Sonnet/Haiku is Type 2 governance and
-# requires a measured failure-rate study.
-self_evaluate:
-  production: claude-opus-4-7
-  test: claude-haiku-4-5
-
-# VT-146 owner_input_classifier — Haiku in BOTH slots. Structured
-# extraction (message text -> intent/segment/occasion) is deterministic
-# classification work, not open-ended reasoning, so the per-slot
-# production/test split collapses to a single model. Resolver:
-# orchestrator.owner_inputs.writer._resolve_classifier_model.
-owner_input_classifier:
-  production: claude-haiku-4-5
-  test: claude-haiku-4-5
-
-# VT-52 vision_extraction — shared Vision-LLM primitive (VT-6.1). Production =
-# Sonnet 4.6 (the VT-52 row's explicit pin — a specific override of the CL-248
-# Opus default; Opus is overkill for OCR-style extraction, Sonnet is the vision
-# $/quality sweet-spot). Canary/iteration = Haiku 4.5 (CL-274 two-mode + CL-248
-# cheap dev runs). Resolver: vision_extraction._resolve_vision_model.
-# VT-596: production 4.6 → 5 (same tier, successor model — Fazal's general upgrade).
-# Behavioral note: dev runs the Haiku test slot, so the Sonnet-5 vision behavior is
-# first exercised at the next Fazal-authorized prod promotion.
-vision_extraction:
-  production: claude-sonnet-5
-  test: claude-haiku-4-5
-
-# VT-63 owner_typed_extraction — Method 9 owner-typed NL entries (WhatsApp).
-# Haiku in BOTH slots: extracting {name, phone, amount, date} from a short owner
-# message is structured extraction, not open-ended reasoning (same posture as
-# owner_input_classifier). Resolver: methods.owner_typed._resolve_owner_typed_model.
-owner_typed_extraction:
-  production: claude-haiku-4-5
-  test: claude-haiku-4-5
+# DO NOT re-add an LLM slot here. Point the env var instead — the CI gate
+# ``scripts/gate_no_model_literals.py`` fails the build on a new one.
 
 # VT-59 voice_transcription — Sarvam Indic ASR for cash-book voice notes. NOT a
 # Claude model: this is Sarvam's STT model id (India residency, DPDP-favorable,
@@ -81,40 +31,3 @@ owner_typed_extraction:
 voice_transcription:
   production: saarika:v2.5
   test: saarika:v2.5
-
-# VT-59 cash_book_merge — Sonnet multimodal reconcile of photo entries vs voice
-# narration (the both-inputs path). Sonnet 4.6 (vision $/quality sweet-spot, same
-# as vision_extraction); Haiku canary. Resolver: methods.cash_book._resolve_merge_model.
-# VT-596: production 4.6 → 5 (same rationale + caveat as vision_extraction above).
-cash_book_merge:
-  production: claude-sonnet-5
-  test: claude-haiku-4-5
-
-# VT-61 zomato_theme_extraction — cluster IDENTITY-STRIPPED public review text into
-# ABSTRACT theme labels (e.g. "slow delivery", "great biryani") — NEVER verbatim
-# quotes. Haiku both slots (theme clustering = classification, not reasoning).
-# Resolver: methods.apify_food._resolve_theme_model. Gated on owner_inputs (CL-390).
-zomato_theme_extraction:
-  production: claude-haiku-4-5
-  test: claude-haiku-4-5
-
-# VT-267 PR-B method_selector — ranks which record-keeping method to suggest first
-# to an owner during onboarding (paper_book/contacts/upi/kot_pos/cash_book/owner_typed;
-# scrape methods gbp/swiggy/zomato EXCLUDED). Haiku BOTH slots: picking a method from a
-# fixed candidate set given tenant context is classification, not open-ended reasoning
-# (same posture as owner_input_classifier / owner_typed_extraction). Resolver:
-# orchestrator.first_data_step.method_selector._resolve_method_selector_model.
-method_selector:
-  production: claude-haiku-4-5
-  test: claude-haiku-4-5
-
-# VT-368 business_plan — Gap-4 spine generator (proactive business summary + 6-month
-# roadmap, grounded on the frozen fact bundle). Production = Sonnet 4.6: grounded
-# bilingual long-form generation with strict per-sentence citation discipline — above
-# Haiku's reliability band, below the Opus bar (the output is citation-validated and
-# degrade-templated, so the false-negative blast radius is bounded). Test = Haiku 4.5
-# (cheap canary/dev runs). Resolver: orchestrator.business_plan.generator._resolve_plan_model.
-# VT-596: production 4.6 → 5 (same rationale + caveat as vision_extraction above).
-business_plan:
-  production: claude-sonnet-5
-  test: claude-haiku-4-5
