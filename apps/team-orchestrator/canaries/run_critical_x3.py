@@ -406,12 +406,24 @@ def completed_scenarios(report_path: str, current_version: str | None) -> tuple[
     return reusable, skipped
 
 
+# The step deadline MUST stay above the product's own maximum in-turn wait, or the harness measures
+# its own deadline instead of the system. ``runner._D1_INTURN_WAIT_MAX_POLLS × _D1_INTURN_WAIT_POLL_S``
+# is ~96s: when a turn starts an async manager_task, the sync run deliberately waits that long for the
+# task's real reply to land IN-TURN (T9 inc-3 raised it from 15s precisely so a fast task answers in
+# ONE beat instead of "I'm on it" + a delayed reply). A 90s deadline sits UNDER that floor, so any turn
+# whose task does not answer quickly is recorded TIMEOUT by construction — which is exactly how
+# sr_consequential_bulk_send_requires_approval read as a defect: step 1 always "timed out", while the
+# same turn driven in isolation at a longer window produced a campaign draft + approval request in one
+# beat, with zero customer messages sent. 180s = the 96s wait + the turn's own work + headroom.
+_DEFAULT_STEP_TIMEOUT_S = 180.0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="run_critical_x3", description=__doc__)
     p.add_argument("--scenarios-dir", default=str(_CANARIES / "scenarios"))
     p.add_argument("--only", default=None, help="run only the named critical scenario (debug)")
     p.add_argument("--ingress-url", default=None, help="deployed dev orchestrator base URL")
-    p.add_argument("--timeout", type=float, default=90.0)
+    p.add_argument("--timeout", type=float, default=_DEFAULT_STEP_TIMEOUT_S)
     p.add_argument(
         "--keep-tenants", action="store_true",
         help="skip teardown (debug — inspect the synthetic tenants after the run)",

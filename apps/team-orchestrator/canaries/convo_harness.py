@@ -2154,14 +2154,14 @@ def build_parser() -> argparse.ArgumentParser:
     se.add_argument("tenant_id")
     se.add_argument("message")
     se.add_argument("--ingress-url", default=None, help="deployed dev orchestrator base URL")
-    se.add_argument("--timeout", type=float, default=90.0, help="per-turn run-completion timeout (s)")
+    se.add_argument("--timeout", type=float, default=180.0, help="per-turn run-completion timeout (s) — must exceed runner._D1_INTURN_WAIT (~96s) or a slow-task turn reads as TIMEOUT by construction")
     se.set_defaults(func=cmd_send)
 
     sc = sub.add_parser("script", help="run an ordered scenario file with per-step assertions")
     sc.add_argument("tenant_id")
     sc.add_argument("file")
     sc.add_argument("--ingress-url", default=None, help="deployed dev orchestrator base URL")
-    sc.add_argument("--timeout", type=float, default=90.0, help="per-turn run-completion timeout (s)")
+    sc.add_argument("--timeout", type=float, default=180.0, help="per-turn run-completion timeout (s) — must exceed runner._D1_INTURN_WAIT (~96s) or a slow-task turn reads as TIMEOUT by construction")
     sc.add_argument(
         "--json-report", default=None, metavar="PATH",
         help="VT-598: append this scenario's machine-readable transcript bundle (FULL multi-line "
