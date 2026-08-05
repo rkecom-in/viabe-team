@@ -65,13 +65,30 @@ CREATE POLICY knowledge_sources_select ON public.knowledge_sources
 
 -- The corpus is not a PostgREST resource. Revoke the default Supabase grants so it cannot be read
 -- or mutated over the public API even if a policy is later widened by accident.
-REVOKE ALL ON public.knowledge_cards              FROM anon, authenticated;
-REVOKE ALL ON public.knowledge_card_embeddings    FROM anon, authenticated;
-REVOKE ALL ON public.knowledge_card_sources       FROM anon, authenticated;
-REVOKE ALL ON public.knowledge_corpus_members     FROM anon, authenticated;
-REVOKE ALL ON public.knowledge_corpus_versions    FROM anon, authenticated;
-REVOKE ALL ON public.knowledge_evaluations        FROM anon, authenticated;
-REVOKE ALL ON public.knowledge_lifecycle_events   FROM anon, authenticated;
-REVOKE ALL ON public.knowledge_sources            FROM anon, authenticated;
+--
+-- Guarded on role existence: `anon` and `authenticated` are SUPABASE-created roles. They exist on
+-- the Supabase dev/prod projects but NOT on a fresh local or CI cluster, where a bare
+-- `REVOKE ... FROM anon` aborts with `role "anon" does not exist` and takes every DB-backed test
+-- down with it (1666 errors on the pre-push run that caught this). The guard makes the statement a
+-- no-op exactly where the role is absent, and identical to the bare REVOKE where it is present.
+DO $$
+DECLARE
+    t text;
+    r text;
+BEGIN
+    FOREACH r IN ARRAY ARRAY['anon', 'authenticated'] LOOP
+        IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r) THEN
+            CONTINUE;
+        END IF;
+        FOREACH t IN ARRAY ARRAY[
+            'knowledge_cards', 'knowledge_card_embeddings', 'knowledge_card_sources',
+            'knowledge_corpus_members', 'knowledge_corpus_versions', 'knowledge_evaluations',
+            'knowledge_lifecycle_events', 'knowledge_sources'
+        ] LOOP
+            EXECUTE format('REVOKE ALL ON public.%I FROM %I', t, r);
+        END LOOP;
+    END LOOP;
+END
+$$;
 
 COMMIT;
