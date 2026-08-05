@@ -43,7 +43,25 @@
   variance disambiguated 3/3-clean on re-drive → VT-684 rostered for the class). Graduates the
   VT-681 promise seam + the SR/turn-brain cache restructure. Next re-gate: O4 flags-on (gate-2).
 
-## O2 · Money-path integrity — MET (one named hardening in flight)
+## O2 · Money-path integrity — MET, RE-PROVEN after an incident (VT-734)
+- **2026-08-06 incident + re-proof (the bar's own words: "can never perform OR CLAIM a money action
+  falsely" — the PERFORM half was violated, and it is the half that was re-proven).** On deployed
+  dev an owner sent the same campaign request twice while the turn was slow; the SECOND REQUEST —
+  sent **72 seconds BEFORE the campaign_send approval existed** — resolved it `approved`, and 19
+  customers were really messaged (mocked at the Twilio client only because the harness number is
+  bogus; 19 `campaign_messages` rows, `campaigns.status='sent'`). Two holes composed: the VT-633 D-A
+  arm-wait lets an inbound reach FORWARD to an approval armed after it, and `bhej` sits in
+  `_APPROVE_VERB`, so the request text itself classified as consent.
+  **NOT a fabrication:** I first reported "claimed a send with zero campaign_messages" as a third
+  defect and RETRACTED it — the rows exist; my query joined a column the send path never writes. The
+  manager told the truth, which makes this worse rather than better.
+  **Fixed to Fazal's ruling (CL-2026-08-06-repeated-request-is-never-approval), both halves:** an
+  ordering invariant at the single resolution choke point (the resolving inbound must be strictly
+  newer than `COALESCE(presented_at, requested_at)`; mig 190 records presentation at delivery; fails
+  CLOSED) and a content rule ahead of every classifier (a reply adding nothing to the original
+  request is a re-ask, never consent; "haan bhej do" still approves).
+  **Re-proof ×3 on deployed dev:** approval `pending`/no decision, campaign `proposed`, **0 messages
+  sent** — three runs of the exact breach shape, versus `approved`/`sent`/**19** before.
 - Bar: the Manager can never perform OR claim a money action falsely — DB is sole authority,
   stated values bind to DB, approvals never resolve into silence, corrections revise.
 - Now: proven in code/unit/DB asserts (CL-2026-07-16, VT-667/668/670). VT-671 wake-on-signal
@@ -169,7 +187,7 @@
 | In flight | Objective it serves |
 |---|---|
 | SR re-drive @150s (COMPLETE — 6/9 gates observed clean) | O0/O2 — send-gate floors, observed not assumed |
-| `sr_consequential_bulk_send_requires_approval` silent-turn defect | **O2** — the bulk always-confirm floor is still UNVERIFIED |
+| ~~`sr_consequential_bulk_send_requires_approval` silent-turn defect~~ RESOLVED into three causes | **O2** — the bulk always-confirm floor is **VERIFIED**: draft + explicit approval ask + 0 sent, observed repeatedly |
 | No-O8 baseline (next dev-queue stage) | **O11** — and it unblocks D3 + D7 |
 | VT-725 flip/narrowing canary | **O8** — serving, shadow |
 | VT-727 full ingestion (Codex, after canary) | **O8** — the moat's corpus |
