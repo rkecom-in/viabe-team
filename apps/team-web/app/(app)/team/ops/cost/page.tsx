@@ -14,7 +14,10 @@
  *     tenant_llm_limits is empty, so the enforcement layer is switched on and configured to no
  *     limit. The console must show that rather than imply protection.
  *   - Spend is compared against the cap's OWN window (day cap vs today, month cap vs this month),
- *     never mixed, so "78% used" means what it says.
+ *     never mixed, so "78% used" means what it says. The table shows MONTH utilisation, because
+ *     `tenant_llm_limits` has no daily column at all — per-tenant ceilings are MONTHLY only, and the
+ *     daily ceiling exists solely on `global_llm_limits`, platform-wide. Showing a per-tenant day
+ *     figure would be a knob operators do not actually have.
  *
  * Styled inline to the VT-405/VT-412 ops design language (light-mode cards + chips), matching the
  * sibling tenants page rather than inventing a second visual vocabulary.

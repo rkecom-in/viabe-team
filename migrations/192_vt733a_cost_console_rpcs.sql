@@ -105,6 +105,12 @@ STABLE
 SECURITY INVOKER
 SET search_path = public
 AS $$
+    -- SCHEMA FACT, verified rather than assumed (it broke a clean apply first):
+    -- `tenant_llm_limits` has NO max_cost_usd_day. Per-tenant ceilings are MONTHLY only
+    -- (max_cost_usd_month + max_tokens_in/out_month); the DAILY ceiling exists ONLY on
+    -- `global_llm_limits`, platform-wide. So the day figure below is the global cap for every
+    -- tenant — there is no per-tenant daily override to coalesce onto, and pretending otherwise
+    -- would show operators a knob that does not exist.
     WITH g AS (SELECT * FROM global_llm_limits LIMIT 1),
     spend AS (
         SELECT e.tenant_id,
@@ -120,22 +126,21 @@ AS $$
            t.business_name,
            coalesce(s.today_usd, 0)::numeric  AS spend_today_usd,
            coalesce(s.month_usd, 0)::numeric  AS spend_month_usd,
-           coalesce(l.max_cost_usd_day,   (SELECT max_cost_usd_day   FROM g)) AS max_cost_usd_day,
+           (SELECT max_cost_usd_day FROM g)                          AS max_cost_usd_day,
            coalesce(l.max_cost_usd_month, (SELECT max_cost_usd_month FROM g)) AS max_cost_usd_month,
            coalesce(l.soft_pct, (SELECT soft_pct FROM g))            AS soft_pct,
            coalesce((SELECT enabled FROM g), false)                  AS caps_enabled,
            CASE
-               WHEN coalesce(l.max_cost_usd_day,   (SELECT max_cost_usd_day   FROM g)) IS NULL
+               WHEN (SELECT max_cost_usd_day FROM g) IS NULL
                 AND coalesce(l.max_cost_usd_month, (SELECT max_cost_usd_month FROM g)) IS NULL
                    THEN 'none'
-               WHEN coalesce(s.today_usd, 0) >= coalesce(l.max_cost_usd_day,
-                        (SELECT max_cost_usd_day FROM g))
+               WHEN coalesce(s.today_usd, 0) >= (SELECT max_cost_usd_day FROM g)
                  OR coalesce(s.month_usd, 0) >= coalesce(l.max_cost_usd_month,
                         (SELECT max_cost_usd_month FROM g))
                    THEN 'hard'
-               WHEN coalesce(s.today_usd, 0) >= coalesce(l.max_cost_usd_day,
-                        (SELECT max_cost_usd_day FROM g)) * coalesce(l.soft_pct,
-                        (SELECT soft_pct FROM g), 80) / 100.0
+               WHEN coalesce(s.month_usd, 0) >= coalesce(l.max_cost_usd_month,
+                        (SELECT max_cost_usd_month FROM g))
+                        * coalesce(l.soft_pct, (SELECT soft_pct FROM g), 80) / 100.0
                    THEN 'soft'
                ELSE 'ok'
            END AS cap_state
