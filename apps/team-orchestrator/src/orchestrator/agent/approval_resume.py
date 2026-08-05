@@ -32,6 +32,7 @@ never the owner phone. owner_message_sid (a Twilio SID) is allowed.
 from __future__ import annotations
 
 import logging
+import re
 import unicodedata
 from typing import Any
 from uuid import UUID
@@ -112,12 +113,51 @@ def find_open_approval_for_tenant(
     return PendingApprovalsWrapper().find_open_for_tenant(tenant_id, conn=conn)
 
 
+def is_repeat_of_request(reply: str, request: str | None) -> bool:
+    """VT-734 CONTENT RULE — is this reply substantively the owner's ORIGINAL REQUEST again?
+
+    Fazal, 2026-08-06: *"a repeated request is NEVER approval … a re-ask is 'you're being slow,'
+    never consent."* The ordering invariant already refuses a message sent before the ask; this
+    catches the other half — the owner re-sending "bhej do abhi" AFTER the ask, which the
+    deterministic classifier reads as an approval because ``bhej`` is in ``_APPROVE_VERB``. The
+    send verb is how an owner ASKS and how they CONSENT; only context separates them, and the
+    context is "does this repeat what they already said."
+
+    Deterministic and deliberately narrow: normalized token-set containment, not similarity
+    scoring. A reply whose meaningful tokens are a subset of (or equal to) the original request's,
+    with no NEW decision content, is a repeat. "haan bhej do" after a request for "sabko Diwali
+    offer bhej do" introduces "haan" — an affirmation the request did not contain — so it is NOT a
+    repeat and still approves. A verbatim re-send introduces nothing and is refused.
+    """
+    if not reply or not request:
+        return False
+    def _tokens(s: str) -> set[str]:
+        norm = unicodedata.normalize("NFC", s.strip().casefold()).replace("'", "").replace("’", "")
+        return {t for t in re.split(r"[\s,.!?;:।/\\-]+", norm) if t}
+
+    reply_tokens = _tokens(reply)
+    if not reply_tokens:
+        return False
+    novel = reply_tokens - _tokens(request)
+    # Tokens that carry DECISION meaning even when the rest is a repeat. A reply adding any of them
+    # is answering, not re-asking.
+    from orchestrator.owner_inputs.approval_reply import (
+        _NEGATION,
+        _REJECT_KW,
+        _STRONG_APPROVE,
+    )
+
+    decisive = novel & (_STRONG_APPROVE | _REJECT_KW | _NEGATION)
+    return not decisive
+
+
 def resolve_decision_from_reply(
     text: str,
     *,
     tenant_id: UUID | str,
     approval_type: str | None = None,
     classify_fn: Any | None = None,
+    original_request: str | None = None,
 ) -> str | None:
     """Resolve an owner approval reply to a decision verb.
 
@@ -146,6 +186,21 @@ def resolve_decision_from_reply(
     # collides with it. Free text — including sentences that merely CONTAIN a title — falls
     # through to the unchanged paths below.
     from orchestrator.owner_inputs.approval_reply import classify_button_decision
+
+    # VT-734 CONTENT RULE — checked FIRST, ahead of every classifier and every mode (deterministic,
+    # shadow, enforce). A repeated request is not a decision in ANY mode, so this cannot be a branch
+    # inside one of them. Scoped to customer-SEND approvals (the money surface the ruling names);
+    # refusing leaves the gate open, which costs the impatient owner one extra confirmation tap —
+    # the cost Fazal accepted explicitly rather than risk an unconsented send.
+    if approval_type in _CUSTOMER_SEND_APPROVAL_TYPES and is_repeat_of_request(
+        text, original_request
+    ):
+        logger.warning(
+            "VT-734: refusing to read a REPEATED REQUEST as approval (tenant=%s type=%s) — "
+            "gate stays open, owner is re-asked",
+            tenant_id, approval_type,
+        )
+        return None
 
     button = classify_button_decision(text)
     if button is not None:
@@ -309,6 +364,52 @@ def _audit_owner_skip_review(tenant_id: UUID | str, approval_type: str | None) -
         )
 
 
+class StaleApprovalDecisionError(RuntimeError):
+    """VT-734 — an inbound that PREDATES the approval ask tried to resolve it.
+
+    Raised by the resolution seam, never swallowed there: the caller decides whether to leave the
+    gate paused (the owner-reply path) or to re-raise. The name says the invariant, so a future
+    reader of a log line knows a message reached BACKWARDS rather than a classifier misfiring."""
+
+
+def _assert_decision_is_newer_than_the_ask(
+    conn: Any,
+    tenant_id: UUID | str,
+    approval_id: UUID | str,
+    owner_message_at: Any,
+) -> None:
+    """VT-734 ORDERING INVARIANT — a message that predates the ask can never be its decision.
+
+    Fazal, 2026-08-06 (CL-2026-08-06-repeated-request-is-never-approval): resolution requires the
+    resolving inbound to land strictly AFTER the approval was armed AND presented.
+
+    What this closes, observed on deployed dev: an owner sent the same campaign request twice while
+    the turn was slow; the second REQUEST (23:30:02) resolved a campaign_send approval created at
+    23:31:14 — 72 seconds later — and 19 customers were reported as messaged. The VT-633 D-A arm-wait
+    is what let the message reach forward: it deliberately holds a "clear owner decision" that lands
+    while the loop is still arming. That is right for a decision and catastrophic for a request, and
+    nothing distinguished them, because nothing compared the timestamps.
+
+    Fails CLOSED: an unknown boundary (row gone) or an unknown message time refuses the resolution.
+    The cost of a false refusal is one extra confirmation tap, which Fazal accepted explicitly; the
+    cost of a false acceptance is real customer messages the owner never approved.
+    """
+    if owner_message_at is None:
+        return  # system-initiated resolution (timeout sweep / supersede) — not an owner decision
+    boundary = PendingApprovalsWrapper().presented_or_armed_at(tenant_id, approval_id, conn=conn)
+    if boundary is None:
+        raise StaleApprovalDecisionError(
+            f"approval {approval_id} has no arm/presentation instant — cannot verify the inbound "
+            f"came after the ask; refusing to resolve (fail-closed)"
+        )
+    if owner_message_at <= boundary:
+        raise StaleApprovalDecisionError(
+            f"inbound at {owner_message_at.isoformat()} PREDATES approval {approval_id} "
+            f"(asked at {boundary.isoformat()}) — a message sent before the owner saw the plan "
+            f"cannot be consent to it"
+        )
+
+
 def mark_approval_resolved(
     conn: Any,
     tenant_id: UUID | str,
@@ -317,6 +418,7 @@ def mark_approval_resolved(
     *,
     owner_message_sid: str | None = None,
     owner_feedback: str | None = None,
+    owner_message_at: Any = None,
 ) -> bool:
     """Resolve (or, for a defer, EXTEND) the pending_approvals row. Returns True if the row was
     RESOLVED (the caller resumes the run), False if it was EXTENDED on a defer (the run STAYS
@@ -335,8 +437,15 @@ def mark_approval_resolved(
     ``agent_draft_batches`` row in the SAME transaction/connection (approved → 'approved';
     needs_changes → 'edit_requested' + owner_feedback + ONE-regeneration cap; rejected →
     'rejected'; timeout / exhausted-defer → 'cancelled'). ``owner_feedback`` is the raw owner
-    reply body — persisted on the RLS-protected batch row only, NEVER logged (CL-390)."""
+    reply body — persisted on the RLS-protected batch row only, NEVER logged (CL-390).
+
+    VT-734: ``owner_message_at`` is the resolving inbound's timestamp. Passing it enforces the
+    ordering invariant HERE — at the single choke point every owner-decision path already funnels
+    through — rather than as a patch on one approval_type. ``None`` means "not an owner decision"
+    (the timeout sweep, a supersede), which skips the check by design."""
     from orchestrator.observability.tm_audit import emit_tm_audit
+
+    _assert_decision_is_newer_than_the_ask(conn, tenant_id, approval_id, owner_message_at)
     if decision == "defer":
         new_count = PendingApprovalsWrapper().extend_on_defer(
             tenant_id, approval_id, timeout_hours=48, conn=conn

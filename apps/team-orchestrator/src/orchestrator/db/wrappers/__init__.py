@@ -1250,17 +1250,42 @@ class PendingApprovalsWrapper(TenantScopedTable):
         ``timeout_at = now() + timeout_hours`` on a still-open row whose clock has not started
         (``timeout_at IS NULL`` — mig 179; the arm inserts NULL). Idempotent: a redelivery can
         never reset an already-running clock, and a resolved row is never touched. Tenant-
-        predicated by-PK. Returns rows updated (0 = clock already running / row gone)."""
+        predicated by-PK. Returns rows updated (0 = clock already running / row gone).
+
+        VT-734 (mig 190): the SAME write records ``presented_at = now()`` — the instant the ask
+        actually reached the owner. Deliberately the same statement rather than a second call, so
+        the presentation instant and the decision clock can never disagree; the resolution invariant
+        reads it to refuse any inbound that predates the ask."""
         tid = self._uuid(tenant_id)
         with self._conn(tid, conn) as c:
             cur = c.execute(
                 "UPDATE pending_approvals "
-                "SET timeout_at = now() + make_interval(hours => %s) "
+                "SET timeout_at = now() + make_interval(hours => %s), "
+                "    presented_at = COALESCE(presented_at, now()) "
                 "WHERE tenant_id = %s AND id = %s "
                 "  AND resolved_at IS NULL AND timeout_at IS NULL",
                 (int(timeout_hours), str(tid), str(approval_id)),
             )
             return cur.rowcount if cur.rowcount is not None else 0
+
+    def presented_or_armed_at(
+        self, tenant_id: UUID | str, approval_id: UUID | str, *, conn: Any = None
+    ) -> Any:
+        """VT-734 — the instant an inbound must be NEWER than to count as this approval's decision.
+
+        ``presented_at`` when the ask was delivered (mig 190), else ``requested_at`` (the arm) for
+        rows armed before that column existed. Returns None when the row is gone — the caller treats
+        an unknown boundary as "cannot verify", which fails CLOSED (no resolution)."""
+        tid = self._uuid(tenant_id)
+        with self._conn(tid, conn) as c:
+            row = c.execute(
+                "SELECT COALESCE(presented_at, requested_at) AS boundary "
+                "FROM pending_approvals WHERE tenant_id = %s AND id = %s",
+                (str(tid), str(approval_id)),
+            ).fetchone()
+        if row is None:
+            return None
+        return row["boundary"] if isinstance(row, dict) else row[0]
 
     def count_recent_campaign_requests(
         self, tenant_id: UUID | str, *, days: int = 7, conn: Any = None

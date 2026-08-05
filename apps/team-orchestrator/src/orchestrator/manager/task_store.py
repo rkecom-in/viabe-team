@@ -75,6 +75,33 @@ def _uuid(row: Any) -> UUID:
 
 
 # ── Tasks ────────────────────────────────────────────────────────────────────
+def latest_objective_text(tenant_id: UUID | str) -> str | None:
+    """VT-734 — the most recent objective text for a tenant, i.e. what the owner ASKED for.
+
+    Used by the approval path to recognise a re-sent request: the objective is stored verbatim from
+    the owner's own message, so comparing an inbound against it is comparing the reply to the ask.
+    Read-only, tenant-scoped (RLS), and best-effort — returns None rather than raising, because this
+    is an advisory input to a gate whose load-bearing half is the ordering invariant.
+    """
+    try:
+        with tenant_connection(tenant_id) as conn:
+            row = conn.execute(
+                "SELECT objective FROM manager_tasks WHERE tenant_id = %s "
+                "ORDER BY created_at DESC LIMIT 1",
+                (str(tenant_id),),
+            ).fetchone()
+    except Exception:  # noqa: BLE001 — advisory read; never a gate on the owner's decision
+        logger.warning("latest_objective_text read failed tenant=%s", tenant_id, exc_info=True)
+        return None
+    if row is None:
+        return None
+    doc = row["objective"] if isinstance(row, dict) else row[0]
+    if isinstance(doc, dict):
+        text = doc.get("objective")
+        return str(text) if text else None
+    return str(doc) if doc else None
+
+
 def create_task(
     tenant_id: UUID | str,
     objective: dict[str, Any],

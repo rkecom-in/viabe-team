@@ -882,6 +882,43 @@ def record_inbound_message_sid(tenant_id: str, message_sid: str) -> bool:
         return cur.rowcount == 1
 
 
+def _inbound_received_at(conn: Any, tenant_id: str, message_sid: str | None) -> Any:
+    """VT-734 — when THIS inbound actually reached us, for the approval ordering invariant.
+
+    Reads the durable ``twilio_inbound_events`` receipt rather than trusting wall-clock at
+    resolution time: the resolving turn can run a minute or more after the message arrived (the D1
+    in-turn wait), and it is exactly that gap the invariant exists to measure. Returns None when the
+    sid is absent or unknown — the seam then fails CLOSED and refuses to resolve, which is the
+    money-safe direction.
+    """
+    if not message_sid:
+        return None
+    try:
+        row = conn.execute(
+            "SELECT received_at FROM twilio_inbound_events "
+            "WHERE tenant_id = %s AND message_sid = %s",
+            (str(tenant_id), str(message_sid)),
+        ).fetchone()
+    except Exception:  # noqa: BLE001 — an unreadable receipt must not crash the turn
+        logger.warning("VT-734: inbound receipt read failed for sid=%s", message_sid, exc_info=True)
+        return None
+    if row is None:
+        return None
+    return row["received_at"] if isinstance(row, dict) else row[0]
+
+
+def _approval_original_request(tenant_id: str, approval: dict[str, Any]) -> str | None:
+    """VT-734 — the owner text that PRODUCED this approval, so a verbatim re-send of it is not read
+    as consent to it. Best-effort by design: the ordering invariant is the load-bearing half, and a
+    missing objective must never block a legitimate decision."""
+    try:
+        from orchestrator.manager import task_store
+
+        return task_store.latest_objective_text(tenant_id)
+    except Exception:  # noqa: BLE001 — advisory input only
+        return None
+
+
 @DBOS.step()
 def try_resume_pending_approval(tenant_id: str, body: str, message_sid: str | None) -> str | None:
     """VT-47 — if the tenant has a PAUSED run awaiting owner approval, treat
@@ -916,6 +953,7 @@ def try_resume_pending_approval(tenant_id: str, body: str, message_sid: str | No
         return None
 
     from orchestrator.agent.approval_resume import (
+        StaleApprovalDecisionError,
         find_open_approval_for_tenant,
         mark_approval_resolved,
         resolve_decision_from_reply,
@@ -927,8 +965,14 @@ def try_resume_pending_approval(tenant_id: str, body: str, message_sid: str | No
     if approval is None:
         return None
 
+    # VT-734: the ORIGINAL REQUEST that produced this approval, so a verbatim re-send of it can
+    # never be read as consent to it (CL-2026-08-06-repeated-request-is-never-approval). Fail-soft:
+    # if it cannot be read the content rule simply does not fire — the ORDERING invariant at the
+    # resolution seam is the load-bearing half and does not depend on this.
+    _original_request = _approval_original_request(tenant_id, approval)
     decision = resolve_decision_from_reply(
         body, tenant_id=tenant_id, approval_type=approval.get("approval_type"),
+        original_request=_original_request,
     )
     if decision is None:
         # Unclear reply — leave the gate paused (Pillar 7: no guessing). For a customer-SEND
@@ -947,10 +991,22 @@ def try_resume_pending_approval(tenant_id: str, body: str, message_sid: str | No
         # it is persisted, never logged). The batch-state application happens
         # INSIDE mark_approval_resolved (the single resolution choke point, shared
         # with the timeout sweep), atomic with this transaction.
-        resolved = mark_approval_resolved(
-            conn, tenant_id, approval["id"], decision,
-            owner_message_sid=message_sid, owner_feedback=body,
-        )
+        # VT-734: hand the seam THIS inbound's timestamp so the ordering invariant can refuse a
+        # message that predates the ask. ``now()`` is correct here — the row is written as this
+        # webhook run processes the inbound, and the breach case is a message that predates the
+        # approval by MINUTES, not milliseconds.
+        try:
+            resolved = mark_approval_resolved(
+                conn, tenant_id, approval["id"], decision,
+                owner_message_sid=message_sid, owner_feedback=body,
+                owner_message_at=_inbound_received_at(conn, tenant_id, message_sid),
+            )
+        except StaleApprovalDecisionError as exc:
+            # The gate STAYS OPEN and the message falls through to normal dispatch. This is the
+            # money-safe direction: the owner is re-asked rather than having a send authorised by a
+            # message they sent before seeing the plan.
+            logger.warning("VT-734 stale approval decision refused (tenant=%s): %s", tenant_id, exc)
+            return None
         # VT-334: a 'defer' that only EXTENDS the window returns resolved=False — the run stays
         # paused (no L2 emit, no resume). The L2 + resume happen only on a real resolution
         # (incl. an exhausted defer, which resolves as a rejection).
