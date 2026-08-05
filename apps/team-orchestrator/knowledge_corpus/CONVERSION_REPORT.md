@@ -5,7 +5,7 @@ Generated deterministically from `executional_scenarios.jsonl` on 2026-07-27.
 - Input cards: **118**
 - Unique source-governance records: **104**
 - Rights statuses: `{'live_link_only': 5, 'permission_granted': 3, 'unknown': 96}`
-- Card statuses: `{'candidate': 103, 'research_only': 15}`
+- Card statuses: `{'candidate': 100, 'research_only': 18}`
 - Embedding states: `{'pending': 118}`
 - Expression-originality evidence: `{'attested': 13, 'checked': 105}`
 - Originality attestations: `{'corpus-author:vt710-live-link-originality': 5, 'corpus-author:vt710-source-snapshot-unavailable': 1, 'rkecom-source-owner:vt710-original-synthesis': 7}`

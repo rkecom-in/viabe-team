@@ -1,0 +1,421 @@
+{
+  "conclusion": "no_cross_source_retellings_found",
+  "corpus_artifact_digest": "4dcbd168887562112f500cd3921ea30709d939319396157facea24006ca8f04f",
+  "pair_reviews": [
+    {
+      "left_legacy_id": "bk001-gst-credit-note-notice-evidence-pack",
+      "rationale_code": "different_mechanism_or_evidence_target",
+      "right_legacy_id": "bk004-output-gst-paid-customer-default",
+      "verdict": "distinct"
+    },
+    {
+      "left_legacy_id": "bk001-gst-credit-note-notice-evidence-pack",
+      "rationale_code": "different_mechanism_or_evidence_target",
+      "right_legacy_id": "bk006-msefc-notice-response-playbook",
+      "verdict": "distinct"
+    },
+    {
+      "left_legacy_id": "bk002-gstr2b-itc-late-supplier-cashflow",
+      "rationale_code": "different_mechanism_or_evidence_target",
+      "right_legacy_id": "bk005-msme-delayed-payment-interest-and-relationship-pressure",
+      "verdict": "distinct"
+    },
+    {
+      "left_legacy_id": "bk004-output-gst-paid-customer-default",
+      "rationale_code": "different_mechanism_or_evidence_target",
+      "right_legacy_id": "bk005-msme-delayed-payment-interest-and-relationship-pressure",
+      "verdict": "distinct"
+    },
+    {
+      "left_legacy_id": "bk005-msme-delayed-payment-interest-and-relationship-pressure",
+      "rationale_code": "different_mechanism_or_evidence_target",
+      "right_legacy_id": "bk006-msefc-notice-response-playbook",
+      "verdict": "distinct"
+    },
+    {
+      "left_legacy_id": "bk010-dpdp-readiness-for-smb-digital-operations",
+      "rationale_code": "different_mechanism_or_evidence_target",
+      "right_legacy_id": "bk011-whatsapp-business-policy-send-discipline",
+      "verdict": "distinct"
+    },
+    {
+      "left_legacy_id": "bk011-whatsapp-business-policy-send-discipline",
+      "rationale_code": "different_mechanism_or_evidence_target",
+      "right_legacy_id": "bk012-google-business-profile-representation-discipline",
+      "verdict": "distinct"
+    },
+    {
+      "left_legacy_id": "bk013-first-customers-prospect-list-referral-loop",
+      "rationale_code": "different_mechanism_or_evidence_target",
+      "right_legacy_id": "bk024-first-ten-customers-founder-led-dream-list",
+      "verdict": "distinct"
+    },
+    {
+      "left_legacy_id": "bk013-first-customers-prospect-list-referral-loop",
+      "rationale_code": "different_mechanism_or_evidence_target",
+      "right_legacy_id": "bk030-digital-physical-hybrid-marketing-loop",
+      "verdict": "distinct"
+    },
+    {
+      "left_legacy_id": "bk014-marketing-plan-roi-and-operations-loop",
+      "rationale_code": "different_mechanism_or_evidence_target",
+      "right_legacy_id": "bk016-local-marketing-flywheel-listings-reviews-community",
+      "verdict": "distinct"
+    },
+    {
+      "left_legacy_id": "bk014-marketing-plan-roi-and-operations-loop",
+      "rationale_code": "different_mechanism_or_evidence_target",
+      "right_legacy_id": "bk021-sales-method-selector-and-innovation-matrix",
+      "verdict": "distinct"
+    },
+    {
+      "left_legacy_id": "bk014-marketing-plan-roi-and-operations-loop",
+      "rationale_code": "different_mechanism_or_evidence_target",
+      "right_legacy_id": "bk029-campaign-success-operating-system",
+      "verdict": "distinct"
+    },
+    {
+      "left_legacy_id": "bk014-marketing-plan-roi-and-operations-loop",
+      "rationale_code": "different_mechanism_or_evidence_target",
+      "right_legacy_id": "bk030-digital-physical-hybrid-marketing-loop",
+      "verdict": "distinct"
+    },
+    {
+      "left_legacy_id": "bk015-market-research-competitive-analysis-before-channel-choice",
+      "rationale_code": "different_mechanism_or_evidence_target",
+      "right_legacy_id": "bk020-community-listening-for-demand-discovery",
+      "verdict": "distinct"
+    },
+    {
+      "left_legacy_id": "bk015-market-research-competitive-analysis-before-channel-choice",
+      "rationale_code": "different_mechanism_or_evidence_target",
+      "right_legacy_id": "bk024-first-ten-customers-founder-led-dream-list",
+      "verdict": "distinct"
+    },
+    {
+      "left_legacy_id": "bk016-local-marketing-flywheel-listings-reviews-community",
+      "rationale_code": "different_mechanism_or_evidence_target",
+      "right_legacy_id": "bk030-digital-physical-hybrid-marketing-loop",
+      "verdict": "distinct"
+    },
+    {
+      "left_legacy_id": "bk016-local-marketing-flywheel-listings-reviews-community",
+      "rationale_code": "different_mechanism_or_evidence_target",
+      "right_legacy_id": "bk089-paid-digital-ads-amplify-readiness",
+      "verdict": "distinct"
+    },
+    {
+      "left_legacy_id": "bk020-community-listening-for-demand-discovery",
+      "rationale_code": "different_mechanism_or_evidence_target",
+      "right_legacy_id": "bk024-first-ten-customers-founder-led-dream-list",
+      "verdict": "distinct"
+    },
+    {
+      "left_legacy_id": "bk020-community-listening-for-demand-discovery",
+      "rationale_code": "different_mechanism_or_evidence_target",
+      "right_legacy_id": "bk027-niche-community-launch-works-when-you-belong",
+      "verdict": "distinct"
+    },
+    {
+      "left_legacy_id": "bk021-sales-method-selector-and-innovation-matrix",
+      "rationale_code": "different_mechanism_or_evidence_target",
+      "right_legacy_id": "bk029-campaign-success-operating-system",
+      "verdict": "distinct"
+    },
+    {
+      "left_legacy_id": "bk029-campaign-success-operating-system",
+      "rationale_code": "different_mechanism_or_evidence_target",
+      "right_legacy_id": "bk030-digital-physical-hybrid-marketing-loop",
+      "verdict": "distinct"
+    },
+    {
+      "left_legacy_id": "bk029-campaign-success-operating-system",
+      "rationale_code": "different_mechanism_or_evidence_target",
+      "right_legacy_id": "bk032-brand-building-memory-proof-and-promise",
+      "verdict": "distinct"
+    },
+    {
+      "left_legacy_id": "bk034-coo-role-strategy-to-execution-not-super-specialist",
+      "rationale_code": "different_mechanism_or_evidence_target",
+      "right_legacy_id": "bk035-decision-triage-impact-reversibility-uncertainty",
+      "verdict": "distinct"
+    },
+    {
+      "left_legacy_id": "bk034-coo-role-strategy-to-execution-not-super-specialist",
+      "rationale_code": "different_mechanism_or_evidence_target",
+      "right_legacy_id": "bk038-business-case-quality-before-approval",
+      "verdict": "distinct"
+    },
+    {
+      "left_legacy_id": "bk034-coo-role-strategy-to-execution-not-super-specialist",
+      "rationale_code": "different_mechanism_or_evidence_target",
+      "right_legacy_id": "bk041-operating-model-fit-before-transformation",
+      "verdict": "distinct"
+    },
+    {
+      "left_legacy_id": "bk034-coo-role-strategy-to-execution-not-super-specialist",
+      "rationale_code": "different_mechanism_or_evidence_target",
+      "right_legacy_id": "bk044-operating-cadence-metrics-and-leading-indicators",
+      "verdict": "distinct"
+    },
+    {
+      "left_legacy_id": "bk034-coo-role-strategy-to-execution-not-super-specialist",
+      "rationale_code": "different_mechanism_or_evidence_target",
+      "right_legacy_id": "bk045-business-benefit-tradeoff-guardrail",
+      "verdict": "distinct"
+    },
+    {
+      "left_legacy_id": "bk034-coo-role-strategy-to-execution-not-super-specialist",
+      "rationale_code": "different_mechanism_or_evidence_target",
+      "right_legacy_id": "bk046-specialist-arbitration-and-escalation",
+      "verdict": "distinct"
+    },
+    {
+      "left_legacy_id": "bk034-coo-role-strategy-to-execution-not-super-specialist",
+      "rationale_code": "different_mechanism_or_evidence_target",
+      "right_legacy_id": "bk048-change-adoption-risk-is-execution-risk",
+      "verdict": "distinct"
+    },
+    {
+      "left_legacy_id": "bk035-decision-triage-impact-reversibility-uncertainty",
+      "rationale_code": "different_mechanism_or_evidence_target",
+      "right_legacy_id": "bk036-context-matching-cynefin-decision-mode",
+      "verdict": "distinct"
+    },
+    {
+      "left_legacy_id": "bk035-decision-triage-impact-reversibility-uncertainty",
+      "rationale_code": "different_mechanism_or_evidence_target",
+      "right_legacy_id": "bk038-business-case-quality-before-approval",
+      "verdict": "distinct"
+    },
+    {
+      "left_legacy_id": "bk035-decision-triage-impact-reversibility-uncertainty",
+      "rationale_code": "different_mechanism_or_evidence_target",
+      "right_legacy_id": "bk046-specialist-arbitration-and-escalation",
+      "verdict": "distinct"
+    },
+    {
+      "left_legacy_id": "bk035-decision-triage-impact-reversibility-uncertainty",
+      "rationale_code": "different_mechanism_or_evidence_target",
+      "right_legacy_id": "bk054-high-velocity-reversible-decision-loop",
+      "verdict": "distinct"
+    },
+    {
+      "left_legacy_id": "bk035-decision-triage-impact-reversibility-uncertainty",
+      "rationale_code": "different_mechanism_or_evidence_target",
+      "right_legacy_id": "bk080-risk-bounded-online-experiment",
+      "verdict": "distinct"
+    },
+    {
+      "left_legacy_id": "bk037-decision-rights-one-d-prevents-drift",
+      "rationale_code": "different_mechanism_or_evidence_target",
+      "right_legacy_id": "bk068-independent-decision-process-and-implementation-owner",
+      "verdict": "distinct"
+    },
+    {
+      "left_legacy_id": "bk040-a3-problem-definition-before-solution",
+      "rationale_code": "different_mechanism_or_evidence_target",
+      "right_legacy_id": "bk041-operating-model-fit-before-transformation",
+      "verdict": "distinct"
+    },
+    {
+      "left_legacy_id": "bk040-a3-problem-definition-before-solution",
+      "rationale_code": "different_mechanism_or_evidence_target",
+      "right_legacy_id": "bk042-risk-based-authorization-before-sensitive-action",
+      "verdict": "distinct"
+    },
+    {
+      "left_legacy_id": "bk040-a3-problem-definition-before-solution",
+      "rationale_code": "different_mechanism_or_evidence_target",
+      "right_legacy_id": "bk048-change-adoption-risk-is-execution-risk",
+      "verdict": "distinct"
+    },
+    {
+      "left_legacy_id": "bk041-operating-model-fit-before-transformation",
+      "rationale_code": "different_mechanism_or_evidence_target",
+      "right_legacy_id": "bk042-risk-based-authorization-before-sensitive-action",
+      "verdict": "distinct"
+    },
+    {
+      "left_legacy_id": "bk041-operating-model-fit-before-transformation",
+      "rationale_code": "different_mechanism_or_evidence_target",
+      "right_legacy_id": "bk044-operating-cadence-metrics-and-leading-indicators",
+      "verdict": "distinct"
+    },
+    {
+      "left_legacy_id": "bk041-operating-model-fit-before-transformation",
+      "rationale_code": "different_mechanism_or_evidence_target",
+      "right_legacy_id": "bk048-change-adoption-risk-is-execution-risk",
+      "verdict": "distinct"
+    },
+    {
+      "left_legacy_id": "bk043-after-action-review-turn-decisions-into-learning",
+      "rationale_code": "different_mechanism_or_evidence_target",
+      "right_legacy_id": "bk061-lessons-must-change-the-operating-system",
+      "verdict": "distinct"
+    },
+    {
+      "left_legacy_id": "bk043-after-action-review-turn-decisions-into-learning",
+      "rationale_code": "different_mechanism_or_evidence_target",
+      "right_legacy_id": "bk067-decision-quality-versus-outcome-quality",
+      "verdict": "distinct"
+    },
+    {
+      "left_legacy_id": "bk044-operating-cadence-metrics-and-leading-indicators",
+      "rationale_code": "different_mechanism_or_evidence_target",
+      "right_legacy_id": "bk048-change-adoption-risk-is-execution-risk",
+      "verdict": "distinct"
+    },
+    {
+      "left_legacy_id": "bk044-operating-cadence-metrics-and-leading-indicators",
+      "rationale_code": "different_mechanism_or_evidence_target",
+      "right_legacy_id": "bk054-high-velocity-reversible-decision-loop",
+      "verdict": "distinct"
+    },
+    {
+      "left_legacy_id": "bk044-operating-cadence-metrics-and-leading-indicators",
+      "rationale_code": "different_mechanism_or_evidence_target",
+      "right_legacy_id": "bk066-resist-process-and-metric-proxies",
+      "verdict": "distinct"
+    },
+    {
+      "left_legacy_id": "bk044-operating-cadence-metrics-and-leading-indicators",
+      "rationale_code": "different_mechanism_or_evidence_target",
+      "right_legacy_id": "bk079-target-setting-with-metric-safety",
+      "verdict": "distinct"
+    },
+    {
+      "left_legacy_id": "bk047-kill-pause-or-continue-decision-discipline",
+      "rationale_code": "different_mechanism_or_evidence_target",
+      "right_legacy_id": "bk056-dynamic-resource-allocation-portfolio",
+      "verdict": "distinct"
+    },
+    {
+      "left_legacy_id": "bk054-high-velocity-reversible-decision-loop",
+      "rationale_code": "different_mechanism_or_evidence_target",
+      "right_legacy_id": "bk060-risk-triggers-and-precommitted-contingencies",
+      "verdict": "distinct"
+    },
+    {
+      "left_legacy_id": "bk056-dynamic-resource-allocation-portfolio",
+      "rationale_code": "different_mechanism_or_evidence_target",
+      "right_legacy_id": "bk084-manager-allocation-under-customer-constraints",
+      "verdict": "distinct"
+    },
+    {
+      "left_legacy_id": "bk063-incentives-risk-and-metric-gaming",
+      "rationale_code": "different_mechanism_or_evidence_target",
+      "right_legacy_id": "bk066-resist-process-and-metric-proxies",
+      "verdict": "distinct"
+    },
+    {
+      "left_legacy_id": "bk063-incentives-risk-and-metric-gaming",
+      "rationale_code": "different_mechanism_or_evidence_target",
+      "right_legacy_id": "bk079-target-setting-with-metric-safety",
+      "verdict": "distinct"
+    },
+    {
+      "left_legacy_id": "bk070-organizational-health-power-practices",
+      "rationale_code": "different_mechanism_or_evidence_target",
+      "right_legacy_id": "bk079-target-setting-with-metric-safety",
+      "verdict": "distinct"
+    },
+    {
+      "left_legacy_id": "bk073-integrated-commercial-excellence-system",
+      "rationale_code": "different_mechanism_or_evidence_target",
+      "right_legacy_id": "bk101-supplier-service-reliability-channel-demand",
+      "verdict": "distinct"
+    },
+    {
+      "left_legacy_id": "bk074-pricing-realization-governance",
+      "rationale_code": "different_mechanism_or_evidence_target",
+      "right_legacy_id": "bk119-wework-duration-mismatch-governance",
+      "verdict": "distinct"
+    },
+    {
+      "left_legacy_id": "bk076-core-adjacency-repeatable-growth",
+      "rationale_code": "different_mechanism_or_evidence_target",
+      "right_legacy_id": "bk114-dominos-product-truth-before-campaign",
+      "verdict": "distinct"
+    },
+    {
+      "left_legacy_id": "bk079-target-setting-with-metric-safety",
+      "rationale_code": "different_mechanism_or_evidence_target",
+      "right_legacy_id": "bk080-risk-bounded-online-experiment",
+      "verdict": "distinct"
+    },
+    {
+      "left_legacy_id": "bk080-risk-bounded-online-experiment",
+      "rationale_code": "different_mechanism_or_evidence_target",
+      "right_legacy_id": "bk095-bounded-learn-then-earn-pricing",
+      "verdict": "distinct"
+    },
+    {
+      "left_legacy_id": "bk080-risk-bounded-online-experiment",
+      "rationale_code": "different_mechanism_or_evidence_target",
+      "right_legacy_id": "bk098-short-term-surrogates-for-long-term-targeting",
+      "verdict": "distinct"
+    },
+    {
+      "left_legacy_id": "bk089-paid-digital-ads-amplify-readiness",
+      "rationale_code": "different_mechanism_or_evidence_target",
+      "right_legacy_id": "bk096-promotion-incrementality-experiment-library",
+      "verdict": "distinct"
+    },
+    {
+      "left_legacy_id": "bk091-tradeoff-transparency-for-customer-fit",
+      "rationale_code": "different_mechanism_or_evidence_target",
+      "right_legacy_id": "bk092-operational-transparency-as-service-proof",
+      "verdict": "distinct"
+    },
+    {
+      "left_legacy_id": "bk091-tradeoff-transparency-for-customer-fit",
+      "rationale_code": "different_mechanism_or_evidence_target",
+      "right_legacy_id": "bk097-search-friction-transparency-guardrail",
+      "verdict": "distinct"
+    },
+    {
+      "left_legacy_id": "bk092-operational-transparency-as-service-proof",
+      "rationale_code": "different_mechanism_or_evidence_target",
+      "right_legacy_id": "bk097-search-friction-transparency-guardrail",
+      "verdict": "distinct"
+    },
+    {
+      "left_legacy_id": "bk094-recipient-benefiting-referral-incentives",
+      "rationale_code": "different_mechanism_or_evidence_target",
+      "right_legacy_id": "bk111-zerodha-constraint-led-trust-growth",
+      "verdict": "distinct"
+    },
+    {
+      "left_legacy_id": "bk095-bounded-learn-then-earn-pricing",
+      "rationale_code": "different_mechanism_or_evidence_target",
+      "right_legacy_id": "bk096-promotion-incrementality-experiment-library",
+      "verdict": "distinct"
+    },
+    {
+      "left_legacy_id": "bk095-bounded-learn-then-earn-pricing",
+      "rationale_code": "different_mechanism_or_evidence_target",
+      "right_legacy_id": "bk116-adobe-cannibalize-with-transition-metrics",
+      "verdict": "distinct"
+    },
+    {
+      "left_legacy_id": "bk096-promotion-incrementality-experiment-library",
+      "rationale_code": "different_mechanism_or_evidence_target",
+      "right_legacy_id": "bk098-short-term-surrogates-for-long-term-targeting",
+      "verdict": "distinct"
+    },
+    {
+      "left_legacy_id": "bk110-buffer-hiring-ahead-of-verified-revenue",
+      "rationale_code": "different_mechanism_or_evidence_target",
+      "right_legacy_id": "bk113-good-glamm-integration-capacity",
+      "verdict": "distinct"
+    }
+  ],
+  "review_note": "All mechanically surfaced cross-source pairs were manually compared by decision mechanism and evidence target. Related topics remain distinct claims; none retells the same underlying study, case, or thread.",
+  "reviewed_at": "2026-08-05",
+  "reviewed_by": "codex",
+  "reviewed_record_count": 118,
+  "schema_version": 1,
+  "screening_jaccard": 0.14,
+  "screening_title_ratio": 0.56
+}

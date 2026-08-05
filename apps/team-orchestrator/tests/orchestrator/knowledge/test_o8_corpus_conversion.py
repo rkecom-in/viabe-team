@@ -89,6 +89,28 @@ def test_every_committed_candidate_card_validates() -> None:
         for card in cards
         if card.source_class is SourceClass.T4_EXPERIENTIAL
     )
+    assert Counter(card.status.value for card in cards) == {
+        "candidate": 100,
+        "research_only": 18,
+    }
+
+
+def test_platform_guidance_is_experiential_not_vendor_policy_authority() -> None:
+    rights = _jsonl(RIGHTS_OUTPUT)
+    guidance = [
+        row
+        for row in rights
+        if any("platform_guidance" in value for value in row["source_type_inputs"])
+    ]
+    policy = [
+        row
+        for row in rights
+        if any("platform_policy" in value for value in row["source_type_inputs"])
+    ]
+    assert len(guidance) == 3
+    assert {row["source_class"] for row in guidance} == {"t4"}
+    assert len(policy) == 2
+    assert {row["source_class"] for row in policy} == {"t1v"}
 
 
 @pytest.mark.skipif(

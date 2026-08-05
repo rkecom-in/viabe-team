@@ -204,7 +204,7 @@ def _shadow_mode_and_stub_embeddings(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         card_serving,
         "embed_cards",
-        lambda cards: ({card.card_version_id: [1.0, 0.0] for card in cards}, ()),
+        lambda cards, **_: ({card.card_version_id: [1.0, 0.0] for card in cards}, ()),
     )
     card_serving._EMBED_CACHE.clear()
 
@@ -402,6 +402,11 @@ def test_specialist_retrieval_is_narrow_in_both_domain_and_assignment() -> None:
 
     card_query = next(sql for sql, _ in conn.queries if "FROM knowledge_cards" in sql)
     params = next(params for sql, params in conn.queries if sql == card_query)
+    assert "FROM knowledge_corpus_versions" in card_query
+    assert "JOIN knowledge_corpus_members" in card_query
+    assert "ORDER BY version DESC" in card_query
+    assert "serving_corpus.id AS corpus_version_id" in card_query
+    assert "LEFT JOIN knowledge_card_embeddings" in card_query
     assert params[0] == ["marketing", "sales"]
     assert params[-1] == card_serving._MAX_CANDIDATE_CARDS
 
@@ -448,7 +453,7 @@ def test_an_unembeddable_card_is_excluded_rather_than_failing_the_turn(
     monkeypatch.setattr(
         card_serving,
         "embed_cards",
-        lambda cards: (
+        lambda cards, **_: (
             {card.card_version_id: [1.0, 0.0] for card in cards if card.card_version_id != "card-b"},
             ("card-b",),
         ),
@@ -466,7 +471,7 @@ def test_a_card_whose_embedding_dimension_disagrees_with_the_query_is_excluded(
     monkeypatch.setattr(
         card_serving,
         "embed_cards",
-        lambda cards: (
+        lambda cards, **_: (
             {
                 card.card_version_id: ([1.0, 0.0] if card.card_version_id == "card-a" else [1.0])
                 for card in cards
@@ -644,6 +649,28 @@ def test_card_embeddings_are_cached_per_immutable_card_version() -> None:
 
     assert first == second and failed_first == failed_second == ()
     assert len(calls) == 1  # a card row can never change, so one embed per version is enough
+
+
+def test_persisted_embedding_survives_process_cache_and_avoids_provider_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    corpus = load_serving_corpus(
+        TENANT_A, MANAGER_RETRIEVAL_PROFILE, conn=FakeConn(cards=[card_row("card-a")])
+    )
+    card = corpus.cards[0]
+    card_serving._EMBED_CACHE.clear()
+
+    def _must_not_call(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("persisted embedding should avoid provider egress")
+
+    monkeypatch.setattr(
+        "orchestrator.knowledge.embeddings.embed_redacted_texts", _must_not_call
+    )
+    vectors, failed = embed_cards(
+        (card,), persisted={card.card_version_id: [1.0, 0.0]}
+    )
+    assert vectors == {card.card_version_id: [1.0, 0.0]}
+    assert failed == ()
 
 
 def test_evidence_link_write_failure_is_reported_not_raised() -> None:
