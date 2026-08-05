@@ -11,7 +11,7 @@ Fazal's ruling (CL-2026-08-06-repeated-request-is-never-approval): resolution re
 ordering (the inbound is strictly newer than the ask) AND the content (the message AFFIRMS the
 presented plan). "An impatient owner paying one extra confirmation tap is the accepted cost."
 
-No DB, no network: the wrapper is stubbed, so these run in the dep-less suite too.
+No DB, no network: the wrapper read is stubbed, so the invariant itself is what is tested.
 """
 
 from __future__ import annotations
@@ -21,6 +21,10 @@ from typing import Any
 from uuid import uuid4
 
 import pytest
+
+# The module under test imports the typed DB wrappers, which import psycopg at module level — skip
+# cleanly in the dep-less smoke env (house pattern) rather than failing collection there.
+pytest.importorskip("psycopg")
 
 from orchestrator.agent.approval_resume import (  # noqa: E402
     StaleApprovalDecisionError,
