@@ -94,6 +94,7 @@ from uuid import UUID
 
 from langchain_core.callbacks import BaseCallbackHandler
 
+from orchestrator.llm import service_tier_policy as _service_tier_policy
 from orchestrator.llm_config import sampling_kwargs
 
 if TYPE_CHECKING:
@@ -365,6 +366,18 @@ def assert_tier_vars_configured() -> dict[str, str]:
     # secrets (Rule 18 governs credential VALUES), and this is what makes the next burn-hunt one
     # `railway logs | grep` long instead of a day.
     print(f"llm tier conformance: {summary}", flush=True)
+    # VT-735: the service-tier POSTURE belongs on the same boot line for the same reason the model
+    # ids do — the burn-hunt that started all of this began with nobody being able to see, from the
+    # deploy log, what the box was actually configured to do. An override being set is the
+    # interesting case (it disables the per-call-class policy), so name it explicitly rather than
+    # letting a force-test posture look like the ratified default.
+    override = _configured_service_tier()
+    print(
+        "llm service-tier policy: "
+        f"TEAM_GPT_FLEX={_service_tier_policy.flex_mode()}, "
+        f"override={'none' if override == 'standard' else override}",
+        flush=True,
+    )
     return resolved
 
 
@@ -433,11 +446,26 @@ def resolve_chat_model(
     # openai. anthropic + google + zai(GLM) + xai(Grok) are forced to 'standard' here — Gemini's
     # flex/batch are NOT wired in v1, GLM/Grok publish no batch/flex tier, and the env var's name is
     # OpenAI-scoped so it must not affect google/GLM/Grok calls.
-    configured_tier = _configured_service_tier() if provider == "openai" else "standard"
-    # Ledger-facing billing tier: only flex/batch carry the discount. 'auto' lets OpenAI pick the
-    # tier server-side, so we can't know the billed rate at write time — record 'standard' (full
-    # price) conservatively rather than under-costing.
-    billing_tier = configured_tier if configured_tier in ("flex", "batch") else "standard"
+    # VT-735: the tier is decided by CALL CLASS, not one global switch. `TEAM_OPENAI_SERVICE_TIER`
+    # remains an explicit OVERRIDE for force-testing a single tier; when it is unset (or 'standard')
+    # the ratified policy in `.viabe/model-tier-policy.md` decides per call site. Still OpenAI-scoped:
+    # google/GLM/Grok publish no flex/batch and Gemini's tiers are not wired in v1.
+    if provider == "openai":
+        override = _configured_service_tier()
+        configured_tier = (
+            override
+            if override != "standard"
+            else _service_tier_policy.resolve_service_tier(call_site, tenant_id=tenant_id)
+        )
+    else:
+        configured_tier = "standard"
+    # Ledger-facing billing tier: flex/batch carry the ½× discount, fast the 2× premium. 'auto' lets
+    # OpenAI pick the tier server-side, so we can't know the billed rate at write time — record
+    # 'standard' (full price) conservatively rather than under-costing.
+    billing_tier = (
+        "batch" if configured_tier == "batch"
+        else _service_tier_policy.billing_tier_for(configured_tier)
+    )
     callbacks = _seam_callbacks(
         tier=tier,
         agent=agent,
