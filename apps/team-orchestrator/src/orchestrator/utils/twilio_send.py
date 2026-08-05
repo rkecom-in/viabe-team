@@ -745,6 +745,11 @@ def send_template_message(
         _record_owner_conversation_turn(
             tenant_id, f"[template: {template_name}]", message_sid=message.sid, surface="system"
         )
+    # VT-733B: meter the send. Twilio is the largest NON-LLM per-tenant cost and was never metered,
+    # so every "what does this tenant cost us" number was an undercount. Recorded AFTER a confirmed
+    # send (a failed send costs nothing) and fail-soft inside the meter itself — the message is
+    # already out; a ledger write must never turn a delivered message into an error.
+    _meter_template_send(tenant_id, message.sid)
     return SendResult(
         success=True,
         message_sid=message.sid,
@@ -752,6 +757,28 @@ def send_template_message(
         template_name=template_name,
         recipient_phone_token=recipient_token,
     )
+
+
+def _meter_template_send(tenant_id: Any, message_sid: str | None) -> None:
+    """VT-733B — record one Twilio template message on the integration cost ledger.
+
+    Lazy import so this transport module stays import-light (and dep-less-smoke safe). The meter is
+    itself fail-soft; this wrapper adds a second guard only so an import error in the metering module
+    can never reach a delivered-message path.
+    """
+    try:
+        from orchestrator.integrations.cost_meter import record_integration_cost
+
+        record_integration_cost(
+            tenant_id=tenant_id,
+            vendor="twilio",
+            unit="template_message",
+            quantity=1,
+            call_site="send_template_message",
+            external_ref=message_sid,
+        )
+    except Exception:  # noqa: BLE001 — CL-122: metering never breaks a send
+        logger.warning("VT-733B: template-send metering skipped", exc_info=True)
 
 
 def send_typing_indicator(inbound_message_sid: str) -> None:
