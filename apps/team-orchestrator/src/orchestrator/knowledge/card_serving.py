@@ -21,8 +21,10 @@ the sole effect authority regardless of what any card claims.
 
 The registry read targets migration 189's single-row projection: ``knowledge_cards`` carries
 ``domain``, ``source_class``, ``usage_rights``, ``independence_cluster``, ``provenance``,
-``retrieval_eligible`` and ``corpus_version_id`` directly, so one card is one row and there is no
-join to keep in sync with the curation pipeline.
+``retrieval_eligible`` and its admission-corpus identity directly.  Corpus membership selects the
+latest shadow snapshot so an immutable card can belong to later snapshots without inventing a new
+semantic version; the serving corpus ID overrides the admission-corpus ID in attribution.  The
+persisted embedding joins by immutable card-version ID and is content-digest checked before use.
 """
 
 from __future__ import annotations
@@ -195,6 +197,7 @@ class LoadedCorpus:
 
     cards: tuple[KnowledgeCard, ...]
     overrides: Mapping[str, CardAssignmentOverride]
+    persisted_embeddings: Mapping[str, list[float]]
     unmappable_rows: int
     #: The pool hit _MAX_CANDIDATE_CARDS, so eligible cards were left out of this decision.
     #: Surfaced rather than swallowed: a silently truncated pool would look like a corpus that
@@ -245,7 +248,9 @@ def retrieve_cards_for_turn(
             return _degraded(mode, identity, budget, reason, started)
 
         query_embedding = embed_query(objective)
-        embeddings, unembeddable = embed_cards(corpus.cards)
+        embeddings, unembeddable = embed_cards(
+            corpus.cards, persisted=corpus.persisted_embeddings
+        )
         embeddable = tuple(
             card
             for card in corpus.cards
@@ -404,6 +409,13 @@ def _bounded(value: float) -> float:
 #: admission decision and is therefore a predicate, not something this layer re-derives — a card
 #: the pipeline marked ineligible must not serve because a consumer thought its status looked fine.
 _CARD_SQL = """
+    WITH serving_corpus AS (
+        SELECT id
+        FROM knowledge_corpus_versions
+        WHERE status = 'shadow' AND admission_verdict = 'pending'
+        ORDER BY version DESC
+        LIMIT 1
+    )
     SELECT
         c.id, c.card_key, c.version, c.claim, c.claim_key, c.claim_value, c.distillation_note,
         c.jurisdictions, c.size_bands, c.industries, c.maturity_stages, c.channels,
@@ -411,8 +423,12 @@ _CARD_SQL = """
         c.authority, c.confidence, c.scope, c.status, c.retention_class, c.expires_at,
         c.default_assignment, c.domain, c.source_class, c.usage_rights,
         c.independence_cluster, c.corroboration_cluster_count, c.provenance,
-        c.retrieval_eligible, c.corpus_version_id
+        c.retrieval_eligible, serving_corpus.id AS corpus_version_id,
+        e.embedding::text AS persisted_embedding, e.embedding_model, e.content_digest
     FROM knowledge_cards c
+    JOIN knowledge_corpus_members member ON member.card_id = c.id
+    JOIN serving_corpus ON serving_corpus.id = member.corpus_version_id
+    LEFT JOIN knowledge_card_embeddings e ON e.card_id = c.id
     WHERE c.retrieval_eligible
       AND c.status IN ('validated', 'disputed')
       AND c.domain = ANY(%s::text[])
@@ -458,6 +474,7 @@ def _load_serving_corpus(
         ),
     ).fetchall()
     cards: list[KnowledgeCard] = []
+    persisted_embeddings: dict[str, list[float]] = {}
     unmappable = 0
     for row in rows:
         card = _card_from_row(row)
@@ -465,6 +482,9 @@ def _load_serving_corpus(
             unmappable += 1
             continue
         cards.append(card)
+        persisted = _persisted_embedding(row, card)
+        if persisted is not None:
+            persisted_embeddings[card.card_version_id] = persisted
 
     tenant_uuid = _as_uuid(tenant_id)
     overrides: dict[str, CardAssignmentOverride] = {}
@@ -483,6 +503,7 @@ def _load_serving_corpus(
     return LoadedCorpus(
         cards=tuple(cards),
         overrides=overrides,
+        persisted_embeddings=persisted_embeddings,
         unmappable_rows=unmappable,
         truncated=len(rows) >= _MAX_CANDIDATE_CARDS,
     )
@@ -702,6 +723,8 @@ def embed_query(objective: str) -> list[float]:
 
 def embed_cards(
     cards: Sequence[KnowledgeCard],
+    *,
+    persisted: Mapping[str, Sequence[float]] | None = None,
 ) -> tuple[dict[str, list[float]], tuple[str, ...]]:
     """Embed every card not already cached; return the vectors plus the ids that could not embed.
 
@@ -714,7 +737,15 @@ def embed_cards(
 
     vectors: dict[str, list[float]] = {}
     pending: list[KnowledgeCard] = []
+    persisted = persisted or {}
     for card in cards:
+        stored = persisted.get(card.card_version_id)
+        if stored is not None:
+            values = [float(value) for value in stored]
+            if values:
+                vectors[card.card_version_id] = values
+                _cache_embedding(card.card_version_id, values)
+                continue
         cached = _EMBED_CACHE.get(card.card_version_id)
         if cached is None:
             pending.append(card)
@@ -748,6 +779,29 @@ def embed_cards(
             vectors[card.card_version_id] = values
             _cache_embedding(card.card_version_id, values)
     return vectors, tuple(failed)
+
+
+def _persisted_embedding(row: Any, card: KnowledgeCard) -> list[float] | None:
+    """Accept a stored vector only when model, dimensions, and immutable content all match."""
+
+    from orchestrator.knowledge.embeddings import EMBED_DIM, EMBED_MODEL
+    from orchestrator.knowledge.persisted_embeddings import card_content_digest
+
+    if isinstance(row, Mapping):
+        raw = row.get("persisted_embedding")
+        model = row.get("embedding_model")
+        digest = row.get("content_digest")
+    else:
+        raw, model, digest = row[30], row[31], row[32]
+    if raw is None:
+        return None
+    if model != EMBED_MODEL or digest != card_content_digest(card):
+        return None
+    if isinstance(raw, str):
+        values = [float(value) for value in raw.strip("[]").split(",") if value]
+    else:
+        values = [float(value) for value in raw]
+    return values if len(values) == EMBED_DIM else None
 
 
 def _cache_embedding(card_version_id: str, vector: list[float]) -> None:

@@ -196,8 +196,13 @@ def _source_class(source_type: str) -> SourceClass:
         token in value for token in ("official", "primary_company", "regulatory_filing")
     ):
         return SourceClass.T4_EXPERIENTIAL
-    if "platform_policy" in value or "platform_guidance" in value:
+    # A platform's own binding policy is first-party vendor authority (T1v).
+    # General platform guidance is practitioner advice, even when published by
+    # the platform itself: it does not gain policy authority from the publisher.
+    if "platform_policy" in value:
         return SourceClass.T1_VENDOR_POLICY
+    if "platform_guidance" in value:
+        return SourceClass.T4_EXPERIENTIAL
     if any(
         token in value
         for token in (

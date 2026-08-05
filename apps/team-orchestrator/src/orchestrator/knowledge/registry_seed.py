@@ -323,7 +323,9 @@ def _card_from_row(row: Mapping[str, Any]) -> KnowledgeCard:
             "card_id": str(row["card_key"]),
             "card_version_id": str(row["id"]),
             "card_version": row["version"],
-            "corpus_version_id": str(row["corpus_version_id"]),
+            "corpus_version_id": (
+                str(row["corpus_version_id"]) if row["corpus_version_id"] else None
+            ),
             "claim": row["claim"],
             "claim_key": dict(zip(("subject", "predicate", "jurisdiction", "population", "channel"), claim_key, strict=True)),
             "claim_value": row["claim_value"],
