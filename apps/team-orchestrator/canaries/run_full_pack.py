@@ -169,7 +169,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--scenarios-dir", default=str(_CANARIES / "scenarios"))
     p.add_argument("--only", default=None, help="run only the named scenario (debug)")
     p.add_argument("--ingress-url", default=None, help="deployed dev orchestrator base URL")
-    p.add_argument("--timeout", type=float, default=90.0)
+    # Same floor as run_critical_x3._DEFAULT_STEP_TIMEOUT_S, for the same reason: the step deadline
+    # must exceed the product's OWN maximum in-turn wait (runner._D1_INTURN_WAIT_MAX_POLLS ×
+    # _D1_INTURN_WAIT_POLL_S ≈ 96s), or a turn whose async manager_task does not answer quickly is
+    # recorded TIMEOUT by construction and the pack measures its own deadline. 90s sat UNDER that
+    # floor and is why sr_consequential_bulk_send_requires_approval read as a defect for a week.
+    p.add_argument("--timeout", type=float, default=180.0)
     p.add_argument(
         "--keep-tenants", action="store_true",
         help="skip teardown (debug — inspect the synthetic tenants after the run)",
