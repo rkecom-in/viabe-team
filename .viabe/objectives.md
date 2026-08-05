@@ -10,7 +10,20 @@
 > newest CL/VT touching it is STALE and must be reconciled BEFORE any status claim is made from
 > this file. The scoreboard exists so Fazal can see the war in one page; a stale scoreboard is
 > worse than none — it launders drift as status.
-> Last updated: 2026-08-05 (**single-voice program complete on dev**: S2 choke PROD-LIVE, S3 ledger + S3b enforce-parity + S4 route-unification DEV-PROVEN, 3 of 4 casebook classes 3/3 in the completed pack (the 4th's target defect is fixed; its scenario is blocked by the SR/load timeout class, NOT rounded up). First trustworthy FULL PACK: 79/79 distinct scenarios, 237 entries, zero duplicates, zero contaminated. O8 un-parked and REACHABLE for the first time — migration 189 on dev, 15-card seed through the VT-710 pipeline, retrieval canary PASS. O11 sealed set independently authored + validated. OPEN: the SR approval/send lane. Re-drive at 150s COMPLETE — 6 of 9 gates now OBSERVED clean (a timeout is not a pass; these are real gate holds). **Root cause NOT established:** I proposed a 90s harness deadline sitting under the product's ~96s in-turn wait, then retracted it — measured latency shows NO successful turn above 90s (max 62.9s, approval-ask p90 61.3s), so the extra headroom was never used. The variable that actually changed was LOAD (79 back-to-back scenarios vs one in isolation). Residue: `sr_consequential_bulk_send_requires_approval` 0/3 with NO owner-visible reply — a real defect, reproducible in isolation, and the bulk always-confirm floor stays UNVERIFIED. Next: finish the re-drive → sealed no-O8 baseline → promotion on Fazal's word → VT-730.)
+> Last updated: **2026-08-06, Clau audit-pass (Fazal-ordered)** — CURRENT STATE: **VT-734
+> approval-breach FIXED + DEV-PROVEN** (mig 190; ordering invariant + repeat-refusal; breach repro
+> ×3 → pending/proposed/0-sent; the Manager's send claim was TRUE — CC's "fabricated claim" was its
+> own broken verification query, retracted). **Critical ×3 consistency gate IN FLIGHT on the full
+> fixed build (VT-732 model governance + bulk-send + VT-734): 34/79 distinct at last read, ALL
+> clean, zero blocks/divergence/contamination** — cleanest run ever recorded. Wedge deferred BY
+> FAZAL into this gate (call-out either way). Next, per Fazal "close RAG today": sealed no-O8
+> baseline (O11) → VT-725 flip/narrowing canary (O8 serving evidence) → promotion package →
+> Fazal's word. **Commercial bar added: the PILOT PROOF GATE P1–P6** (launch-tracker,
+> CL-2026-08-06-pilot-proof-gate) — P1 ≥60% wk-8 active · P2 ≥40% pay · P3 ≥50% at 3× value
+> (attributed gross profit, VT-733-C) · P4 zero gate violations · P5 founder-free onboarding ·
+> P6 autonomy grants rise. Pricing STRUCTURE ratified (Manager free · flat/specialist all-in ·
+> per-agent free month + mandate); level waits on measured cost. Rolling queue:
+> `.viabe/queue/ROLLING-QUEUE.md`. Prior header (2026-08-05, superseded): (**single-voice program complete on dev**: S2 choke PROD-LIVE, S3 ledger + S3b enforce-parity + S4 route-unification DEV-PROVEN, 3 of 4 casebook classes 3/3 in the completed pack (the 4th's target defect is fixed; its scenario is blocked by the SR/load timeout class, NOT rounded up). First trustworthy FULL PACK: 79/79 distinct scenarios, 237 entries, zero duplicates, zero contaminated. O8 un-parked and REACHABLE for the first time — migration 189 on dev, 15-card seed through the VT-710 pipeline, retrieval canary PASS. O11 sealed set independently authored + validated. OPEN: the SR approval/send lane. Re-drive at 150s COMPLETE — 6 of 9 gates now OBSERVED clean (a timeout is not a pass; these are real gate holds). **Root cause NOT established:** I proposed a 90s harness deadline sitting under the product's ~96s in-turn wait, then retracted it — measured latency shows NO successful turn above 90s (max 62.9s, approval-ask p90 61.3s), so the extra headroom was never used. The variable that actually changed was LOAD (79 back-to-back scenarios vs one in isolation). Residue: `sr_consequential_bulk_send_requires_approval` 0/3 with NO owner-visible reply — a real defect, reproducible in isolation, and the bulk always-confirm floor stays UNVERIFIED. Next: finish the re-drive → sealed no-O8 baseline → promotion on Fazal's word → VT-730.)
 
 ## O0 · NORTH STAR — Claude Code for Business — IN PROGRESS (the objective all others compose into)
 - Bar (Fazal, ratified 2026-07-01 — Track C first-class): an owner hands the Team-Manager a
@@ -166,6 +179,30 @@
 - VT-725 consumer BUILT, shadow-only and unwired: shadow-safety is structural — the returned type
   exposes no field, method or property carrying card text, so "shadow accidentally injected" is not
   a bug that can be written. Flip/narrowing canary (exit gates b + d) in flight.
+- **2026-08-07 — the corpus was RLS-INVISIBLE to the application, and that is now FIXED.** Eight O8
+  tables carried `ENABLE ROW LEVEL SECURITY` with **zero policies** = deny-all to any non-owner role.
+  `app_role` read **0** rows where `postgres` read 182, so the curated corpus had never been readable
+  by the application on ANY environment — VT-725's "nothing calls the engine" was only half the gap.
+  **Migration 196** adds SELECT-only policies `TO app_role` (writes stay closed so an agent can never
+  author its own knowledge; `TO public` refused because Supabase's default grants would have exposed
+  the corpus via PostgREST — REVOKEs added). Dev after apply: app_role sees 182 cards / 64
+  retrieval-eligible / 118 embeddings.
+- **VT-725 exit gate (d) specialist narrowing: PROVEN on dev.** Manager 64 candidates,
+  `sales_recovery_agent` 25 — its lane only, with other-domain cards present so a leak had somewhere
+  to appear. A positive proof, not an empty-result pass.
+- **VT-725 exit gate (b) per-tenant flip: BLOCKED, and NOT on RLS.** No card can clear the Manager's
+  `minimum_score = 0.62`: holding every component at its measured value and setting semantic
+  similarity to a perfect 1.0 gives a ceiling of **0.5407**; best actually observed **0.270**. Two
+  causes, both metadata/design rather than code — every card has `applicability_universal = false`
+  with empty industries/size_bands/maturity_stages (max unknown-dimension penalty → applicability
+  0.10), and `_recency()` returns **0.0 by construction** for evergreen cards (non-T1, no
+  `effective_to`, no `expires_at`). **Open on Fazal:** which cards are genuinely universal is a claim
+  about the knowledge, and moving the floor/weights is a design call; CC did not tune the gate.
+- **O11 treatment arm did not exist.** `--knowledge-mode` was only RECORDED in the bundle and never
+  reached the prompt, so a "treatment" run would have been the baseline wearing a label and its score
+  pure sampling noise. Real retrieval built (`canaries/o11_knowledge.py`) with honesty
+  instrumentation that states outright when an arm injected nothing. Sealed baseline DONE (12/12,
+  real); sealed treatment deliberately NOT run while the floor blocks injection.
 - VT-726 DONE. VT-727 scoped against MEASURED disposition: 118 card records from **88 files** (not
   118 files — corrected), 64 immediately shadow-admissible, 54 deferred, 0 rejected. Two review
   GATES before ingestion: independence clustering currently follows SOURCE IDENTITY not semantics

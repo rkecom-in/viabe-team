@@ -76,6 +76,78 @@ so any turn whose async task did not answer fast was recorded TIMEOUT *by constr
 `run_critical_x3`, `convo_harness` and `run_full_pack`. The bulk-send "defect" that had blocked the
 chain for a week was mostly this.
 
+## PROMOTION-BLOCKING — found 2026-08-07, after the gate. Read this before deciding.
+
+### 1. The concurrency wedge is REAL, deterministic, and live on dev. I retract "unknown".
+I reported the wedge as UNKNOWN-for-the-pack because the harness reaps tenants before
+`manager_tasks` can be queried. That was reporting the limit of ONE method as if it were the limit of
+all of them — the code and the database both answer the question.
+
+**The chain, every link verified in source:**
+1. Any prereq/policy/limit failure → `_block_*` (`manager/workflow.py:446/473`) sets
+   `status='blocked'`, `terminal_outcome='escalated'`, and arms **no `next_retry_at`**.
+2. The owner gets the honest closure *"I couldn't complete it on my own — so I've stopped"*
+   (`owner_surface/task_outcome.py:266`). Correct and honest — and the tell.
+3. `blocked` ∈ `TASK_ACTIVE` (`task_store.py:44`) → the row **holds the tenant's one active slot**.
+4. `workflow.py:1421` promotes the queue only `if final_status in TASK_TERMINAL`. **`blocked` is not
+   terminal** — nothing behind it is ever promoted.
+5. `orphan_reaper.py:189-199` wakes `blocked` rows **with** an elapsed `next_retry_at`; one
+   **without** is, in the code's own words, *"left for a human."*
+
+**Live on dev, real rows, not the harness:** 5 tenants hold a `blocked` + no-retry slot — 3 via the
+`escalated` honest-closure path. **Newest 9 days old, oldest a month.** Nothing woke them.
+
+**Effect:** the tenant can still chat — the turn-brain answers — but **no task of any kind will ever
+execute for them again**, and the manager tells them work is "already in progress". Silent,
+permanent, invisible to the owner, and it looks like the product working.
+
+**Fazal's deferral rested on "not reproducible post-fix (0/2, was 1/2)" — a rare race. That premise
+is falsified.** The entry is the ordinary honest-failure closure, our most common failure path.
+Proven boundary: slot-holding is proven; queue-starvation behind it is mechanically implied by
+`workflow.py:1421` but not directly observed (no dev tenant currently has both).
+
+**Fix, not built — deferred by Fazal and his to un-defer:** `dead_letter` is documented at
+`task_store.py:36-37` as *terminal but operator-redrivable; never auto-retried* — precisely what an
+escalated block IS. Settling it there releases the slot, promotes the queue, keeps ops redrive.
+
+### 2. The knowledge corpus was RLS-invisible to the application. Fixed (mig 196, `9a39b48b`).
+Eight O8 tables had `ENABLE ROW LEVEL SECURITY` with **zero policies** = deny-all for any non-owner
+role. `app_role` read **0** rows where `postgres` read **182**. The curated corpus had never been
+readable by the application on ANY environment — so VT-725's "the engine is built and nothing calls
+it" was only half the gap: even once called, it would have returned nothing.
+
+Migration 196 adds SELECT-only policies `TO app_role` (writes stay closed — an agent must never
+author its own knowledge; `TO public` refused because Supabase's default grants would have published
+the corpus through PostgREST, so REVOKEs were added). **Prod carries the same defect** — all twelve
+O8 tables exist there and are empty, so the policy gap ships with them unless 196 goes too.
+
+**VT-725 exit gate (d) — specialist narrowing — now PASSES on dev, positively:** manager 64
+candidates, `sales_recovery_agent` 25 (its lane only), with other-domain cards present so a leak had
+somewhere to show. Not an empty-result pass.
+
+### 3. D3 is NOT takeable on evidence: no card can clear the retrieval floor.
+Manager `minimum_score = 0.62`. Hold every scoring component at its measured value and set semantic
+similarity to a **perfect 1.0**: ceiling **0.5407**. Mark every card universal too: **0.6127**, still
+short. Universal AND recency restored: 0.6427, clears. **Best actually observed: 0.270.**
+
+Two causes, both metadata/design rather than code: every card has `applicability_universal = false`
+with empty industries/size_bands/maturity_stages (maximum unknown-dimension penalty → applicability
+**0.10**), and `_recency()` returns **0.0 by construction** for evergreen cards. Deciding which cards
+are "universal" is a claim about the knowledge; moving the floor is a design call. **CC did not tune
+the gate to make an answer appear.**
+
+**Correction to an earlier claim in this document:** the VT-727 canary PASS is real but narrower than
+it reads — its one retrieved card came from a **self-query** (it embeds a card's own text as the
+query). It proves persistence and engine mechanics, not that retrieval answers a business question.
+
+### 4. The O11 treatment arm did not exist.
+`--knowledge-mode` was only RECORDED in the output bundle and never reached the prompt, so a
+"treatment" run would have been the baseline wearing a different label and any lift computed from the
+pair would have been sampling noise. Real retrieval built (`canaries/o11_knowledge.py`, `6f5b75e6`)
+with instrumentation that states outright when an arm injected nothing. **Sealed baseline: DONE,
+12/12, real.** Sealed treatment deliberately NOT run while the floor blocks injection — spending the
+sealed set on a run that injects zero cards would manufacture a number, not measure one.
+
 ## Known-open, stated so promotion is a decision and not a surprise
 1. **Latency residue.** On the first turn of a slow job the owner waits ≥96s before the honest ack.
    The candidate fix (make the D1 budget a deadline from turn start) is written up and deliberately
