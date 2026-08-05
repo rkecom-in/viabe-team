@@ -15,7 +15,11 @@ from typing import Any
 
 import pytest
 
-from orchestrator.integrations import cost_meter
+# orchestrator.integrations' package __init__ pulls pydantic-backed modules — skip cleanly in the
+# dep-less smoke env (house pattern) rather than failing collection there.
+pytest.importorskip("pydantic")
+
+from orchestrator.integrations import cost_meter  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
