@@ -150,9 +150,38 @@ def transcribe(
         "voice_transcription: tenant=%s model=%s language=%s chars=%d",
         tenant_id, resolved_model, detected, len(transcript),
     )
+    # VT-733B — meter the ASR seconds. Sarvam bills per audio second and its response carries no
+    # duration, so the quantity is DERIVED from the payload size and the row is flagged ESTIMATED.
+    # That flag is the whole point: slice C must be able to report estimated and measured spend
+    # separately rather than as one confident total.
+    _meter_asr(tenant_id, audio_bytes, media_type)
     return TranscriptionResult(
         transcript_text=transcript, language=detected, confidence=confidence
     )
+
+
+# Rough bytes-per-second for the codecs WhatsApp voice notes arrive in (Opus/OGG ~16 kbps ≈ 2 KB/s).
+# Deliberately a single documented constant rather than per-codec cleverness: it feeds an ESTIMATED
+# row, and precision we do not have would only make the estimate look like a measurement.
+_ASR_BYTES_PER_SECOND = 2000
+
+
+def _meter_asr(tenant_id: Any, audio_bytes: bytes, media_type: str) -> None:
+    """VT-733B — record one Sarvam ASR call, in estimated audio seconds. Fail-soft (CL-122)."""
+    try:
+        from orchestrator.integrations.cost_meter import record_integration_cost
+
+        seconds = max(1, round(len(audio_bytes or b"") / _ASR_BYTES_PER_SECOND))
+        record_integration_cost(
+            tenant_id=tenant_id,
+            vendor="sarvam",
+            unit="asr_seconds",
+            quantity=seconds,
+            call_site="voice_transcription",
+            is_estimated=True,  # duration is derived, not vendor-reported
+        )
+    except Exception:  # noqa: BLE001 — metering never breaks a transcription
+        logger.warning("VT-733B: ASR metering skipped", exc_info=True)
 
 
 __all__ = [
