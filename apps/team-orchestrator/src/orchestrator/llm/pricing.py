@@ -49,9 +49,15 @@ _SEED_PRICING: dict[str, _PriceEntry] = {
     "claude-opus-4-8": (Decimal("5.0000"), Decimal("25.0000"), Decimal("0.5"), Decimal("0.1")),
     "claude-haiku-4-5-20251001": (Decimal("1.0000"), Decimal("5.0000"), Decimal("0.5"), Decimal("0.1")),
     "claude-haiku-4-5": (Decimal("1.0000"), Decimal("5.0000"), Decimal("0.5"), Decimal("0.1")),
+    # VT-735 REPRICE (2026-08-06), verified against https://developers.openai.com/api/docs/pricing.
+    # OpenAI cut prices and the registry had not followed: **luna was 5× STALE** (1.00/6.00 against
+    # a real 0.20/1.20) and terra 1.25× (2.50/15.00 against 2.00/12.00); sol was already correct.
+    # This matters beyond tidiness — dev runs entirely on luna (VT-732 boot conformance prints all
+    # five tiers as gpt-5.6-luna), so every luna cost the VT-733 console has shown was 5× too high.
+    # Figures are SHORT-context USD/MTok; long-context is 2× these (threshold per the docs).
     "gpt-5.6-sol": (Decimal("5.0000"), Decimal("30.0000"), Decimal("0.5"), Decimal("0.1")),
-    "gpt-5.6-terra": (Decimal("2.5000"), Decimal("15.0000"), Decimal("0.5"), Decimal("0.1")),
-    "gpt-5.6-luna": (Decimal("1.0000"), Decimal("6.0000"), Decimal("0.5"), Decimal("0.1")),
+    "gpt-5.6-terra": (Decimal("2.0000"), Decimal("12.0000"), Decimal("0.5"), Decimal("0.1")),
+    "gpt-5.6-luna": (Decimal("0.2000"), Decimal("1.2000"), Decimal("0.5"), Decimal("0.1")),
     # Migration 174 (Gemini 3.5 / 3.1). gemini-3.1-pro-preview is recorded at the <=200k-context
     # rate ($2/$12); >200k tiers ($4/$18) are out of scope (our contexts stay under 200k).
     "gemini-3.5-flash": (Decimal("1.5000"), Decimal("9.0000"), Decimal("0.5"), Decimal("0.1")),
@@ -71,6 +77,14 @@ _SEED_PRICING: dict[str, _PriceEntry] = {
 # Service tiers that get the ``discount_multiplier`` (migration 173: OpenAI Flex ==
 # Batch == 50%, Anthropic Batches API == 50%, both input + output).
 _DISCOUNTED_TIERS = frozenset({"flex", "batch"})
+
+#: VT-735 — tiers that cost MORE than standard. `fast` bills at 2× (verified sheet: luna fast
+#: 0.40/2.40 against standard 0.20/1.20). This cannot ride ``discount_multiplier``: that field is
+#: per-MODEL and expresses "how cheap is this model's batch lane", while `fast` is a per-TIER
+#: premium in the opposite direction. Folding them into one field would make a Fast call bill at
+#: HALF price on a flex-discounted model — the console would then under-report exactly the tier the
+#: policy spends most per token on.
+_PREMIUM_TIER_MULTIPLIERS: dict[str, Decimal] = {"fast": Decimal("2.0")}
 
 _CACHE_TTL_SECONDS = 300.0  # ~5 min
 _MTOK = Decimal(1_000_000)
@@ -211,8 +225,12 @@ def compute_cost_usd(
         + Decimal(int(cached_tokens_in or 0)) * usd_in * cached_mult
         + Decimal(int(tokens_out or 0)) * usd_out
     ) / _MTOK
-    if (service_tier or "").strip().lower() in _DISCOUNTED_TIERS:
+    tier = (service_tier or "").strip().lower()
+    if tier in _DISCOUNTED_TIERS:
         cost = cost * discount
+    elif tier in _PREMIUM_TIER_MULTIPLIERS:
+        # VT-735: `fast` is a PREMIUM, not a discount — see _PREMIUM_TIER_MULTIPLIERS.
+        cost = cost * _PREMIUM_TIER_MULTIPLIERS[tier]
     return cost
 
 

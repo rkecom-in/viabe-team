@@ -62,8 +62,13 @@ REPO = Path(__file__).resolve().parent.parent
 MIGRATIONS_DIR = REPO / "migrations"
 NEXT_FILE = MIGRATIONS_DIR / ".next-migration"
 LOCK_FILE = MIGRATIONS_DIR / ".lock"
-#: Append-only claim record: ts · number · claimed-by · purpose. See _journal().
-JOURNAL_FILE = MIGRATIONS_DIR / ".allocation-journal"
+#: Append-only claim record filename: ts · number · claimed-by · purpose. See _journal().
+#: Resolved against ``MIGRATIONS_DIR`` at CALL time, never bound at import — the allocator's own
+#: tests redirect MIGRATIONS_DIR/NEXT_FILE/LOCK_FILE to a tmp dir, and an import-time constant would
+#: keep pointing at the real repo. It did: the first test run after this journal landed appended 38
+#: phantom claims (008-079, "unknown/unstated") to the live record — pollution that would later read
+#: as genuine unaccounted allocations, the exact confusion the journal exists to end.
+JOURNAL_NAME = ".allocation-journal"
 
 MIGRATION_FILE_RE = re.compile(r"^(\d+)_.*\.sql$")
 
@@ -116,7 +121,7 @@ def _journal(number: str, claimed_by: str, purpose: str) -> None:
     """
     try:
         stamp = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-        with open(JOURNAL_FILE, "a", encoding="utf-8") as fh:
+        with open(MIGRATIONS_DIR / JOURNAL_NAME, "a", encoding="utf-8") as fh:
             fh.write(f"{stamp}\t{number}\t{claimed_by}\t{purpose}\n")
     except OSError:
         pass
