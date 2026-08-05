@@ -106,16 +106,21 @@ def _response_text(response: Any) -> str:
     return str(content).strip()
 
 
-def generate_decision(case: EvalCase, *, model: Any) -> str:
-    """One decision for one case. Sends ``agent_view()`` and nothing else.
+def generate_decision(case: EvalCase, *, model: Any, advisory: str | None = None) -> str:
+    """One decision for one case. Sends ``agent_view()`` plus, on the treatment arm, retrieved cards.
 
     Fails LOUD on an empty response: a blank decision scored as if it were an answer would quietly
     depress the baseline and make any later treatment look better than it is.
+
+    ``advisory`` is None on the baseline arm, which keeps the baseline prompt byte-identical to what
+    it has always been — the two arms must differ in exactly one thing, the knowledge.
     """
     prompt = (
         f"{_SYSTEM}\n\nSITUATION:\n"
         f"{json.dumps(case.agent_view(), ensure_ascii=False, sort_keys=True, indent=2)}"
     )
+    if advisory:
+        prompt = f"{prompt}\n\n{advisory}"
     text = _response_text(model.invoke(prompt))
     if not text:
         raise RuntimeError(f"{case.case_id}: empty decision from the model")
@@ -124,20 +129,51 @@ def generate_decision(case: EvalCase, *, model: Any) -> str:
 
 def build_bundle(
     cases: Sequence[EvalCase], *, run_label: str, knowledge_mode: str, model: Any,
-    progress: bool = True,
+    progress: bool = True, retriever: Any = None,
 ) -> dict[str, Any]:
+    """Generate one decision per case.
+
+    ``retriever`` is None on the baseline arm and a ``CaseKnowledgeRetriever`` on the treatment arm.
+    Per-case retrieval facts are recorded alongside each decision: a case that legitimately retrieved
+    nothing must be readable as such, not indistinguishable from a baseline answer.
+    """
     responses = []
+    injected_total = 0
+    cases_with_cards = 0
     for index, case in enumerate(cases, start=1):
+        advisory = retriever.advisory_for(case) if retriever is not None else None
         if progress:
-            print(f"  [{index}/{len(cases)}] {case.case_id}", flush=True)
-        responses.append({"case_id": case.case_id, "decision": generate_decision(case, model=model)})
-    return {
+            suffix = f"  (+{advisory.card_count} cards)" if advisory is not None else ""
+            print(f"  [{index}/{len(cases)}] {case.case_id}{suffix}", flush=True)
+        record: dict[str, Any] = {
+            "case_id": case.case_id,
+            "decision": generate_decision(
+                case, model=model, advisory=advisory.block if advisory else None
+            ),
+        }
+        if advisory is not None:
+            record["knowledge"] = advisory.as_record()
+            injected_total += advisory.card_count
+            cases_with_cards += 1 if advisory.card_count else 0
+        responses.append(record)
+
+    bundle = {
         "schema_version": SCHEMA_VERSION,
         "run_label": run_label,
         "knowledge_mode": knowledge_mode,
         "agent_version": agent_version(),
         "responses": responses,
     }
+    if retriever is not None:
+        # The headline honesty number: if this says 0 cases got cards, the treatment arm did not
+        # actually differ from the baseline and its score means nothing.
+        bundle["knowledge_summary"] = {
+            "cases_with_cards": cases_with_cards,
+            "cases_total": len(cases),
+            "cards_injected_total": injected_total,
+            **retriever.pool_summary,
+        }
+    return bundle
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -151,6 +187,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="recorded in the bundle so a treatment run can never be read as the baseline",
     )
     parser.add_argument("--model", default=_DEFAULT_MODEL)
+    parser.add_argument(
+        "--knowledge-tenant-id",
+        help="dev tenant whose assignment overrides scope the candidate pool; REQUIRED when "
+             "--knowledge-mode is not 'off'",
+    )
     return parser
 
 
@@ -169,9 +210,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"    dataset digest: {dataset_digest(cases)}")
     print(f"    run_label={args.run_label} knowledge_mode={args.knowledge_mode}")
 
+    # The treatment arm must actually retrieve. Building the retriever here means a corpus that
+    # cannot serve fails BEFORE any model call — the alternative (degrading to the baseline prompt)
+    # is the exact fake measurement this wiring exists to prevent.
+    retriever = None
+    if args.knowledge_mode != "off":
+        from o11_knowledge import CaseKnowledgeRetriever
+
+        if not args.knowledge_tenant_id:
+            raise SystemExit("--knowledge-mode != off requires --knowledge-tenant-id")
+        retriever = CaseKnowledgeRetriever(tenant_id=args.knowledge_tenant_id)
+        print(f"    knowledge pool: {retriever.pool_summary}")
+
     bundle = build_bundle(
         cases, run_label=args.run_label, knowledge_mode=args.knowledge_mode,
-        model=_client(args.model),
+        model=_client(args.model), retriever=retriever,
     )
     output.parent.mkdir(parents=True, exist_ok=True)
     with open(output, "w", encoding="utf-8") as fh:
