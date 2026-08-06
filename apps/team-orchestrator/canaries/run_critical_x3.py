@@ -421,7 +421,14 @@ _DEFAULT_STEP_TIMEOUT_S = 180.0
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="run_critical_x3", description=__doc__)
     p.add_argument("--scenarios-dir", default=str(_CANARIES / "scenarios"))
-    p.add_argument("--only", default=None, help="run only the named critical scenario (debug)")
+    p.add_argument(
+        "--only",
+        default=None,
+        help="comma-separated EXPLICIT allowlist of critical scenario names to run. The module "
+             "docstring already called for an allowlist rather than silent truncation; this accepts "
+             "the list it describes, so a targeted re-gate (e.g. the scenarios a settlement fix "
+             "touches) is one run instead of N runs whose results have to be stitched by hand.",
+    )
     p.add_argument("--ingress-url", default=None, help="deployed dev orchestrator base URL")
     p.add_argument("--timeout", type=float, default=_DEFAULT_STEP_TIMEOUT_S)
     p.add_argument(
@@ -447,9 +454,18 @@ def main(argv: list[str] | None = None) -> int:
     scenarios_dir = Path(args.scenarios_dir)
     pairs = discover_critical_scenarios(scenarios_dir)
     if args.only:
-        pairs = [(path, s) for path, s in pairs if s.get("name") == args.only]
-        if not pairs:
-            print(f"run_critical_x3: no critical scenario named {args.only!r}", file=sys.stderr)
+        wanted = [n.strip() for n in args.only.split(",") if n.strip()]
+        pairs = [(path, s) for path, s in pairs if s.get("name") in wanted]
+        found = {s.get("name") for _p, s in pairs}
+        # A typo'd name must not silently shrink a targeted re-gate into a smaller one that then
+        # reports "all clean" — the missing scenario is exactly the one you meant to re-prove.
+        missing = [n for n in wanted if n not in found]
+        if missing:
+            print(
+                f"run_critical_x3: no critical scenario named {missing!r} "
+                f"(matched {sorted(found)})",
+                file=sys.stderr,
+            )
             return 2
 
     resumed_names: set[str] = set()

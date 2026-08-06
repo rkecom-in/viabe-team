@@ -245,7 +245,11 @@ def test_newer_generic_practitioner_does_not_beat_stronger_older_evidence_by_rec
     )
     result = retrieve([newer, evidence])
     assert result.items[0].card.card_id == evidence.card_id
-    assert all(item.components.recency == 0.0 for item in result.items)
+    # VT-736: both cards are evergreen (non-regulatory, no effective_to/expires_at), so recency does
+    # not APPLY to either — now None rather than 0.0, and its weight is renormalized away instead of
+    # being folded in as a zero. The invariant this test actually guards is the line above: recency
+    # must not let a newer generic practitioner card outrank stronger older evidence. It still holds.
+    assert all(item.components.recency is None for item in result.items)
 
 
 def test_cluster_dedup_diversity_budget_and_conflicts_are_explicit() -> None:
