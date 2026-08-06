@@ -117,6 +117,24 @@ def test_dates_replace_observation_dates_and_record_normalization() -> None:
     promoted_by_id = {item.legacy_id: item.validated for item in plan.promotions}
     dated = [row for row in rows if row.effective_period is not None]
     assert len(dated) == 25
+    assert sum(row.effective_period.mode == "primary" for row in dated) == 24
+    assert sum(row.effective_period.mode == "secondary_attested" for row in dated) == 1
+    assert (
+        next(
+            row
+            for row in dated
+            if row.legacy_id == "bk057-independent-red-team-assumption-challenge"
+        ).effective_period.mode
+        == "secondary_attested"
+    )
+    assert (
+        next(
+            row
+            for row in dated
+            if row.legacy_id == "bk059-crisis-incident-command-operating-periods"
+        ).effective_period.mode
+        == "primary"
+    )
     assert all(row.effective_period.locator for row in dated if row.effective_period)
     assert all(row.effective_period.source_date_text for row in dated if row.effective_period)
     for row in dated:

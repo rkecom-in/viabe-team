@@ -50,6 +50,7 @@ class _StrictEvidence(BaseModel):
 
 
 class EffectivePeriodEvidence(_StrictEvidence):
+    mode: Literal["primary", "secondary_attested"]
     source_url: str = Field(min_length=1)
     evidence_url: str = Field(min_length=1)
     locator: str = Field(min_length=1)
@@ -65,6 +66,8 @@ class EffectivePeriodEvidence(_StrictEvidence):
     def _aware_and_ordered(self) -> "EffectivePeriodEvidence":
         _require_aware(self.effective_from, "effective_from")
         _require_aware(self.verified_at, "verified_at")
+        if self.mode == "secondary_attested" and self.source_url == self.evidence_url:
+            raise ValueError("secondary-attested evidence must identify a distinct evidence source")
         if self.effective_to is not None:
             _require_aware(self.effective_to, "effective_to")
             if self.effective_to < self.effective_from:
