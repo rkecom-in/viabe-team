@@ -78,6 +78,30 @@ chain for a week was mostly this.
 
 ## PROMOTION-BLOCKING — found 2026-08-07, after the gate. Read this before deciding.
 
+### 0. STATUS UPDATE 2026-08-07 — the wedge is FIXED (Fazal: "Fix the wedge."), VT-736 `16d98cc4`
+`task_store.settle_unretryable_block()` settles a never-retrying block into `dead_letter` at the
+workflow tail: slot released, `_promote_next_queued` fires, reaper still never auto-retries, operator
+redrive preserved. `next_retry_at IS NULL` is inside the UPDATE, so a task the reaper is concurrently
+arming for retry is left alone — the one way this fix could have caused damage, and it has its own test.
+
+**The 5 live dev tenants settled**, each `has_active_task` True → **False**; **0 wedged rows remain**.
+None had queued tasks behind them, so promotion had nothing to fire on dev — that half is proven in a
+test that asserts promotion returns `None` before the fix and promotes the sibling after.
+
+**A pre-existing test had the wedge written down as an invariant.**
+`test_blocked_outcome_does_not_promote_a_queued_sibling` asserted the sibling stays queued, on a
+docstring that restated the mechanism ("blocked is non-terminal, non-terminal doesn't promote")
+without ever saying why a task that can never resume should keep the slot. It was rewritten to assert
+the release, and a NEW `test_a_block_awaiting_retry_keeps_the_slot` preserves the half that was right.
+That is how this survived: it was green the whole time. 970 manager+agent tests pass.
+
+**Traced the owner-visible symptom to its line:** `dispatch.py:593` injects *"You already have a task
+in-flight for this owner — do NOT start a duplicate"* whenever the slot reads busy. That is verbatim
+the source of `second_plan_queue_busy`'s "already in progress" reply — the admission gate firing on a
+dead slot.
+
+6-scenario ×3 re-gate on deployed dev: RUNNING at the time of writing.
+
 ### 1. The concurrency wedge is REAL, deterministic, and live on dev. I retract "unknown".
 I reported the wedge as UNKNOWN-for-the-pack because the harness reaps tenants before
 `manager_tasks` can be queried. That was reporting the limit of ONE method as if it were the limit of
@@ -135,6 +159,29 @@ with empty industries/size_bands/maturity_stages (maximum unknown-dimension pena
 **0.10**), and `_recency()` returns **0.0 by construction** for evergreen cards. Deciding which cards
 are "universal" is a claim about the knowledge; moving the floor is a design call. **CC did not tune
 the gate to make an answer appear.**
+
+**UPDATE 2026-08-07 — the scoring fix is built (`85b45f4b`) and the answer is now numeric.** An
+inapplicable component (recency on an evergreen claim) is dropped and the weights renormalized rather
+than folded in as a 0.0. Necessary, and nowhere near sufficient. Measured on the 3 dev cases against
+the real 64-card pool with real embeddings, floor 0.62:
+
+| scenario | score | verdict |
+|---|---:|---|
+| best actually observed, renormalized (was 0.270) | **0.278** | short |
+| ceiling at a PERFECT semantic match, corpus as-is | 0.5574 | short |
+| ceiling at a PERFECT semantic match, every card marked universal | 0.6316 | clears |
+| **best semantic actually observed (0.555), every card universal** | **0.3524** | **short** |
+| semantic similarity required to reach 0.62 even if universal | **1.000** | unreachable |
+
+Observed semantic range across the three cases: **0.254 – 0.555**. So **no corpus-metadata fix gets
+real business questions over 0.62** — the ceiling row only clears at a literally perfect embedding
+match. **The floor (or the hybrid weighting) is the binding constraint**, because lexical and entity
+overlap are near-zero on prose queries and drag every score down. That is Fazal's call, with data.
+
+**Deliberately NOT done:** redefining "card declares no restriction" as "universal". That would score
+all 64 cards as applying to every industry, size and maturity on the strength of nobody having said
+otherwise, and an existing test protects the distinction on purpose. Whether those cards ARE
+universal is a claim about the knowledge — governance's call, not the scorer's.
 
 **Correction to an earlier claim in this document:** the VT-727 canary PASS is real but narrower than
 it reads — its one retrieved card came from a **self-query** (it embeds a card's own text as the
