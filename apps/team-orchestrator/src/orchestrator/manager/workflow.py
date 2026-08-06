@@ -1045,6 +1045,23 @@ def _arm_escalation_for_notify(tenant_id: str, task_id: str) -> None:
 
 
 @DBOS.step()
+def _settle_unretryable_block(tenant_id: str, task_id: str) -> bool:
+    """VT-736 — settle a never-retrying block into ``dead_letter`` so the tenant's slot is released.
+
+    A separate memoized step from the owner notify, mirroring the arm/notify split above: a replay
+    must not re-settle (the CAS makes that a no-op anyway) and must not disturb the notify's own
+    once-only guarantee. Fail-soft — the caller is a workflow TAIL, and a settlement failure must
+    leave the previous behaviour (a held slot, visible to ops) rather than break the whole task."""
+    try:
+        return task_store.settle_unretryable_block(tenant_id, task_id)
+    except Exception:  # noqa: BLE001 — a tail cleanup must never fail the task it is closing
+        logger.warning(
+            "VT-736 slot release failed (fail-soft) task=%s — slot stays held", task_id, exc_info=True
+        )
+        return False
+
+
+@DBOS.step()
 def _resume_task_after_needs_changes(tenant_id: str, task_id: str) -> None:
     """VT-607 fix round — a 'needs_changes' decision replaces the step (via _apply_step_revision,
     called by the caller just before this) but manager_review's ORIGINAL 'complete' decision had
@@ -1419,6 +1436,19 @@ def manager_task_workflow(tenant_id: str, task_id: str) -> str:
         # owner_notification_status=='pending', so a block that was NOT armed (default 'not_required')
         # is a clean no-op, and a re-entry after a delivered send sends nothing.
         _notify_owner_of_terminal(tenant_id, task_id)
+        # VT-736 — RELEASE THE SLOT. A block that armed no `next_retry_at` will never auto-retry
+        # (the reaper's ladder only wakes blocked rows whose retry time has elapsed; one without is
+        # "left for a human"), yet `blocked` sits in TASK_ACTIVE and so held the tenant's ONE active
+        # slot forever — and because `blocked` is not TASK_TERMINAL, the promote below never ran, so
+        # every task queued behind it starved too. Five dev tenants were wedged this way, the oldest
+        # for a month, each still being told their work was "already in progress".
+        #
+        # Settling to `dead_letter` is what the status already means here: terminal, never
+        # auto-retried, operator-redrivable. It runs AFTER the owner notify so the honest closure is
+        # unchanged, and it is CAS'd on `next_retry_at IS NULL` inside the UPDATE so a task the
+        # reaper is concurrently arming for retry is left alone.
+        if _settle_unretryable_block(tenant_id, task_id):
+            final_status = "dead_letter"
     if final_status in task_store.TASK_TERMINAL:
         _promote_next_queued(tenant_id)
     return final_status

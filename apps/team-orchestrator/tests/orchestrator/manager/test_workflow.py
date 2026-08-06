@@ -29,6 +29,21 @@ pytestmark = pytest.mark.skipif(
     reason="DATABASE_URL not set — VT-606 manager_task_workflow tests skipped",
 )
 
+#: VT-736 — what a PERMANENT block settles to now.
+#:
+#: These paths (limit exhausted / prereq failed / escalate / owner-wait timeout) all end with
+#: status='blocked' + terminal_outcome='escalated' and NO ``next_retry_at``, meaning nothing will
+#: ever resume them. ``blocked`` is in TASK_ACTIVE, so leaving them there held the tenant's ONE
+#: active slot forever and starved every queued task behind it — five dev tenants sat wedged that
+#: way, the oldest for a month. The workflow tail now settles such a task to ``dead_letter``, which
+#: is what the status already means here: terminal, never auto-retried, operator-redrivable.
+#:
+#: So these assertions changed from "blocked" to "dead_letter" because the SLOT BEHAVIOUR changed,
+#: not because the block stopped happening — the incident, the escalated outcome and the honest
+#: owner closure are all asserted unchanged alongside. A block with a PENDING RETRY still stays
+#: 'blocked' and still holds the slot; that case has its own test below.
+_PERMANENT_BLOCK = "dead_letter"
+
 
 @pytest.fixture(scope="module")
 def substrate():
@@ -217,7 +232,7 @@ def test_not_verified_exhausts_budget_blocks_with_incident(substrate, monkeypatc
     monkeypatch.setattr(wf, "_dispatch_specialist_step", _dispatch)
     status = wf.manager_task_workflow(tid, task_id)
 
-    assert status == "blocked"
+    assert status == _PERMANENT_BLOCK
     with substrate.connection() as conn:
         row = conn.execute(
             "SELECT id FROM incidents WHERE tenant_id = %s AND run_id = %s", (tid, task_id)
@@ -254,7 +269,7 @@ def test_not_verified_at_eight_step_ceiling_blocks_immediately(substrate, monkey
     monkeypatch.setattr(wf, "_dispatch_specialist_step", _dispatch)
     status = wf.manager_task_workflow(tid, task_id)
 
-    assert status == "blocked"
+    assert status == _PERMANENT_BLOCK
 
 
 # --- revise_step: applies the REVISED outcome (round-3 MAJOR #4) --------------------------------
@@ -354,7 +369,7 @@ def test_validate_step_blocks_on_unmet_activation_prereqs(substrate, monkeypatch
     )
     status = wf.manager_task_workflow(tid, task_id)
 
-    assert status == "blocked"
+    assert status == _PERMANENT_BLOCK
     assert dispatch_calls == []  # never reached dispatch — the prereq gate caught it first
 
 
@@ -381,7 +396,7 @@ def test_validate_step_blocks_on_unmet_activation_prereqs_for_integration_agent(
     )
     status = wf.manager_task_workflow(tid, task_id)
 
-    assert status == "blocked"
+    assert status == _PERMANENT_BLOCK
     assert dispatch_calls == []  # never reached dispatch — the prereq gate caught it first
 
 
@@ -423,7 +438,7 @@ def test_validate_step_blocks_on_frozen_business_impact_class(substrate, monkeyp
     )
     status = wf.manager_task_workflow(tid, task_id)
 
-    assert status == "blocked"
+    assert status == _PERMANENT_BLOCK
     assert dispatch_calls == []
 
 
@@ -496,7 +511,7 @@ def test_escalate_outcome_ends_loop_without_further_dispatch(substrate, monkeypa
     monkeypatch.setattr(wf, "_dispatch_specialist_step", _dispatch)
     status = wf.manager_task_workflow(tid, task_id)
 
-    assert status == "blocked"
+    assert status == _PERMANENT_BLOCK
     assert len(calls) == 1  # escalate must NOT trigger a further dispatch
     # VT-632 Step 5 — an escalate must arm the honest owner closure, never leave silence after the
     # interim ack (the seeded tenant has no owner_phone, so the notify itself defers and leaves the
@@ -527,7 +542,7 @@ def test_revision_limit_exceeded_blocks_with_incident(substrate, monkeypatch: py
     monkeypatch.setattr(wf, "_dispatch_specialist_step", _always_revise)
     status = wf.manager_task_workflow(tid, task_id)
 
-    assert status == "blocked"
+    assert status == _PERMANENT_BLOCK
     # LIMIT_MAX_REVISIONS_PER_STEP=2 -> allowed on attempts 1,2; the 3rd revise_step trips the limit.
     assert dispatch_count["n"] == wf.LIMIT_MAX_REVISIONS_PER_STEP + 1
     with substrate.connection() as conn:
@@ -563,7 +578,7 @@ def test_prereq_policy_block_uses_other_not_limit_exhausted(substrate, monkeypat
     monkeypatch.setattr(wf, "_dispatch_specialist_step", lambda *a, **k: ("complete", None))
 
     status = wf.manager_task_workflow(tid, task_id)
-    assert status == "blocked"
+    assert status == _PERMANENT_BLOCK
 
     with substrate.connection() as conn:
         row = conn.execute(
@@ -597,7 +612,7 @@ def test_cycle_limit_exceeded_blocks_with_incident(substrate, monkeypatch: pytes
     monkeypatch.setattr(wf, "_dispatch_specialist_step", _always_continue)
     status = wf.manager_task_workflow(tid, task_id)
 
-    assert status == "blocked"
+    assert status == _PERMANENT_BLOCK
 
 
 # --- ask_owner: wait, answer, resume -------------------------------------------------------------
@@ -746,7 +761,7 @@ def test_ask_owner_timeout_blocks_with_incident(substrate, monkeypatch: pytest.M
     monkeypatch.setattr(wf, "_maybe_reengage_stale", lambda *a, **k: False)
 
     status = wf.manager_task_workflow(tid, task_id)
-    assert status == "blocked"
+    assert status == _PERMANENT_BLOCK
 
 
 def test_reengage_stale_called_exactly_once_per_stale_window(substrate, monkeypatch: pytest.MonkeyPatch):
@@ -775,7 +790,7 @@ def test_reengage_stale_called_exactly_once_per_stale_window(substrate, monkeypa
 
     status = wf.manager_task_workflow(tid, task_id)
 
-    assert status == "blocked"  # exhausted _OWNER_WAIT_MAX_POLLS without an answer
+    assert status == _PERMANENT_BLOCK  # exhausted _OWNER_WAIT_MAX_POLLS without an answer
     assert reengage_calls["n"] == 1  # called on poll 1 only, never again across polls 2-5
 
 
@@ -808,9 +823,23 @@ def test_terminal_task_promotes_oldest_queued(substrate, monkeypatch: pytest.Mon
     assert task_store.get_task(tid, queued_task)["status"] == "planned"
 
 
-def test_blocked_outcome_does_not_promote_a_queued_sibling(substrate, monkeypatch: pytest.MonkeyPatch):
-    """The OTHER half of the promotion-wiring test: a task that ends 'blocked' (non-terminal) must
-    NOT free up the tenant's admission slot — only a TRUE terminal status does."""
+def test_escalated_block_releases_the_slot_and_promotes_the_queued_sibling(
+    substrate, monkeypatch: pytest.MonkeyPatch
+):
+    """VT-736 — THIS ASSERTION IS INVERTED FROM WHAT IT WAS, deliberately.
+
+    It previously read "a task that ends 'blocked' must NOT free up the tenant's admission slot —
+    only a TRUE terminal status does", and asserted the sibling stayed 'queued'. That rationale was
+    circular: it restated the mechanism (blocked is non-terminal, non-terminal doesn't promote)
+    without ever saying why a task that can NEVER resume should keep the slot. It was the wedge,
+    written down as an invariant — and it held: five dev tenants were found wedged, the oldest for
+    a month, each still being told their work was "already in progress" by the admission gate.
+
+    An escalated block arms no ``next_retry_at``, so nothing will ever resume it. It now settles to
+    ``dead_letter`` — terminal, never auto-retried, still operator-redrivable — which releases the
+    slot and lets the queue move. The legitimate half of the old invariant (a block that IS awaiting
+    a retry must keep the slot) is preserved and proven by the test directly below.
+    """
     import orchestrator.manager.workflow as wf
     from orchestrator.manager import plan_store, task_store
     from orchestrator.manager.plan_models import ManagerPlan, PlanStep
@@ -828,8 +857,41 @@ def test_blocked_outcome_does_not_promote_a_queued_sibling(substrate, monkeypatc
     monkeypatch.setattr(wf, "_dispatch_specialist_step", _dispatch)
     final_status = wf.manager_task_workflow(tid, str(active_task))
 
-    assert final_status == "blocked"
-    assert task_store.get_task(tid, queued_task)["status"] == "queued"  # unchanged — still waiting
+    assert final_status == _PERMANENT_BLOCK
+    # The escalation itself is unchanged — it still stopped, and ops can still see why.
+    assert task_store.get_task(tid, active_task)["terminal_outcome"] == "escalated"
+    # The owner's next ask is no longer starved behind a task that will never run again.
+    assert task_store.get_task(tid, queued_task)["status"] == "planned"
+    assert task_store.has_active_task(tid) is True  # ...because the PROMOTED one now holds it
+
+
+def test_a_block_awaiting_retry_keeps_the_slot(substrate, monkeypatch: pytest.MonkeyPatch):
+    """The half of the old invariant that was RIGHT, kept explicit so VT-736 cannot over-reach.
+
+    A blocked task with a pending ``next_retry_at`` is mid-ladder, not wedged: the reaper will wake
+    it. Settling that would cancel a retry and let a sibling run concurrently with the resumed task
+    — the one way this fix could cause real damage. The settlement CASes on
+    ``next_retry_at IS NULL`` precisely so this case is untouched.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from orchestrator.manager import plan_store, task_store
+    from orchestrator.manager.plan_models import ManagerPlan, PlanStep
+
+    tid = _seed_tenant(substrate)
+    active_task = _create_task(tid)
+    second_plan = ManagerPlan(objective="second", steps=[PlanStep(step_seq=1, kind="verification")])
+    queued_task = plan_store.create_plan(tid, second_plan, source_message_sid=f"SM{uuid4().hex}")
+
+    with substrate.connection() as conn:
+        conn.execute(
+            "UPDATE manager_tasks SET status = 'blocked', next_retry_at = %s WHERE id = %s",
+            (datetime.now(timezone.utc) + timedelta(minutes=5), str(active_task)),
+        )
+
+    assert task_store.settle_unretryable_block(tid, active_task) is False
+    assert task_store.get_task(tid, active_task)["status"] == "blocked"
+    assert task_store.get_task(tid, queued_task)["status"] == "queued"  # still correctly waiting
 
 
 # --- paused_approval: decision-aware resolution (VT-607 fix round, adversarial review) ---------
@@ -906,7 +968,7 @@ def test_paused_approval_resolution_timeout_blocks_with_incident(substrate, monk
 
     status = wf.manager_task_workflow(tid, task_id)
 
-    assert status == "blocked"
+    assert status == _PERMANENT_BLOCK
     with substrate.connection() as conn:
         row = conn.execute(
             "SELECT id FROM incidents WHERE tenant_id = %s AND run_id = %s", (tid, task_id)
@@ -1108,7 +1170,7 @@ def test_paused_approval_needs_changes_budget_exhausted_blocks(substrate, monkey
 
     status = wf.manager_task_workflow(tid, task_id)
 
-    assert status == "blocked"
+    assert status == _PERMANENT_BLOCK
 
 
 def test_paused_approval_timeout_blocks_with_incident(substrate, monkeypatch: pytest.MonkeyPatch):
@@ -1131,7 +1193,7 @@ def test_paused_approval_timeout_blocks_with_incident(substrate, monkeypatch: py
 
     status = wf.manager_task_workflow(tid, task_id)
 
-    assert status == "blocked"
+    assert status == _PERMANENT_BLOCK
     with substrate.connection() as conn:
         row = conn.execute(
             "SELECT id, detail FROM incidents WHERE tenant_id = %s AND run_id = %s", (tid, task_id)
