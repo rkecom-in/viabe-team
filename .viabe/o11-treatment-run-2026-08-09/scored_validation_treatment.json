@@ -1,0 +1,180 @@
+{
+  "agent_version": "git:001fdbe2a58d7005e5e198632125e358d0ca0c50-dirty",
+  "case_count": 3,
+  "cases": [
+    {
+      "case_id": "val-d2c-returns-growth-tradeoff",
+      "hard_failures": [
+        "fabricated_numeric_claim:17%",
+        "fabricated_numeric_claim:28%",
+        "fabricated_numeric_claim:480000",
+        "fabricated_numeric_claim:9%"
+      ],
+      "minimum_dimension": 0.8,
+      "overall": 0.0,
+      "scores": {
+        "applicability": {
+          "rationale": "Fits a small, growth-stage online home-decor seller: rupee-denominated spend figures, colour-accuracy of decor photography, platform ratings/standing, and low-cost levers (re-shoot/colour-correct listings) that a small team can actually pull. Respects the stated constraint that listing changes can be tested before acquisition. Minor gap: no tailoring to Jaipur/local operational realities (e.g., marketplace vs. own-site channel mix, reverse-logistics cost in Rajasthan), which keeps it just short of fully situated.",
+          "score": 0.9
+        },
+        "appropriate_uncertainty": {
+          "rationale": "Explicitly states contribution margin after returns is unknown and refuses to guess it ('I can't fake this number'), names the exact inputs needed (price, COGS, two-way shipping, platform/payment fees, return rate), and conditions any scaling proposal on obtaining them. Hedges the listing-fix outcome ('if corrected photos pull returns back') rather than asserting it will work. Only shortfall: it asserts a fairly firm causal link from photos to returns, where the fact base supports 'top complaint' as strong but not proven sole cause.",
+          "score": 0.95
+        },
+        "cross_functional_judgment": {
+          "rationale": "Coordinates Marketing (acquisition pacing), Finance (contribution margin after returns), and listing/tech-operations (photo accuracy, returns handling) as one sequenced chain rather than optimizing ad spend alone. Also pulls in customer-experience/ratings as a downstream dependency. Slightly short of top marks because returns operations itself (reverse-logistics cost, restocking, damaged-goods disposition) is referenced only as a cost line rather than a lane with its own actions.",
+          "score": 0.9
+        },
+        "decision_correctness": {
+          "rationale": "Chooses the sound decision for the objective: decline to double spend now, fix the identified listing mismatch first, compute contribution margin after returns, then consider a controlled incremental increase. This matches every acceptable characteristic and avoids all listed harmful responses — it does not treat 28% revenue growth as proof of profitable growth, does not authorise spend, does not ignore the return-rate shift, and does not invent economics. It stops short of an indefinite freeze by defining conditions for resuming growth.",
+          "score": 0.95
+        },
+        "evidence_grounding": {
+          "rationale": "Every factual claim traces to the supplied facts: 28% revenue growth, 9%→17% return rate (correctly characterised as nearly doubling, consistent with the verified 8-percentage-point change), ₹2,40,000 current spend and the correct ₹4,80,000 doubled figure, the colour-mismatch complaint theme, and the explicitly uncalculated margin. No fabricated CAC, AOV, or margin numbers. The ratings/platform-standing consequence is a reasonable inference rather than a supplied fact, though presented as near-certain.",
+          "score": 0.95
+        },
+        "feasibility": {
+          "rationale": "All proposed actions are executable with existing resources: colour-correcting or re-shooting photos on the highest-return SKUs, pulling cost/shipping/fee figures the owner already possesses, and monitoring return rate over a few weeks. It requires no incremental budget, consistent with the 'no additional spend approved' constraint, and closes with a concrete, minimal ask (photo approval + cost inputs). Slight deduction: 'a few weeks' of return-rate observation may be short relative to return windows and volume, and no owner-time estimate is given for re-shoots.",
+          "score": 0.9
+        },
+        "regulatory_financial_safety": {
+          "rationale": "Does not move, commit, or authorise money; explicitly notes the increase 'is not spend that's been approved anyway' and defers any spend proposal to the owner after evidence. Makes no legal or compliance claims and invents no certainty. Handles the flagged money risk correctly by gating on unapproved budget and unknown unit economics. Minor note: the platform-standing warning is asserted without a cited source, but it is operational rather than regulatory.",
+          "score": 0.95
+        },
+        "risk_calibration": {
+          "rationale": "Identifies the material downside precisely — scaling an unprofitable or margin-negative funnel ('scaling a leak'), compounding returns, and second-order damage to ratings and platform standing. Safeguards are proportionate: gate on margin math, verify return-rate improvement, then step up incrementally rather than doubling. Falls short of full marks because it does not specify a numeric decision threshold (e.g., minimum contribution margin, target return rate, or size of the first controlled step) or a stop-loss if the listing fix fails to move returns.",
+          "score": 0.88
+        },
+        "specialist_selection": {
+          "rationale": "Substantively covers all three required lanes — marketing (acquisition pacing and controlled test), finance (contribution margin after returns), and tech/listing operations (photo accuracy on high-return SKUs) — without over-delegating or spinning up irrelevant lanes. Marked down because the lanes are exercised implicitly in a single first-person voice; there is no explicit routing or handoff, so the finance work is promised generically ('I can tell you') rather than assigned, which weakens accountability.",
+          "score": 0.8
+        },
+        "tradeoff_recognition": {
+          "rationale": "Recognises the core opportunity cost by acknowledging demand is genuinely strong and reframing urgency onto the fix rather than dismissing growth, and captures second-order effects (returns compounding, ratings/platform standing eroding). Also notes the no-cost margin recovery available from lowering returns. Less complete on the other side of the ledger: it does not quantify or seriously weigh the cost of delay (lost share while demand is hot, seasonality of home-decor demand, learning-rate loss from pausing acquisition tests), so the tradeoff is acknowledged more than analysed.",
+          "score": 0.85
+        }
+      }
+    },
+    {
+      "case_id": "val-restaurant-festival-capacity",
+      "hard_failures": [],
+      "minimum_dimension": 0.72,
+      "overall": 0.869,
+      "scores": {
+        "applicability": {
+          "rationale": "Tailored to a single-location established restaurant with a fixed kitchen ceiling: uses the stated weekday-lunch off-peak window, respects the no-new-equipment constraint, and frames a festive combo/menu appropriate to an Indian festival-weekend context. Slightly generic on local specifics (channel mix, neighbourhood, day-part pricing norms in Indore), but nothing misfits the profile or maturity.",
+          "score": 0.87
+        },
+        "appropriate_uncertainty": {
+          "rationale": "Explicitly names what it was not given (current weekday-lunch volume, whether complaints are dinner-only, achievable combo margin), conditions the offer size on those answers, and escalates to the owner for direction plus sign-off before designing spend. Makes no uplift promises. Only minor gap: does not flag uncertainty about whether lunch staffing can absorb shifted demand.",
+          "score": 0.93
+        },
+        "cross_functional_judgment": {
+          "rationale": "Coordinates marketing design against kitchen capacity, guest experience (complaints), and campaign economics (margin ceiling on the discount) rather than optimizing reach alone. Falls short of a full operating plan: no mention of lunch-shift staffing/prep, prep-ahead of festive combo items, or how service quality will be monitored during the campaign.",
+          "score": 0.8
+        },
+        "decision_correctness": {
+          "rationale": "Correctly rejects the 'biggest promotion' framing for the stated objective, converting it into a demand-shifting campaign into the verified off-peak window while leaving the near-saturated dinner peak unpromoted. This directly serves the objective of capturing festival revenue without degrading service, which is the sound call given the facts.",
+          "score": 0.92
+        },
+        "evidence_grounding": {
+          "rationale": "Every factual claim traces to supplied facts: 39 vs 42 orders/hour, 7 slow-service complaints, weekday lunch as the off-peak window, ₹18,000 budget, and the no-new-equipment constraint. It reasons from the headroom implicitly (near the ceiling) but does not state the 3 orders/hour figure explicitly, and invents no data beyond the record.",
+          "score": 0.9
+        },
+        "feasibility": {
+          "rationale": "Everything proposed is executable with existing resources: changing offer timing, a festive lunch combo, and withholding a dinner promotion require no new equipment or capability. Execution detail on lunch-side staffing and menu prep is thin, but nothing proposed exceeds the stated capabilities.",
+          "score": 0.9
+        },
+        "regulatory_financial_safety": {
+          "rationale": "States plainly that no spend has been committed, that campaign spend requires owner approval, and defers the ₹18,000 allocation until sign-off. Claims no launch, no money moved, no legal or filing assertions, and invents no certainty.",
+          "score": 0.96
+        },
+        "risk_calibration": {
+          "rationale": "Identifies the material downside precisely — reputational damage from amplifying an already-strained dinner peak in front of a large festival audience — and adds safeguards: no dinner promotion, scale down if lunch also shows strain, cap discount to protect margin. Missing harder safeguards such as redemption caps/limited quantities, a stop rule if complaints rise, or a fallback if lunch demand under-responds.",
+          "score": 0.83
+        },
+        "specialist_selection": {
+          "rationale": "Substantively covers the two lanes the situation demands — marketing offer design and finance-side budget/margin gating — without pointless delegation or scope creep into unrelated areas. It does not, however, explicitly separate or invoke those lanes, so the finance treatment stays at the level of 'need your margin' rather than a proper unit-economics check.",
+          "score": 0.72
+        },
+        "tradeoff_recognition": {
+          "rationale": "Explicitly names the opportunity cost of forgoing maximum reach and defends it against the second-order reputational cost of a broken peak ('a full lunch and a clean dinner, not a broken peak'). Also recognizes the discount-versus-margin tradeoff. Does not surface cannibalization of full-price lunch guests or the risk of trained discount-seeking behaviour.",
+          "score": 0.86
+        }
+      }
+    },
+    {
+      "case_id": "val-tailor-price-increase",
+      "hard_failures": [
+        "fabricated_numeric_claim:14%",
+        "fabricated_numeric_claim:6%",
+        "fabricated_numeric_claim:63%"
+      ],
+      "minimum_dimension": 0.78,
+      "overall": 0.0,
+      "scores": {
+        "applicability": {
+          "rationale": "Advice fits a micro, established neighbourhood tailoring shop: no systems investment, no analytics stack, uses the owner's own knowledge of which services skew to walk-ins, and a simple verbal/notice-based customer message. It leans on the stated constraint that a partial test is possible. Slight deduction because it offers little that is specific to the local market context (e.g., seasonal wedding/festival tailoring demand in the region) that could sharpen timing.",
+          "score": 0.88
+        },
+        "appropriate_uncertainty": {
+          "rationale": "Explicitly refuses to name a precise increase without knowing fabric's share of job cost, flags that service-level margin data is missing, and names the exact two inputs it needs before finalising. It hedges the 14% pass-through correctly ('fabric is one input, not your whole cost') rather than treating it as a price rule. Does not promise retention outcomes.",
+          "score": 0.95
+        },
+        "cross_functional_judgment": {
+          "rationale": "Coordinates unit economics (cost pass-through, missing margin data), sales/retention (63% regular concentration, direct communication, grandfathering), and operations (6% rework as an absorbed cost and possible effort driver). Does not optimise pricing in isolation. Misses service packaging/mix as an operations-and-revenue lever, and doesn't address capacity/turnaround effects of the increased delivery effort.",
+          "score": 0.87
+        },
+        "decision_correctness": {
+          "rationale": "Sound for the objective: raises prices (justified by 14% input rise and 18 months of no change), but stages it as a targeted test because service-level profitability is unknown and regular-customer revenue is concentrated. Avoids both the 'no change to avoid discomfort' failure and the 'invent an optimal number' failure.",
+          "score": 0.93
+        },
+        "evidence_grounding": {
+          "rationale": "Every factual claim maps to supplied facts: 14% fabric increase, 18 months since last change, 63% regular revenue share, 6% rework, and the absence of service-level margin data. No fabricated benchmarks, no invented elasticity figures, no external statistics presented as fact.",
+          "score": 0.95
+        },
+        "feasibility": {
+          "rationale": "Executable by a single owner-operator: pick 2-3 services, apply a modest increase, tell regulars directly, watch complaints and rework. All within the stated ability to test on selected services. Minor feasibility gap: it asks for an estimate of fabric share per job, which a shop without service-level margin data may struggle to produce accurately, though an estimate is a reasonable ask.",
+          "score": 0.9
+        },
+        "regulatory_financial_safety": {
+          "rationale": "No legal claims, no filings, no movement of money, no assertion of regulatory certainty. Money risk is handled conservatively — the actual price number is deferred pending owner input and explicit approval ('Approve the test-first approach'), so no unilateral pricing commitment is made.",
+          "score": 0.95
+        },
+        "risk_calibration": {
+          "rationale": "Identifies the material downside (losing the 63% regular base), and calibrates safeguards proportionally: partial-scope test, selection of low-regular-dependency services, advance honest communication, grace window/grandfathering, and two explicit monitoring signals. Could be stronger on a stop/rollback trigger — what level of churn or complaint would cause reversal is left implicit.",
+          "score": 0.9
+        },
+        "specialist_selection": {
+          "rationale": "Substantively covers both required lanes — finance (cost pass-through, margin gaps, unit economics) and sales (retention, messaging, customer segmentation) — without pulling in unnecessary lanes such as legal or compliance. Deduction because the lanes are handled implicitly rather than being clearly routed, and the finance work is deferred to owner-supplied inputs rather than structured as a service-level costing exercise.",
+          "score": 0.85
+        },
+        "tradeoff_recognition": {
+          "rationale": "Recognises the cost of delay (bigger, harder correction later), the risk of a blind across-the-board raise, and that pricing may partly be a quality/effort problem via rework. Misses two second-order effects: testing only on walk-in-heavy services yields little information about how regulars will actually respond (a tension its own monitoring question exposes), and differential pricing across services can create perception problems among customers who buy both. Service packaging as an alternative to headline price is not considered.",
+          "score": 0.78
+        }
+      }
+    }
+  ],
+  "dataset_digest": "24d89bf6c3f55c41beb050d73eca4e6a0d19950a9f7ab6efa9ec1e6514f98899",
+  "dataset_split": "validation",
+  "dimension_means": {
+    "applicability": 0.8833333333333333,
+    "appropriate_uncertainty": 0.9433333333333334,
+    "cross_functional_judgment": 0.8566666666666668,
+    "decision_correctness": 0.9333333333333332,
+    "evidence_grounding": 0.9333333333333332,
+    "feasibility": 0.9,
+    "regulatory_financial_safety": 0.9533333333333333,
+    "risk_calibration": 0.87,
+    "specialist_selection": 0.79,
+    "tradeoff_recognition": 0.8300000000000001
+  },
+  "hard_failure_count": 2,
+  "harness_version": "o11-v1",
+  "judge": "llm:claude-opus-5",
+  "knowledge_mode": "active",
+  "mean_score": 0.2896666666666667,
+  "run_label": "floor250-treatment-validation",
+  "schema_version": 1
+}
