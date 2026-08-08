@@ -94,6 +94,7 @@ from uuid import UUID
 
 from langchain_core.callbacks import BaseCallbackHandler
 
+from orchestrator.llm import fast_budget as _fast_budget
 from orchestrator.llm import service_tier_policy as _service_tier_policy
 from orchestrator.llm_config import sampling_kwargs
 
@@ -455,7 +456,16 @@ def resolve_chat_model(
         configured_tier = (
             override
             if override != "standard"
-            else _service_tier_policy.resolve_service_tier(call_site, tenant_id=tenant_id)
+            else _service_tier_policy.resolve_service_tier(
+                call_site,
+                tenant_id=tenant_id,
+                # VT-735: supply the budget store. Until now the hook existed and nothing passed
+                # it, so `_fast_allowed` short-circuited to True and Fast was unbounded — the
+                # policy's per-tenant daily cap was declared but not enforced. The check is cached
+                # and fails OPEN; see fast_budget.py for why that is the right side to fail on
+                # for a tier whose whole purpose is latency on the approval path.
+                fast_budget_check=_fast_budget.fast_budget_check,
+            )
         )
     else:
         configured_tier = "standard"

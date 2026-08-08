@@ -54,6 +54,8 @@ TriggerKind = Literal[
     "silent_terminal",  # the detector opened a silent-terminal incident
     # VT-557 (B6): a manager_task exhausted its retry budget → dead_letter (operator must redrive).
     "dead_letter_task",  # the retry-ladder reaper dead-lettered a chronically-stalled task
+    # VT-735: a tenant exhausted its daily Fast-tier budget and is degrading to Standard.
+    "fast_budget_exhausted",
 ]
 
 Severity = Literal["critical", "warning"]
@@ -86,6 +88,10 @@ _SEVERITY_BY_KIND: dict[TriggerKind, Severity] = {
     "silent_terminal": "warning",
     # VT-557 — a dead-lettered task is stuck until an operator redrives → ops-actionable warning.
     "dead_letter_task": "warning",
+    # VT-735 — the Fast budget is a runaway-loop tripwire, and the degrade to Standard means the
+    # turn still completes correctly (just not on the premium tier). Ops-actionable, never a page:
+    # same reasoning as "hard_limit", which is a budget gate working as designed.
+    "fast_budget_exhausted": "warning",
 }
 
 # VT-620 — error-envelope subtypes that are a correctness/quality GATE working as designed
