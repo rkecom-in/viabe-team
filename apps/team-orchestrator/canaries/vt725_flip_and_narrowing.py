@@ -92,6 +92,16 @@ def main(argv: list[str] | None = None) -> int:
     os.environ.setdefault("TEAM_KNOWLEDGE_SERVING", "shadow")
     tenant_a, tenant_b = str(UUID(args.tenant_a)), str(UUID(args.tenant_b))
     dsn = _dsn()
+
+    # The serving path reads through `tenant_connection`, which borrows the module-level pool.
+    # Without this the pool does not exist, every read raises, and `card_serving` fail-softs to
+    # no-cards — so the canary would report "tenant A retrieved ZERO cards" and look like a
+    # retrieval failure when the real fault is that the harness never booted the substrate.
+    # It failed loudly rather than passing, which is the right side to fail on, but it was
+    # measuring the harness instead of the flip. `init_substrate` is idempotent.
+    from orchestrator.graph import init_substrate
+
+    init_substrate(dsn)
     failures: list[str] = []
     assignment_id: str | None = None
 

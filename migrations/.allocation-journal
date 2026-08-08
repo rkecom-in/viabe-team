@@ -5,3 +5,4 @@
 2026-08-07T02:30:00Z	195	codex-via-clau	VT-727 embeddings split - RESERVED, never used (backfilled)
 2026-08-07T02:30:00Z	196	cc	VT-725 knowledge corpus RLS read policies (backfilled)
 2026-08-07T02:35:00Z	197	cc	VT-735 OpenAI reprice
+2026-08-08T22:23:28Z	198	cc	VT-711 assignment FK cascade cannot fire
