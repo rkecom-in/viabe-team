@@ -50,6 +50,21 @@ _SOURCE_AUTHORITY = {
     SourceClass.T3_PRACTITIONER: 0.6,
     SourceClass.T4_EXPERIENTIAL: 0.3,
 }
+#: VT-725 — the hybrid weight vector.  ``RetrievalProfile.minimum_score`` is an EMPIRICAL floor
+#: fitted against exactly these weights and the metrics below them (cosine semantic, Jaccard
+#: lexical/entity).  Changing any weight, or any component's metric, moves the whole score scale and
+#: silently invalidates that floor — so `test_o8_floor_calibration.py` pins this vector and fails
+#: with a pointer to the re-derivation procedure rather than letting the floor rot unnoticed.
+SCORE_WEIGHTS: dict[str, float] = {
+    "semantic": 0.38,
+    "lexical": 0.24,
+    "entity": 0.10,
+    "authority": 0.12,
+    "applicability": 0.08,
+    "confidence": 0.05,
+    "recency": 0.03,
+}
+
 _CONFIDENCE = {
     EvidenceConfidence.LOW: 0.25,
     EvidenceConfidence.MEDIUM: 0.5,
@@ -86,7 +101,10 @@ class RetrievalBusinessContext(BaseModel):
 class ScoreComponents:
     semantic: float
     lexical: float
-    entity: float
+    #: VT-725 — ``None`` when the QUERY supplied no entity references at all, so there is nothing
+    #: for a card to match against and the dimension does not exist for this turn.  Scoring that
+    #: 0.0 docked every card equally for a fact about the query.
+    entity: float | None
     authority: float
     applicability: float
     #: VT-736 — ``None`` means the dimension does not APPLY to this card (an evergreen claim does
@@ -247,7 +265,7 @@ class CardRetrievalEngine:
             # contribution outside the card's declared claim domain.
             card_text = f"{card.claim} {card.distillation_note} {card.claim_key.canonical}"
             lexical = _jaccard(objective_tokens, _tokens(card_text))
-            entity = _jaccard(entity_tokens, _tokens(card_text)) if entity_tokens else 0.0
+            entity = _jaccard(entity_tokens, _tokens(card_text)) if entity_tokens else None
             try:
                 card_embedding = card_embeddings[card.card_version_id]
             except KeyError as exc:
@@ -274,11 +292,20 @@ class CardRetrievalEngine:
             # When nothing is inapplicable the weights sum to 1.0 and this is arithmetically
             # identical to the previous expression — existing behaviour is untouched.
             weighted: list[tuple[float, float]] = [
-                (0.38, semantic), (0.24, lexical), (0.10, entity), (0.12, authority),
-                (0.08, applicability_score), (0.05, confidence),
+                (SCORE_WEIGHTS["semantic"], semantic),
+                (SCORE_WEIGHTS["lexical"], lexical),
+                (SCORE_WEIGHTS["authority"], authority),
+                (SCORE_WEIGHTS["applicability"], applicability_score),
+                (SCORE_WEIGHTS["confidence"], confidence),
             ]
+            # VT-725 extends the same rule to `entity`: a query that named no entities gives the
+            # dimension nothing to match, which is inapplicability, not a zero score. NOTE this is
+            # a property of the QUERY, so when it fires it drops the same weight for every card and
+            # cannot re-rank a result set — it only stops the whole set being uniformly depressed.
+            if entity is not None:
+                weighted.append((SCORE_WEIGHTS["entity"], entity))
             if recency is not None:
-                weighted.append((0.03, recency))
+                weighted.append((SCORE_WEIGHTS["recency"], recency))
             score = sum(w * v for w, v in weighted) / sum(w for w, _v in weighted)
             if score < profile.minimum_score:
                 below_score_excluded += 1

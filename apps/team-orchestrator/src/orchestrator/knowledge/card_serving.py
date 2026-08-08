@@ -395,9 +395,18 @@ def _attribution_refs(
     return tuple(refs)
 
 
-def _bounded(value: float) -> float:
-    """Clamp to the [0,1] CHECK constraints so a float edge can never fail the whole write."""
+def _bounded(value: float | None) -> float | None:
+    """Clamp to the [0,1] CHECK constraints so a float edge can never fail the whole write.
 
+    VT-725: ``None`` means the dimension did not APPLY to this turn (entity scoring when the query
+    named no entities). It is persisted as SQL NULL — the column is already nullable — rather than
+    coerced to 0.0, because "did not apply" and "scored zero" are exactly the distinction the
+    renormalization exists to preserve, and the shadow ledger is what anyone auditing the floor
+    reads back.
+    """
+
+    if value is None:
+        return None
     return max(0.0, min(1.0, float(value)))
 
 
