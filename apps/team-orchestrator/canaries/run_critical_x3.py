@@ -41,6 +41,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import sys
 import uuid
 from dataclasses import dataclass
@@ -278,6 +279,14 @@ def run_scenario_x3(
             if not keep_tenants:
                 _teardown_tenant(tenant_id)
             else:
+                # VT-738 — the dump MUST precede the quiesce. `_quiesce_kept_tenant` flips every
+                # non-terminal manager_task to 'cancelled', and it excludes 'blocked' but NOT
+                # 'running'. A step still 'running' is exactly what distinguishes the loop's
+                # default-to-escalate (M1) from a dispatch that simply had not finished — so
+                # quiescing first would erase the one signal this whole re-drive exists to read,
+                # and it would erase it silently.
+                _assert_kept_tenant_is_synthetic(dsn, tenant_id)
+                _dump_forensics(dsn, tenant_id, name, i)
                 _quiesce_kept_tenant(dsn, tenant_id)
 
     # VT-728 — CONTAMINATION CHECK. A redeploy mid-run means these observations describe two
@@ -294,6 +303,106 @@ def run_scenario_x3(
         for obs in observations:
             obs.contaminated = True
     return observations
+
+
+#: VT-738 — the tables that answer "why did this turn not delegate". Ordered so the decision
+#: trail reads top-down: what triage decided, what the route was, what the task did, what ran.
+_FORENSIC_QUERIES: dict[str, str] = {
+    "tm_audit_log": (
+        "SELECT event_kind, actor, summary, decision, created_at FROM tm_audit_log "
+        "WHERE tenant_id = %(t)s ORDER BY created_at"
+    ),
+    "manager_tasks": (
+        "SELECT id, status, terminal_outcome, source_message_ref, created_at, updated_at "
+        "FROM manager_tasks WHERE tenant_id = %(t)s ORDER BY created_at"
+    ),
+    # Column names verified against information_schema on dev 2026-08-10 — the first cut guessed
+    # `attempt` (it is `step_seq`/`version`) and `pipeline_runs.created_at` (it is `started_at`),
+    # and both queries silently lost their table until the dump reported the UndefinedColumn.
+    "manager_task_steps": (
+        "SELECT id, task_id, step_seq, kind, status, specialist, version, created_at, updated_at "
+        "FROM manager_task_steps WHERE tenant_id = %(t)s ORDER BY created_at"
+    ),
+    "pipeline_runs": (
+        # run_type='manager_dispatch' + status='escalated' is the M1 signature; final_outcome and
+        # error_summary carry the rest of the why.
+        "SELECT id, run_type, status, final_outcome, error_summary, started_at, ended_at "
+        "FROM pipeline_runs WHERE tenant_id = %(t)s ORDER BY started_at"
+    ),
+    "campaigns": (
+        "SELECT id, run_id, status, created_at FROM campaigns "
+        "WHERE tenant_id = %(t)s ORDER BY created_at"
+    ),
+    "incidents": (
+        "SELECT id, incident_kind, severity, detail, created_at FROM incidents "
+        "WHERE tenant_id = %(t)s ORDER BY created_at"
+    ),
+}
+
+
+def _dump_forensics(dsn: str, tenant_id: str, scenario_name: str, run_index: int) -> None:
+    """Persist the decision trail for one kept tenant BEFORE anything mutates it.
+
+    The gate's tenants are reaped an hour after the run (`_REAP_AGE_HOURS = 1`), which is why the
+    last delegation investigation had to be done by reading transcripts and guessing: the rows that
+    would have answered it were already gone. This writes them to disk while they still exist.
+
+    Fail-soft, and deliberately so — a forensics failure must not fail a 40-minute measurement. But
+    it prints what it lost rather than skipping quietly, because a dump that silently wrote nothing
+    would send the next person back to guessing from transcripts again.
+    """
+    out_dir = _CANARIES / "_reports" / "vt738_forensics"
+    payload: dict[str, Any] = {
+        "scenario": scenario_name, "run_index": run_index, "tenant_id": tenant_id,
+    }
+    try:
+        import psycopg as _psycopg
+
+        out_dir.mkdir(parents=True, exist_ok=True)
+        with _psycopg.connect(dsn, autocommit=True, connect_timeout=10) as conn:
+            for table, sql in _FORENSIC_QUERIES.items():
+                try:
+                    rows = conn.execute(sql, {"t": tenant_id}).fetchall()
+                    cols = [d[0] for d in (conn.execute(sql, {"t": tenant_id}).description or [])]
+                    payload[table] = [dict(zip(cols, r, strict=False)) for r in rows]
+                except Exception as exc:  # noqa: BLE001 — one missing table must not lose the rest
+                    payload[table] = {"error": type(exc).__name__}
+                    print(f"    [forensics] {table} failed ({type(exc).__name__})")
+        path = out_dir / f"{scenario_name}-{run_index}-{tenant_id[:8]}.json"
+        path.write_text(json.dumps(payload, indent=1, default=str))
+        counts = {k: len(v) for k, v in payload.items() if isinstance(v, list)}
+        print(f"    [forensics] {path.name}: {counts}")
+    except Exception as exc:  # noqa: BLE001 — never fail the measurement on hygiene
+        print(f"    [forensics] DUMP FAILED for {tenant_id[:8]}… ({type(exc).__name__}) — "
+              "this tenant's decision trail is NOT recoverable after the reaper")
+
+
+def _assert_kept_tenant_is_synthetic(dsn: str, tenant_id: str) -> None:
+    """Refuse to leave a REAL-number tenant alive. Clau's ask, and it is not theoretical: dev has
+    `TEAM_TWILIO_MOCK_MODE` off, so dev sends reach real WhatsApp. `--keep-tenants` skips the
+    teardown that would otherwise stop a tenant, so a mis-targeted run could leave something live
+    that can message a real person. The harness mints its own synthetic tenants, so this should
+    never fire — which is exactly why it should be loud if it ever does.
+
+    Raises rather than warning: keeping a live-number tenant alive is not a hygiene issue.
+    """
+    import psycopg as _psycopg
+
+    protected = {v for v in (os.environ.get("FAZAL_TENANT_ID"),) if v}
+    if tenant_id in protected:
+        raise SystemExit(
+            f"VT-738 REFUSING --keep-tenants on {tenant_id[:8]}…: that is a Fazal-owned tenant"
+        )
+    with _psycopg.connect(dsn, autocommit=True, connect_timeout=10) as conn:
+        row = conn.execute(
+            "SELECT business_name FROM tenants WHERE id = %s", (tenant_id,)
+        ).fetchone()
+    name = str(row[0]) if row else ""
+    if not name.startswith("convo-harness-"):
+        raise SystemExit(
+            f"VT-738 REFUSING --keep-tenants on {tenant_id[:8]}… (business_name={name!r}): only "
+            "harness-minted tenants may be left alive, because dev sends real WhatsApp"
+        )
 
 
 def _quiesce_kept_tenant(dsn: str, tenant_id: str) -> None:

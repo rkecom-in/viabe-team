@@ -636,6 +636,46 @@ class CampaignsWrapper(TenantScopedTable):
         self._validate(out, tid)
         return out
 
+    def effect_state_rollup(
+        self, tenant_id: UUID | str, *, delivered_statuses: tuple[str, ...],
+        limit: int = 50, conn: Any = None,
+    ) -> list[dict[str, Any]]:
+        """VT-634 — per-campaign intended-vs-delivered, for diagnosing a failed workflow.
+
+        ``intended`` = ``campaign_recipients`` (who the campaign was for); ``delivered`` =
+        ``campaign_messages`` rows whose ``send_status`` means a message actually REACHED someone.
+        Attempts that did not deliver are counted separately rather than folded into either — an
+        attempt counted as delivered would make a campaign look complete and erase un-messaged
+        customers from the remainder, which is the direction that causes a real person to be
+        forgotten.
+
+        Tenant-predicated on all three tables (RLS + explicit WHERE), so this cannot see another
+        tenant's sends — the diagnosis reads through the wrapper layer for the same reason
+        everything else does, rather than taking a service-role shortcut because it happens to be
+        an ops tool.
+        """
+        tid = self._uuid(tenant_id)
+        with self._conn(tid, conn) as c:
+            rows = c.execute(
+                """
+                SELECT c.id::text AS campaign_id,
+                       (SELECT count(*) FROM campaign_recipients r
+                         WHERE r.tenant_id = c.tenant_id AND r.campaign_id = c.id) AS intended,
+                       (SELECT count(*) FROM campaign_messages m
+                         WHERE m.tenant_id = c.tenant_id AND m.campaign_id = c.id
+                           AND m.send_status = ANY(%(delivered)s))                 AS delivered,
+                       (SELECT count(*) FROM campaign_messages m
+                         WHERE m.tenant_id = c.tenant_id AND m.campaign_id = c.id
+                           AND NOT (m.send_status = ANY(%(delivered)s)))           AS attempted
+                  FROM campaigns c
+                 WHERE c.tenant_id = %(tenant)s
+                 ORDER BY c.created_at DESC
+                 LIMIT %(limit)s
+                """,
+                {"tenant": str(tid), "delivered": list(delivered_statuses), "limit": limit},
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     def has_any_since(
         self, tenant_id: UUID | str, *, within_minutes: int, conn: Any = None
     ) -> bool:
