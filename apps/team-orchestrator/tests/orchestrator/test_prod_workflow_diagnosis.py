@@ -204,3 +204,36 @@ class _FakeConn:
 class _FakePool:
     def connection(self):
         return _FakeConn()
+
+
+class TestUnknownIsNotNoEffect:
+    """The false-all-clear class. `campaign_messages.campaign_id` is never populated, and the
+    idempotency-prefix join that replaces it covers only the campaign fan-out path — the agent
+    draft-send path (`agent:{draft_id}`) is invisible to it. So a zero delivered-count is not
+    evidence that nothing was sent, and must never render as SAFE TO CANCEL."""
+
+    def test_zero_delivered_with_unattributable_sends_is_unknown(self) -> None:
+        e = EffectState("c1", intended=8, delivered=0, attempted_not_delivered=0,
+                        unattributable_delivered=3)
+        assert e.kind == "unknown", "3 delivered messages exist that this join cannot attribute"
+
+    def test_zero_delivered_with_no_unattributable_sends_stays_no_effect(self) -> None:
+        e = EffectState("c1", intended=8, delivered=0, attempted_not_delivered=0,
+                        unattributable_delivered=0)
+        assert e.kind == "no_effect"
+
+    def test_unknown_requires_a_human_and_refuses_the_all_clear(self) -> None:
+        f = _finding(EffectState("c1", intended=8, delivered=0, attempted_not_delivered=0,
+                                 unattributable_delivered=1))
+        assert f.effect_kind == "unknown"
+        assert f.requires_human is True
+        assert "SAFE TO CANCEL" not in f.recommended_action
+        assert "do NOT re-run" in f.recommended_action
+
+    def test_unknown_outranks_complete(self) -> None:
+        f = _finding(
+            EffectState("done", intended=4, delivered=4, attempted_not_delivered=0),
+            EffectState("blind", intended=4, delivered=0, attempted_not_delivered=0,
+                        unattributable_delivered=2),
+        )
+        assert f.effect_kind == "unknown"

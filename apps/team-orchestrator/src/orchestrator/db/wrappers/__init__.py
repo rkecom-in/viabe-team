@@ -653,6 +653,19 @@ class CampaignsWrapper(TenantScopedTable):
         tenant's sends — the diagnosis reads through the wrapper layer for the same reason
         everything else does, rather than taking a service-role shortcut because it happens to be
         an ops tool.
+
+        **The join does NOT use ``campaign_messages.campaign_id``.** That column is never
+        populated — ``send_whatsapp_template._write_campaign_message`` omits it and nothing
+        UPDATEs it — so joining on it finds zero rows for EVERY campaign, real sends included.
+        This module already documents that trap on ``has_approved_campaign_with_no_messages``; the
+        join here goes via ``idempotency_key``'s documented ``{campaign_id}:{customer_id}`` prefix
+        (``campaign/execute.py`` D1), exactly as that method does.
+
+        **And that prefix does not cover everything**, which is why ``unattributable_delivered``
+        is returned rather than assumed to be zero: the agent draft-send path keys its sends
+        ``agent:{draft_id}`` (``agents/customer_send.py``), which carries no campaign id at all. A
+        caller that treats ``delivered == 0`` as "nothing reached a customer" without checking
+        ``unattributable_delivered`` will emit a false all-clear on the money path.
         """
         tid = self._uuid(tenant_id)
         with self._conn(tid, conn) as c:
@@ -662,10 +675,12 @@ class CampaignsWrapper(TenantScopedTable):
                        (SELECT count(*) FROM campaign_recipients r
                          WHERE r.tenant_id = c.tenant_id AND r.campaign_id = c.id) AS intended,
                        (SELECT count(*) FROM campaign_messages m
-                         WHERE m.tenant_id = c.tenant_id AND m.campaign_id = c.id
+                         WHERE m.tenant_id = c.tenant_id
+                           AND m.idempotency_key LIKE c.id::text || ':%%'
                            AND m.send_status = ANY(%(delivered)s))                 AS delivered,
                        (SELECT count(*) FROM campaign_messages m
-                         WHERE m.tenant_id = c.tenant_id AND m.campaign_id = c.id
+                         WHERE m.tenant_id = c.tenant_id
+                           AND m.idempotency_key LIKE c.id::text || ':%%'
                            AND NOT (m.send_status = ANY(%(delivered)s)))           AS attempted
                   FROM campaigns c
                  WHERE c.tenant_id = %(tenant)s
@@ -674,7 +689,25 @@ class CampaignsWrapper(TenantScopedTable):
                 """,
                 {"tenant": str(tid), "delivered": list(delivered_statuses), "limit": limit},
             ).fetchall()
-        return [dict(r) for r in rows]
+            # Delivered messages this tenant has that no campaign prefix claims — the agent-path
+            # sends. Their existence means a zero `delivered` above cannot be read as "nothing
+            # went out"; it can only be read as "nothing this join can see".
+            orphan = c.execute(
+                """
+                SELECT count(*) AS n FROM campaign_messages m
+                 WHERE m.tenant_id = %(tenant)s
+                   AND m.send_status = ANY(%(delivered)s)
+                   AND NOT EXISTS (SELECT 1 FROM campaigns c
+                                    WHERE c.tenant_id = m.tenant_id
+                                      AND m.idempotency_key LIKE c.id::text || ':%%')
+                """,
+                {"tenant": str(tid), "delivered": list(delivered_statuses)},
+            ).fetchone()
+        out = [dict(r) for r in rows]
+        unattributable = int((dict(orphan) if orphan else {}).get("n") or 0)
+        for row in out:
+            row["unattributable_delivered"] = unattributable
+        return out
 
     def has_any_since(
         self, tenant_id: UUID | str, *, within_minutes: int, conn: Any = None

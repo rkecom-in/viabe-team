@@ -64,6 +64,10 @@ class EffectState:
     intended: int
     delivered: int
     attempted_not_delivered: int
+    #: Delivered messages for this tenant that NO campaign prefix claims — the agent draft-send
+    #: path keys its sends ``agent:{draft_id}`` and carries no campaign id. Non-zero means this
+    #: campaign's `delivered` count is incomplete, so a zero cannot be read as "nothing went out".
+    unattributable_delivered: int = 0
 
     @property
     def remainder(self) -> int:
@@ -71,6 +75,13 @@ class EffectState:
 
     @property
     def kind(self) -> str:
+        # UNKNOWN, not no_effect. `campaign_messages.campaign_id` is never populated, and the
+        # idempotency-key prefix join that replaces it only covers the campaign fan-out path — the
+        # agent draft-send path is invisible to it. So "I counted zero deliveries" and "nothing
+        # reached a customer" are DIFFERENT claims, and collapsing them would make this module
+        # hand a VTR a false all-clear on the money path: the one output that must never be wrong.
+        if self.delivered == 0 and self.unattributable_delivered:
+            return "unknown"
         if self.delivered == 0:
             return "no_effect"
         if self.remainder > 0:
@@ -98,6 +109,10 @@ class WorkflowFinding:
         kinds = {e.kind for e in self.effects}
         if "partial_send" in kinds:
             return "partial_send"
+        # 'unknown' outranks 'complete': a campaign we cannot see the sends for is a bigger reason
+        # to stop a human than one we can see finished.
+        if "unknown" in kinds:
+            return "unknown"
         if "complete" in kinds:
             return "complete"
         return "no_effect"
@@ -115,6 +130,12 @@ class WorkflowFinding:
                 "CONTAIN — do not re-run (would re-message customers who already received it) "
                 f"and do not disable (the remainder of {sum(e.remainder for e in self.effects)} "
                 "customer(s) was never messaged). VTR resolves the remainder."
+            )
+        if self.effect_kind == "unknown":
+            return (
+                "CONTAIN — effect-state is NOT KNOWABLE for this tenant from the ledger "
+                "(campaign_messages.campaign_id is unpopulated and this tenant has delivered "
+                "messages no campaign claims). Treat as if it may have sent: do NOT re-run."
             )
         if self.effect_kind == "complete":
             return (
@@ -199,6 +220,7 @@ def _effect_states(conn: Any, tenant_id: str, task_id: str | None) -> list[Effec
         out.append(EffectState(
             campaign_id=str(row.get("campaign_id")), intended=intended,
             delivered=delivered, attempted_not_delivered=attempted,
+            unattributable_delivered=int(row.get("unattributable_delivered") or 0),
         ))
     return out
 
@@ -254,7 +276,7 @@ def diagnose_failed_workflows(
             effects=effects, error_summary=error_text,
         ))
 
-    severity = {"partial_send": 0, "complete": 1, "no_effect": 2}
+    severity = {"partial_send": 0, "unknown": 1, "complete": 2, "no_effect": 3}
     findings.sort(key=lambda f: severity.get(f.effect_kind, 3))
     if findings:
         logger.warning(
