@@ -195,6 +195,67 @@ with instrumentation that states outright when an arm injected nothing. **Sealed
 12/12, real.** Sealed treatment deliberately NOT run while the floor blocks injection — spending the
 sealed set on a run that injects zero cards would manufacture a number, not measure one.
 
+## STATUS 2026-08-09 — the RAG arc ran to the end, and the answer is a NULL
+
+Fazal authorized the floor recalibration verbatim ("Recalibrate."). The chain ran: floor → treatment
+→ flip canary → this package. Reporting it straight, because it is not the answer the arc wanted.
+
+### The floor was unreachable, and is now measured — 0.62 → 0.250 (`001fdbe2`)
+Across **600 (case, card) pairs** on the real 100-card corpus with real Voyage embeddings, the
+single **highest-scoring card scored 0.2867**. The bar sat 2.2x above anything attainable: the
+corpus was inert by arithmetic, not by any judgement about the knowledge in it.
+
+Derived, not chosen (`apps/team-orchestrator/canaries/floor_calibration/`, re-runnable): blind
+labels (agent view only, never the answer key, never a score or rank, shuffled per pass, 3 passes,
+majority vote) → pooled dev **AUC 0.753** → swept on DEVELOPMENT only with VALIDATION held out.
+Held-out precision **0.174 → 0.500-0.600**. `SCORE_WEIGHTS` is now pinned by a test, because the
+missing coupling between the floor and the scale it was fitted to is exactly how 0.62 rotted unseen.
+
+### Retrieval is live and the flip is proven
+**VT-725 CANARY PASS (gates b + d)** on dev: a per-tenant override removes a card for tenant A and
+**not** for tenant B; the specialist sees 37 candidates against the Manager's 100. 100-card pool,
+**20 cards injected across the 6 O11 cases (was 0)**.
+
+### The treatment shows NO LIFT — this is the number that matters for the moat
+A real arm, not a label: 15 cards injected on dev, 5 on validation, baseline 0.
+
+| | baseline | treatment | delta |
+|---|---|---|---|
+| development (n=3) | 0.855 | 0.845 | **−0.010** |
+| validation (n=3) | 0.882 | 0.889 | **+0.008** |
+
+**Net nothing.** n=6 cannot resolve an effect this size and it is not being called a result either
+way. The one pattern consistent across BOTH splits: `specialist_selection` (−0.057 / −0.037) and
+`cross_functional_judgment` (−0.073 / −0.023) regress, while `appropriate_uncertainty`,
+`evidence_grounding` and `decision_correctness` each rise slightly. That shape is coherent with the
+measured injection precision of 0.533 — about half the injected cards are noise — but it is a
+hypothesis, not a finding.
+
+**Bearing on CL-2026-07-28-launch-with-rag ("launch WITH the RAG — it is the moat"):** the corpus is
+now genuinely reachable and the flip mechanism genuinely works, so the RAG can ship. What the
+evidence does **not** yet support is the claim that it makes answers better. Shipping it is
+defensible on option value and on the flip machinery being proven; claiming a measured moat is not.
+
+### The metric that graded it was itself broken (`b72a8ab0`)
+One hard failure zeroes a case, and the fabricated-number gate was firing on correct arithmetic
+(420000+330000=750000), unit-suffixed restatements ("11%" vs `gross_margin_percent: 11`), numbers
+inside context KEY names, and lakh notation. One case scored 0.85-0.95 on all ten dimensions and
+came out **0.0**. It was ARM-BIASED in both directions — it called the treatment worse on dev and
+massively better on validation from the same defect. Five FP classes fixed; recomputed from the
+saved judge dimensions, validation/treatment goes **0.2897 → 0.8893** with its flagged cases going
+to zero. **`mean_score` is still not an arm comparator** (residual rounding / derived-ratio /
+rhetorical classes leave the baseline flagged), so dimension means above remain the honest number.
+
+### Two defects found on the way, both real, both fixed
+- **VT-737** (`f46f2604`, mig 198) — a `knowledge_card_assignments` row could **never be deleted**
+  once any event referenced it. Composite FK with a bare `ON DELETE SET NULL` nulled `tenant_id`
+  too, which is `NOT NULL`, and defeated the append-only tombstone exemption migration 186
+  explicitly documents. The flip Fazal ratified as "changeable at runtime" had a one-way door.
+- **VT-735 Fast budget** (`7a36f994`, mig 199) — `resolve_service_tier` had accepted a budget hook
+  since the tier policy landed and **nothing ever supplied one**, so the per-tenant daily Fast cap
+  was decorative. Now derived from `llm_call_events`, cached on the safety path, fails open,
+  degrades to Standard never Flex, and raises a `fast_budget_exhausted` VTR warning.
+
 ## Known-open, stated so promotion is a decision and not a surprise
 1. **Latency residue.** On the first turn of a slow job the owner waits ≥96s before the honest ack.
    The candidate fix (make the D1 budget a deadline from turn start) is written up and deliberately
@@ -209,6 +270,17 @@ sealed set on a run that injects zero cards would manufacture a number, not meas
    token budget, which a reasoning model exceeds immediately on the legacy path.
 4. **Cost visibility ships behind the gate**, not with it: VT-733 A complete, B partial (Twilio +
    Sarvam wired; Voyage/Apify/ScrapingBee need `tenant_id` threaded to their seams).
+5. **The RAG ships without measured lift** (2026-08-09 section above). A decision for Fazal, not a
+   defect: the machinery is proven, the benefit is unproven at n=6, and the two are different claims.
+6. **O11 `mean_score` is still not an arm comparator.** Five false-positive classes fixed; rounded
+   restatements, derived ratios, rhetorical denominators and proposed action parameters remain.
+   The structural fix is that a fabricated-number hit should be a graded penalty rather than an
+   automatic zero — a scoring-semantics change, so it is flagged here rather than made unilaterally.
+7. **VT-735 scope 5 (flex visible in the dev ledger) cannot be read off existing traffic.**
+   `llm_call_events` has had no row since 2026-08-06 02:53Z, before the tier policy deployed.
+   `TEAM_GPT_FLEX` is verified unset on Railway `development` (= the `background` default), so the
+   policy is live and will record `flex` on the next background call; there is nothing to observe
+   until dev takes traffic. It closes itself on the next real turn.
 
 ## Promotion mechanics (unchanged, Pillar 7)
 `main` is Fazal-authorised ONLY. A `dev`→`main` promotion PR opens on his word, relayed by Clau. CC
