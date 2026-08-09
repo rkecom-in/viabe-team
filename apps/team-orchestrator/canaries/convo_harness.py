@@ -1825,7 +1825,22 @@ def run_scenario_steps(
             # side-effect assert that fails on the first read re-polls until it settles or the
             # budget runs out — a genuinely-failing assert still fails, just honestly late.
             # Gated on the step DECLARING side-effect asserts: text-only steps pay nothing.
-            if db_failures and (step.get("assert_side_effects") or step.get("assert_grounded_count")):
+            # VT-738 — `assert_route` belongs in this list and was missing. The route observation is
+            # itself a side-effect read (`_observed_route` returns 'sales_recovery' iff a campaigns
+            # row joins the turn), so an assert_route-only step read the DB once, the instant the
+            # run left 'running', and never re-polled — while SR delegation routinely completes
+            # after the triggering turn's run does. Two gate steps show the shape directly: their
+            # step-0 draft only appears in the step-1 transcript.
+            #
+            # Note what this does NOT fix: a campaign attributed to the PREVIOUS turn's run_id will
+            # never satisfy this turn's assert no matter how long it polls
+            # (`routing_db_proof_finance_vs_sr [1/3] step1`). That one needs the scenario's own
+            # expectation re-examined, not a longer deadline.
+            if db_failures and (
+                step.get("assert_side_effects")
+                or step.get("assert_grounded_count")
+                or step.get("assert_route")
+            ):
                 _settle_deadline = time.time() + _DB_ASSERT_SETTLE_S
                 while db_failures and time.time() < _settle_deadline:
                     time.sleep(_DB_ASSERT_SETTLE_POLL_S)

@@ -314,6 +314,21 @@ def _dispatch_specialist_step(
         "manager_has_next_step": has_next_step,
     }
     _open_dispatch_run(tenant_id, run_id)
+    # VT-738 — KNOWN DEFECT, deliberately NOT fixed here. `pipeline_steps.run_id` is
+    # `NOT NULL REFERENCES pipeline_runs (id)` (migration 006) and no such row exists under a
+    # manager_tasks.id, while `_open_dispatch_run` above created the row under `run_id`. So every
+    # per-node `state_transition` write from the langgraph hook FK-violates and is swallowed whole
+    # by `langgraph_hooks.py`, and the enforce loop runs with its richest per-node trace silently
+    # off. That is a real loss and it is why a no-spawn dispatch could not be told apart from a
+    # spawn whose specialist declined.
+    #
+    # The obvious one-token fix — opening the context under `run_id` — is NOT safe as an
+    # instrumentation change, and this comment exists so nobody "fixes" it in passing. Everything
+    # running inside this graph reads `ctx.run_id` as its identity: `specialist_return`,
+    # `sales_recovery_executor`, `customer_send_choke`, `orchestrator_agent`. Campaigns are created
+    # under it. Repointing it would silently change `campaigns.run_id` — which is, among other
+    # things, exactly what the gate's own `assert_route` joins on. Changing what a money-path row is
+    # keyed by is a migration-shaped decision, not a record-only edit.
     with observability_context(run_id=UUID(task_id), tenant_id=UUID(tenant_id)):
         graph = build_supervisor_graph(
             model=_resolve_model(_BRAIN_MODEL_SONNET),
@@ -340,6 +355,21 @@ def _dispatch_specialist_step(
     # (approval_resume.resume_run, driven by the webhook path when the owner replies) to resolve,
     # then continue from wherever the ALREADY-APPLIED decision left the task.
     outcome = "paused_approval" if is_paused else str(terminal_state.get("manager_review_outcome") or "escalate")
+    # VT-738 — RECORD-ONLY, and this is the line the delegation miss actually lives on.
+    #
+    # In enforce mode `manager_review` is edged ONLY from specialist nodes (supervisor.py:822-824)
+    # and `orchestrator_terminal -> END` is unconditional (:875). So when the Manager's brain spawns
+    # nothing, `manager_review` never runs, `manager_review_outcome` is absent, and this `or
+    # "escalate"` fires — producing the owner-facing "I couldn't complete it on my own" closure via
+    # _arm_escalation_for_notify. That path writes NO audit row and NO incident, and it is
+    # byte-identical in the transcript to two genuinely different causes: the activation gate
+    # failing closed, and manager_review actually deciding to escalate. Nothing recorded which one
+    # happened, which is precisely why the miss could not be attributed.
+    #
+    # The arming step's own docstring ("manager_review already settled the task blocked + a VTR
+    # incident") is FALSE on this path — nothing ran and nothing was settled.
+    if not is_paused and terminal_state.get("manager_review_outcome") is None:
+        _record_escalate_defaulted(tenant_id, task_id, step_id, run_id, terminal_state)
     # A pending interrupt leaves the run 'paused' — NOT 'completed' — exactly like
     # close_webhook_run_paused's own convention (mig 052): the run genuinely has not finished, a
     # later resume_run drains it. Everything else is a real terminal of THIS graph invocation;
@@ -484,7 +514,12 @@ def _block_prereq_or_policy_failed(tenant_id: str, task_id: str, *, step_id: str
         escalate_incident(tenant_id, iid, to_tier=2)
     emit_tm_audit(
         event_layer="does",
-        event_kind="manager_task_limit_exceeded",
+        # VT-738 — was `manager_task_limit_exceeded`, the SAME kind _block_limit_exceeded emits.
+        # Two unrelated causes under one kind meant a query for "why did this task block" could not
+        # separate a capability/prereq failure from an exhausted limit without also reading
+        # incident detail. The incident kind already differed ('other' vs 'limit_exhausted'); the
+        # audit kind now does too.
+        event_kind="manager_task_prereq_failed",
         actor="team_manager",
         tenant_id=tenant_id,
         summary=f"task={task_id} blocked: prereq/policy validation failed for step={step_id}",
@@ -1027,6 +1062,42 @@ def _notify_owner_of_terminal(
     from orchestrator.owner_surface.task_outcome import maybe_notify_owner_of_task_outcome
 
     maybe_notify_owner_of_task_outcome(tenant_id, task_id, impact_verdict=impact_verdict)
+
+
+@DBOS.step()
+def _record_escalate_defaulted(
+    tenant_id: str, task_id: str, step_id: str, run_id: Any, terminal_state: dict[str, Any]
+) -> None:
+    """VT-738 — record that the loop DEFAULTED to escalate because manager_review never ran.
+
+    Record-only and fail-soft: this observes an outcome that has already been decided and must
+    never be able to change it. ``terminated_without_spawn`` is set by ``orchestrator_terminal_node``
+    (routing.py:109), so its presence separates "the Manager's brain emitted no spawn tool" from
+    "manager_review was skipped for some other reason" — the two hypotheses this row exists to tell
+    apart. Nothing else in the system distinguishes them.
+    """
+    try:
+        emit_tm_audit(
+            event_layer="does",
+            event_kind="manager_task_escalate_defaulted",
+            actor="team_manager",
+            tenant_id=tenant_id,
+            run_id=run_id,
+            summary=(
+                f"task={task_id} step={step_id}: manager_review did not run; loop defaulted to "
+                "escalate (owner sees the honest-failure closure)"
+            ),
+            decision={
+                "task_id": str(task_id),
+                "step_id": str(step_id),
+                "source": "loop_default_no_review",
+                "terminated_without_spawn": bool(terminal_state.get("terminated_without_spawn")),
+                "budget_paused_agent": terminal_state.get("budget_paused_agent"),
+            },
+            severity="warning",
+        )
+    except Exception:  # noqa: BLE001 — instrumentation never changes an outcome
+        logger.warning("VT-738 escalate-defaulted audit swallowed", exc_info=True)
 
 
 @DBOS.step()

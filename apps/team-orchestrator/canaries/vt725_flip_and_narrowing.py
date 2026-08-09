@@ -79,6 +79,51 @@ def _selected(result) -> set[str]:
     return set(result.selected_card_refs)
 
 
+def _domains_outside(conn, card_refs: set[str], *, allowed: tuple[str, ...]) -> set[str]:
+    """The domains among ``card_refs`` that are NOT in the identity's declared lane.
+
+    ``card_version_ref`` addresses ``knowledge_cards.id`` directly (that table is version-grained —
+    ``id`` is the version row, ``card_key`` is what is stable across versions), so this is a direct
+    lookup with no indirection to get wrong.
+    """
+    if not card_refs:
+        return set()
+    rows = conn.execute(
+        "SELECT DISTINCT domain FROM knowledge_cards WHERE id = ANY(%s::uuid[])",
+        (list(card_refs),),
+    ).fetchall()
+    return {row[0] for row in rows if row[0] not in allowed}
+
+
+def _force_failure(tenant_id: str, target: str) -> str:
+    """Break one dependency of the retrieval path and report what escaped.
+
+    Gate (e) is the claim that a knowledge miss can never cost the owner a turn. That claim is only
+    testable by actually breaking something: asserting it against a healthy path proves nothing,
+    because the degrade branch never executes. Two different depths are broken in turn (the query
+    embedding, and the ranking engine) so a fail-soft that only wraps one of them cannot pass.
+
+    Returns ``RAISED:<type>`` (the failure escaped — gate (e) fails), ``CARDS:<n>`` (cards came back
+    despite the break, so the degrade path never ran and the test is vacuous), or ``degraded:…``.
+    """
+    from orchestrator.knowledge import card_serving
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError(f"VT-725 forced {target} failure")
+
+    original = getattr(card_serving, target)
+    setattr(card_serving, target, _boom)
+    try:
+        result = _retrieve(tenant_id, "team_manager", decision=f"vt725-degrade-{target}")
+    except Exception as exc:  # noqa: BLE001 — catching IS the assertion
+        return f"RAISED:{type(exc).__name__}"
+    finally:
+        setattr(card_serving, target, original)
+    if result.selected_card_refs:
+        return f"CARDS:{len(result.selected_card_refs)}"
+    return f"degraded:{result.degraded_reason}"
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="vt725_flip_and_narrowing", description=__doc__)
     parser.add_argument("--expected-env", required=True)
@@ -178,10 +223,72 @@ def main(argv: list[str] | None = None) -> int:
                 "(d) the specialist retrieved nothing at all — cannot distinguish correct "
                 "narrowing from a broken lane"
             )
-        conn.execute(
-            "SELECT count(*) FROM knowledge_cards WHERE domain NOT IN ('sales','marketing') "
-            "AND retrieval_eligible"
-        )
+
+        # The leak check itself. The earlier version of this canary counted the out-of-lane cards
+        # and then THREW THE COUNT AWAY without comparing it to anything — so (d) rested entirely
+        # on "the specialist's pool is not bigger than the Manager's", which a total leak would
+        # also satisfy. Narrowing is a claim about WHICH cards, so it has to be checked by domain.
+        out_of_lane = _domains_outside(conn, spec_refs, allowed=("sales", "marketing"))
+        decoys = conn.execute(
+            "SELECT count(*) FROM knowledge_cards "
+            "WHERE domain NOT IN ('sales','marketing') AND retrieval_eligible"
+        ).fetchone()[0]
+        print(f"  narrowing: out-of-lane cards served to specialist={len(out_of_lane)} "
+              f"(decoys available in registry={decoys})")
+        if out_of_lane:
+            failures.append(
+                f"(d) the specialist was served {len(out_of_lane)} card(s) outside SALES/MARKETING: "
+                f"{sorted(out_of_lane)[:5]} — its lane leaked"
+            )
+        if decoys == 0:
+            failures.append(
+                "(d) the registry holds NO retrieval-eligible card outside SALES/MARKETING, so a "
+                "leak had nowhere to show up — this gate proved nothing and must not be recorded "
+                "as passed"
+            )
+
+        # --- (c) attribution: decision_evidence_links actually land --------------------------
+        # The write path is fail-soft by design (attribution must never cost the owner a turn), so
+        # a silent zero here is exactly the shape this gate exists to catch.
+        if base_a.evidence_links_error:
+            failures.append(f"(c) evidence-link write reported: {base_a.evidence_links_error}")
+        if not base_a.evidence_links_written:
+            failures.append(
+                "(c) retrieval wrote ZERO decision_evidence_links rows — without them a harmful "
+                "card can never be traced back, so demotion could never be evidence-based"
+            )
+        else:
+            dispositions = {
+                row[0]: row[1]
+                for row in conn.execute(
+                    "SELECT disposition, count(*) FROM decision_evidence_links "
+                    "WHERE tenant_id = %s AND decision_id = %s GROUP BY disposition",
+                    (tenant_a, "vt725-base-a"),
+                ).fetchall()
+            }
+            print(f"  attribution: rows_written={base_a.evidence_links_written} "
+                  f"dispositions={dispositions}")
+            missing = {"retrieved", "selected"} - dispositions.keys()
+            if missing:
+                failures.append(
+                    f"(c) dispositions {sorted(missing)} never landed — the ablation data cannot "
+                    "distinguish a card that was considered from one that was used"
+                )
+
+        # --- (e) forced retrieval failure degrades to no-cards, turn survives ----------------
+        for label, target in (("embedding", "embed_query"), ("engine", "CardRetrievalEngine")):
+            outcome = _force_failure(tenant_a, target)
+            print(f"  degrade[{label}]: {outcome}")
+            if outcome.startswith("RAISED"):
+                failures.append(
+                    f"(e) a forced {label} failure PROPAGATED out of retrieval ({outcome}) — a "
+                    "knowledge miss must never be able to fail an owner's turn"
+                )
+            elif outcome.startswith("CARDS"):
+                failures.append(
+                    f"(e) a forced {label} failure still returned cards ({outcome}) — the degrade "
+                    "path did not actually run, so this proves nothing"
+                )
 
     print(json.dumps({"failures": failures, "authorizes_effects": False}, sort_keys=True))
     if failures:

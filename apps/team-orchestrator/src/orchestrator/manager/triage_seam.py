@@ -580,13 +580,19 @@ def triage_seam(
     # mint a sales_recovery dispatch + start the durable workflow (the loop's approval/consent/
     # opt-out rails still gate every send — this changes ROUTING, never the money gates). FAIL-OPEN:
     # any error falls through to triage_turn below, exactly as if the net weren't here.
+    # VT-738 — ``None`` means the D3 net was never EVALUATED (shadow mode, or the tenant already
+    # holds an active task), which is a different fact from "evaluated and did not match". The
+    # measured split depends on telling those apart: D3-eligible turns delegated 6/6, D3-INeligible
+    # 22/27, and all 5 misses in the gate were D3-ineligible.
+    d3_matched: bool | None = None
     if resolved_mode == "enforce" and not has_active_task:
         try:
             from orchestrator.onboarding.campaign_first_contact import is_campaign_plan_imperative
 
             # The KEYWORD trigger (frozen — no phrasing growth; the LLM route below is the phrasing-
             # agnostic primary per the Fazal no-lists law). Shares one dispatch body with option C.
-            if is_campaign_plan_imperative(message_text):
+            d3_matched = is_campaign_plan_imperative(message_text)
+            if d3_matched:
                 # VT-667 fix-4: an OPEN campaign_send approval turns this into a REVISION of the
                 # pending draft, not a fresh first-contact re-mint (revise_pending_campaign).
                 camp_res = _dispatch_campaign_first_contact_or_revision(
@@ -595,6 +601,19 @@ def triage_seam(
                 if camp_res is not None:
                     return camp_res
                 # create_plan didn't admit 'planned' — fall through to triage_turn (never silent).
+                # VT-738: "never silent" was true of the TURN (it still gets answered) but not of
+                # the RECORD — nothing marked that the deterministic router matched and then failed
+                # to produce a task. That reads downstream as a Manager that never wanted to
+                # delegate, which is the opposite of what happened.
+                emit_tm_audit(
+                    event_layer="decides",
+                    event_kind="campaign_first_contact_not_admitted",
+                    actor="team_manager",
+                    tenant_id=tenant_id,
+                    summary="D3 matched but the plan was not admitted 'planned' — fell through to triage",
+                    decision={"message_sid": message_sid, "d3_matched": True},
+                    severity="warning",
+                )
         except Exception:  # noqa: BLE001 — the D3 net must never block the turn (fail-open)
             logger.warning(
                 "D3 campaign first-contact net failed tenant=%s (fail-open -> triage_turn)",
@@ -681,6 +700,15 @@ def triage_seam(
             "message_sid": message_sid,
             # §7D — the classifier's own stated WHY, not just the WHAT.
             "reasoning": result.reasoning,
+            # VT-738 — the three facts that were in memory here and recorded nowhere. Without them
+            # a `none` route cannot be separated into "the classifier called it something other
+            # than campaign_recovery" (a model-variance miss, fixable in the LLM-primary route) vs
+            # "the tenant's slot was already held, so every triage outcome collapsed to the same
+            # legacy fall-through" (a wedge, fixable only upstream). Those need opposite fixes,
+            # which is why guessing between them was worthless.
+            "task_kind": result.task_kind,
+            "has_active_task": has_active_task,
+            "d3_matched": d3_matched,
         },
     )
 
