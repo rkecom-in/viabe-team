@@ -117,6 +117,17 @@ def _cmd_presence(args: argparse.Namespace) -> int:
             print(f"{name}: {'set' if _present_in_env(name) else 'unset'}")
         return 0
     # railway
+    if not (args.environment and args.service):
+        # Without this the Nones reach subprocess.run's argv and it raises
+        # "TypeError: expected str, bytes or os.PathLike object, not NoneType" — which reads like a
+        # broken/missing Railway CLI and sends you debugging the wrong thing entirely.
+        print(
+            "env_presence: --source railway needs --environment and --service "
+            "(e.g. --environment development --service vt-orchestrator-service). "
+            "NOTE the Railway environment is named 'development', not 'dev'.",
+            file=sys.stderr,
+        )
+        return 2
     present = dict(_railway_vars(args.environment, args.service))
     for name in args.names:
         print(f"{name}: {'set' if present.get(name) else 'unset'}")
