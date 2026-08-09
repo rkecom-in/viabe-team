@@ -288,15 +288,46 @@ def adapt_campaign_plan_to_specialist_return(
             outcome_summary=plan.out_of_scope_reason,
             reason_code="out_of_scope",
         )
-    # INSUFFICIENT_DATA
+    # INSUFFICIENT_DATA — VT-738 RV-2.
+    #
+    # This used to return status='blocked' with proposed_outcome="address the following before
+    # retrying: <gaps>". That string is not an OUTCOME the manager can re-frame toward, it is a
+    # list of things that are missing — but the adapter above maps any blocked-with-a-proposed-
+    # outcome onto pushback=True, and decide_next_action maps pushback-with-a-proposal onto REVISE.
+    # So the manager reframed the step and re-dispatched it, the specialist found the same data
+    # still missing, and it looped until `max_revisions_per_step_seq` blocked the task and triage
+    # cancelled the plan. Observed on deployed dev 2026-08-10: three identical revisions, three
+    # identical `insufficient_data` returns, task blocked, plan cancelled, owner told nothing
+    # useful. **Re-framing a step cannot create data that does not exist, so that loop could never
+    # converge** — it was not a tuning problem, it was the wrong branch.
+    #
+    # Missing data is the owner's to supply, so this is exactly what `needs_owner_input` exists
+    # for: it routes through decide_next_action's CLARIFY branch, parks the task durably, and asks.
+    # A spurious ask (the cohort read is separately flaky — RV-1) costs the owner one question; the
+    # old path cost them the whole plan, silently.
     gaps = "; ".join(
         f"{item.category}: {item.description} (suggest: {item.suggested_remediation})"
         for item in plan.missing_data
     )
+    remediations = [
+        r for r in (str(item.suggested_remediation or "").strip() for item in plan.missing_data) if r
+    ]
+    if remediations:
+        asks = "; ".join(remediations)
+        return PlanSpecialistReturn(
+            status="needs_owner_input",
+            outcome_summary=f"insufficient data to propose a campaign: {gaps}",
+            owner_question=(
+                "I couldn't build the win-back campaign yet because some information is missing. "
+                f"Could you help with this: {asks}?"
+            ),
+            reason_code="insufficient_data",
+        )
+    # No remediation the owner could act on → there is genuinely no path here. Return blocked with
+    # NO proposed_outcome so decide_next_action ESCALATES (an honest closure) rather than looping.
     return PlanSpecialistReturn(
         status="blocked",
         outcome_summary=f"insufficient data to propose a campaign: {gaps}",
-        proposed_outcome=f"address the following before retrying: {gaps}",
         reason_code="insufficient_data",
     )
 
