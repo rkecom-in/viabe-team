@@ -77,13 +77,18 @@ export function OwnershipDecisionPanel({
         placeholder="e.g. a link or reference to what you verified."
         className="mt-1 w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 outline-none focus:border-amber-500"
       />
+      <p className="mt-1 text-xs text-gray-500">Required to mark verified.</p>
 
       <div className="mt-4 flex flex-wrap items-center gap-3">
         <button
           type="button"
           data-ownership-verify
           onClick={() => decide('verified')}
-          disabled={pending}
+          // B7: evidence REQUIRED to verify (the server 422s without it). Verification flips a
+          // non-bypassable send gate, so an audit row recording only who-and-when cannot be
+          // reviewed later. Rejection is deliberately unaffected — demanding proof of a thing that
+          // was not established would push VTRs toward leaving bad tenants unreviewed.
+          disabled={pending || evidence.trim() === ''}
           className="rounded-md border border-green-300 bg-green-50 px-3 py-1.5 text-sm font-medium text-green-700 hover:bg-green-100 disabled:cursor-not-allowed disabled:opacity-50"
         >
           {pending ? 'Saving…' : 'Mark Verified'}

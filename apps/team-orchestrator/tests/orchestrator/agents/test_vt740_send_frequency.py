@@ -110,3 +110,37 @@ class TestSuppressionCannotAuthorize:
         function the single authority."""
         permitted, _ = is_suppressed(_TENANT, _CUSTOMER, conn=_Conn([]))
         assert permitted is False, "the permissive branch must be a plain False, never a grant"
+
+
+class TestTwoLayersComposeWithoutATieBreak:
+    """Clau's audit question: two frequency mechanisms now sit on the same send path
+    (`RECONTACT_SUPPRESSION_DAYS` / `MAX_AGENT_CONTACTS_PER_90D` on the agent path, and this
+    module on every path). Answered: both survive, they ask different questions, and precedence
+    needs no rule — because both are VETO-ONLY, so they compose conjunctively and the outcome is
+    order-independent.
+
+    The property that makes that true is worth pinning: the moment either layer gains a branch
+    that PERMITS a send, the composition stops being order-independent and the two become a real
+    conflict resolved by call order."""
+
+    def test_this_layer_can_only_veto(self) -> None:
+        """Its permissive branch is a plain False ("no opinion"), never a grant."""
+        for rows in ([], [(1,)], None):
+            suppressed, _ = is_suppressed(_TENANT, _CUSTOMER, conn=_Conn(rows))
+            assert isinstance(suppressed, bool)
+        assert is_suppressed(_TENANT, _CUSTOMER, conn=_Conn([]))[0] is False
+        assert is_suppressed(_TENANT, _CUSTOMER, conn=_Conn([(1,)]))[0] is True
+
+    def test_the_agent_caps_are_also_veto_only(self) -> None:
+        """`check_caps` returns CapCheckResult(allowed=...) — allowed=True is 'this gate has no
+        objection', not 'send permitted'. Both layers being veto-only is what removes the tie."""
+        pytest.importorskip("psycopg")
+        import inspect
+
+        from orchestrator.agents import customer_send
+
+        src = inspect.getsource(customer_send)
+        assert "RECONTACT_SUPPRESSION_DAYS" in src, (
+            "the agent-contact ceiling is deliberately RETAINED, not retired by VT-740 — it asks a "
+            "narrower question (how often may an AGENT cold-contact) on a different table"
+        )

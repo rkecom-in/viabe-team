@@ -30,6 +30,25 @@ policy question. There is no tenant for whom the answer is yes, and asking the M
 opinion about a bug is a category error. That half is this module's fixed behaviour and must never
 become configurable.
 
+RELATIONSHIP TO THE AGENT-CONTACT CAPS (Clau's audit question, answered here)
+-----------------------------------------------------------------------------
+`agents/customer_send.py` already carries `RECONTACT_SUPPRESSION_DAYS = 30`,
+`MAX_AGENT_CONTACTS_PER_90D = 2`, `AGENT_SEND_CUSTOMER_WEEKLY_CAP` and a tenant daily cap. **Those
+are NOT redundant and are NOT retired by this module.** They answer a different question and read a
+different table:
+
+- **The agent caps** ask *"how often may an AGENT cold-contact this customer?"* They read
+  `agent_customer_contacts` and bind the agent draft-send path only. They are the stricter,
+  narrower bar — a 2-per-90-days ceiling on unsolicited outreach.
+- **This module** asks *"has this customer been delivered ANY message recently?"* It reads the send
+  ledger and binds every customer send, campaign fan-out included.
+
+**Precedence is deterministic without needing a rule, because both are VETO-ONLY.** Neither can
+authorize a send; each can only stop one. Two conjunctive vetoes compose to "most restrictive
+wins" by construction, and the outcome is identical whichever runs first — so call order is not a
+tie-break that could drift. That is the property to preserve: if either layer is ever given a
+branch that PERMITS a send, this ceases to be true and the two become a genuine conflict.
+
 SUPPRESSION ONLY, NEVER AUTHORIZATION
 -------------------------------------
 Nothing here can permit a send. Consent, opt-out, complaint-freeze, onboarded/activation,

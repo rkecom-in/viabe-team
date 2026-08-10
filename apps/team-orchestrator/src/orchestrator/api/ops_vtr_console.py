@@ -528,6 +528,22 @@ def vtr_ownership_decision(
     verified = body.decision == "verified"
     note = _scrub_reason(body.note)         # free-text hygiene (CL-390)
     evidence = (body.evidence or "")[:500]  # URL/reference — clamp only
+    # B7 residue (Clau audit 2026-08-10): `ownership_verified` is a NON-BYPASSABLE execute gate —
+    # flipping it true is what makes a tenant able to message its customers. Both `note` and
+    # `evidence` were optional, so a VTR could verify with the fields blank and the audit trail
+    # would record only booleans: WHO flipped it and WHEN, never WHAT they saw. That is
+    # unreviewable after the fact and unanswerable if a tenant's ownership is ever disputed.
+    # Required on the VERIFY direction only — a rejection needs no proof of a thing that was
+    # not established, and demanding one would push VTRs toward leaving bad tenants unreviewed.
+    if verified and not evidence.strip():
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "ownership evidence is required to VERIFY (what you checked — e.g. the document "
+                "reference or portal URL). Verification flips a non-bypassable send gate; an "
+                "audit row recording only who-and-when cannot be reviewed later."
+            ),
+        )
     with get_pool().connection() as conn, conn.transaction():
         cur = conn.cursor()
         cur.execute(
