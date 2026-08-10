@@ -967,11 +967,24 @@ def agent_send_draft(
 # delivered; 'undelivered' is a delivery failure like 'failed'.
 _DELIVERY_STATE_MAP: dict[str, str] = {
     "delivered": "delivered",
-    "read": "delivered",
+    # VT-741: 'read' is its OWN state (mig 200), no longer folded into 'delivered'. Fazal's
+    # ratified frequency rule has a middle tier keyed on "read or clicked or replied", and this
+    # line was silently discarding the read half of it one step before it would have persisted.
+    "read": "read",
     "failed": "failed",
     "undelivered": "undelivered",
 }
 _DELIVERY_FAILURE_STATES = frozenset({"failed", "undelivered"})
+
+#: VT-741 — the ONLY permitted delivery_status transition on an already-stamped row.
+#: A message produces TWO callbacks (delivered, then read), and the reconcile UPDATE is
+#: first-write-wins, so without this the 'delivered' callback claims the row and the 'read'
+#: callback no-ops — the signal would still be lost with the map fixed and the CHECK widened.
+#: Deliberately a single pair rather than a general precedence order: 'read' is strictly more
+#: information than 'delivered', while every other overwrite is dangerous. A late positive
+#: callback must never be able to erase a recorded delivery FAILURE — losing a read costs one
+#: tier of politeness; overwriting a failure would tell us a message landed when it did not.
+_DELIVERY_UPGRADE_FROM_TO: tuple[str, str] = ("delivered", "read")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1010,11 +1023,21 @@ def reconcile_customer_send_delivery(
     try:
         with get_pool().connection() as conn:
             row = conn.execute(
+                # First-write-wins, PLUS the single VT-741 upgrade delivered -> read. The second
+                # predicate is what makes the read signal reachable at all: without it the
+                # 'delivered' callback claims the row and the later 'read' callback matches
+                # nothing. Every other overwrite remains impossible — in particular a recorded
+                # failure can never be replaced by a late positive callback.
                 "UPDATE agent_customer_contacts "
                 "SET delivery_status = %s, delivery_updated_at = now() "
-                "WHERE tenant_id = %s AND message_sid = %s AND delivery_status IS NULL "
+                "WHERE tenant_id = %s AND message_sid = %s "
+                "  AND (delivery_status IS NULL "
+                "       OR (%s = %s AND delivery_status = %s)) "
                 "RETURNING id::text AS id, draft_id::text AS draft_id, batch_id::text AS batch_id",
-                (new_status, str(tenant_id), message_sid),
+                (
+                    new_status, str(tenant_id), message_sid,
+                    new_status, _DELIVERY_UPGRADE_FROM_TO[1], _DELIVERY_UPGRADE_FROM_TO[0],
+                ),
             ).fetchone()
     except Exception:  # noqa: BLE001 — fail-soft: reconciliation must never break the webhook
         logger.warning(
