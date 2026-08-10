@@ -67,7 +67,7 @@ class SendWhatsappTemplateInput(BaseModel):
 class SendWhatsappTemplateOutput(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    status: Literal["sent", "dry_run", "rate_limited", "unauthorized", "error"]
+    status: Literal["sent", "dry_run", "rate_limited", "unauthorized", "skipped", "error"]
     message_sid: str | None = None
     customer_id: str | None = None
     sent_at: datetime | None = None
@@ -489,6 +489,22 @@ def _write_campaign_message(
     )
 
 
+def _frequency_suppressed(cur: Any, tenant_id: str, customer_id: str) -> tuple[bool, str]:
+    """VT-740 — thin adapter so the choke's gate stack reads uniformly and the frequency policy
+    stays in one module. Fail-CLOSED on any error: an exception here suppresses the send, because
+    the alternative is a database blip becoming a duplicate message to a real person."""
+    try:
+        from orchestrator.agents.send_frequency import is_suppressed
+
+        return is_suppressed(tenant_id, customer_id, conn=cur)
+    except Exception:  # noqa: BLE001 — see the docstring; never fail OPEN on this path
+        logger.warning(
+            "send_whatsapp_template: frequency gate raised tenant=%s customer=%s — suppressing",
+            tenant_id, customer_id, exc_info=True,
+        )
+        return True, "frequency_check_error"
+
+
 def send_whatsapp_template(
     payload: SendWhatsappTemplateInput,
     *,
@@ -646,6 +662,37 @@ def send_whatsapp_template(
                             message=(
                                 "Customer has complaint_status='open'. Template sends "
                                 "are refused until the complaint is resolved (VT-321/VT-369)."
+                            ),
+                        ),
+                    )
+
+                # --- VT-740 per-recipient frequency suppression ---
+                # Placed at the CHOKE deliberately. Three paths automatically re-drive a task
+                # (the hourly reaper wake, approval_resume.redrive_task, an operator redrive) and
+                # none consults what already went out; idempotency does not cover them because its
+                # key is per-DRAFT and a re-drive mints new drafts. Gating those paths one at a
+                # time means getting all of them right forever — this guard is path-independent:
+                # it does not care WHY a second send was attempted.
+                #
+                # SUPPRESSION, never authorization: it can only stop a send. Every gate above
+                # (opt-out, complaint, and the opt-in check below) still binds unchanged.
+                suppressed, suppress_reason = _frequency_suppressed(
+                    cur, payload.tenant_id, payload.customer_id,
+                )
+                if suppressed:
+                    logger.info(
+                        "send_whatsapp_template: frequency_suppressed tenant=%s customer=%s "
+                        "reason=%s", payload.tenant_id, payload.customer_id, suppress_reason,
+                    )
+                    return SendWhatsappTemplateOutput(
+                        status="skipped",
+                        customer_id=payload.customer_id,
+                        error_envelope=ErrorEnvelope(
+                            code="recipient_recently_messaged",
+                            message=(
+                                "Customer was already delivered a message inside the minimum "
+                                f"contact interval ({suppress_reason}). Send suppressed to "
+                                "prevent a duplicate (VT-740)."
                             ),
                         ),
                     )
