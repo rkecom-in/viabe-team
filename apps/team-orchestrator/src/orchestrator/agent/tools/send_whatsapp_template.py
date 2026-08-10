@@ -62,6 +62,12 @@ class SendWhatsappTemplateInput(BaseModel):
     language: Literal["en", "hi"]
     template_params: dict[str, str] = Field(default_factory=dict)
     idempotency_key: str = Field(..., min_length=1)
+    # VT-740: the campaign this send belongs to, when there IS one. NULL is the honest value for an
+    # agent draft-send (the freeform class mig 049 describes), NOT a missing field. Populating it
+    # retires the {campaign_id}:{customer_id} idempotency-prefix workaround that effect-state had
+    # to use because this column was never written -- a join that finds zero rows for EVERY
+    # campaign, real sends included.
+    campaign_id: str | None = None
 
 
 class SendWhatsappTemplateOutput(BaseModel):
@@ -467,18 +473,30 @@ def _write_campaign_message(
     message_sid: str | None,
     send_status: str,
     idempotency_key: str,
+    campaign_id: str | None = None,
 ) -> None:
-    """Insert campaign_messages row for the template send (VT-45 context)."""
+    """Insert campaign_messages row for the template send (VT-45 context).
+
+    VT-740: ``campaign_id`` is now written. It never was — this INSERT omitted the column and
+    nothing UPDATEd it, so ``campaign_messages.campaign_id`` was NULL for every row ever written
+    and any join on it found zero rows for every campaign, real sends included. Effect-state (is
+    this a partial send? may this workflow be re-driven?) had to fall back to matching the
+    ``{campaign_id}:{customer_id}`` idempotency-key prefix, which does not cover the agent path.
+
+    NULL remains correct for an agent draft-send: mig 049 defines campaign_id NULL as the freeform
+    class. The composite FK is MATCH SIMPLE, so it is enforced only when the value is set.
+    """
     cur.execute(
         """
         INSERT INTO campaign_messages
-            (tenant_id, customer_id, idempotency_key, message_sid, send_status,
+            (tenant_id, customer_id, campaign_id, idempotency_key, message_sid, send_status,
              message_type)
-        VALUES (%s, %s, %s, %s, %s, 'template')
+        VALUES (%s, %s, %s, %s, %s, %s, 'template')
         """,
         (
             tenant_id,
             customer_id,
+            campaign_id,
             idempotency_key,
             message_sid,
             send_status,
@@ -809,6 +827,7 @@ def send_whatsapp_template(
                         cur, payload.tenant_id, payload.customer_id,
                         payload.template_id, payload.template_params,
                         None, "error", payload.idempotency_key,
+                        payload.campaign_id,
                     )
                     return SendWhatsappTemplateOutput(
                         status="error",
@@ -831,6 +850,7 @@ def send_whatsapp_template(
                         cur, payload.tenant_id, payload.customer_id,
                         payload.template_id, payload.template_params,
                         None, "error", payload.idempotency_key,
+                        payload.campaign_id,
                     )
                     return SendWhatsappTemplateOutput(
                         status="error",
@@ -853,6 +873,7 @@ def send_whatsapp_template(
                     cur, payload.tenant_id, payload.customer_id,
                     payload.template_id, payload.template_params,
                     message_sid, "template_sent", payload.idempotency_key,
+                        payload.campaign_id,
                 )
 
                 logger.info(

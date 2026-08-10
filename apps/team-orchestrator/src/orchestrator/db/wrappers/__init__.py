@@ -674,13 +674,21 @@ class CampaignsWrapper(TenantScopedTable):
                 SELECT c.id::text AS campaign_id,
                        (SELECT count(*) FROM campaign_recipients r
                          WHERE r.tenant_id = c.tenant_id AND r.campaign_id = c.id) AS intended,
+                       -- VT-740: prefer the real column now that it is populated at write time;
+                       -- the idempotency-prefix arm remains ONLY for rows written before that
+                       -- change, which are permanently NULL and cannot be back-filled honestly.
+                       -- Once no pre-VT-740 rows are in scope this collapses to the first arm.
                        (SELECT count(*) FROM campaign_messages m
                          WHERE m.tenant_id = c.tenant_id
-                           AND m.idempotency_key LIKE c.id::text || ':%%'
+                           AND (m.campaign_id = c.id
+                                OR (m.campaign_id IS NULL
+                                    AND m.idempotency_key LIKE c.id::text || ':%%'))
                            AND m.send_status = ANY(%(delivered)s))                 AS delivered,
                        (SELECT count(*) FROM campaign_messages m
                          WHERE m.tenant_id = c.tenant_id
-                           AND m.idempotency_key LIKE c.id::text || ':%%'
+                           AND (m.campaign_id = c.id
+                                OR (m.campaign_id IS NULL
+                                    AND m.idempotency_key LIKE c.id::text || ':%%'))
                            AND NOT (m.send_status = ANY(%(delivered)s)))           AS attempted
                   FROM campaigns c
                  WHERE c.tenant_id = %(tenant)s
@@ -697,6 +705,7 @@ class CampaignsWrapper(TenantScopedTable):
                 SELECT count(*) AS n FROM campaign_messages m
                  WHERE m.tenant_id = %(tenant)s
                    AND m.send_status = ANY(%(delivered)s)
+                   AND m.campaign_id IS NULL
                    AND NOT EXISTS (SELECT 1 FROM campaigns c
                                     WHERE c.tenant_id = m.tenant_id
                                       AND m.idempotency_key LIKE c.id::text || ':%%')

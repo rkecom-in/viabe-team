@@ -237,3 +237,50 @@ class TestUnknownIsNotNoEffect:
                         unattributable_delivered=2),
         )
         assert f.effect_kind == "unknown"
+
+
+class TestCampaignIdIsNowWrittenAndPreferred:
+    """VT-740 root fix. `campaign_messages.campaign_id` was NEVER populated — the sole writer
+    omitted the column and nothing UPDATEd it — so any join on it found zero rows for every
+    campaign, real sends included. That is what made the first wake-gate inert and what would have
+    made the diagnosis report a false all-clear."""
+
+    def test_the_send_writer_populates_campaign_id(self) -> None:
+        pytest.importorskip("psycopg")
+        pytest.importorskip("pydantic")
+        import inspect
+
+        from orchestrator.agent.tools import send_whatsapp_template as tool
+
+        src = inspect.getsource(tool._write_campaign_message)
+        assert "campaign_id" in src.split('"""')[0] + src.split('"""')[-1], (
+            "the INSERT must carry campaign_id — omitting it is the original defect"
+        )
+        assert "(tenant_id, customer_id, campaign_id, idempotency_key" in src
+
+    def test_the_campaign_fanout_supplies_it(self) -> None:
+        pytest.importorskip("psycopg")
+        pytest.importorskip("pydantic")
+        import inspect
+
+        from orchestrator.campaign import execute
+
+        src = inspect.getsource(execute)
+        assert "campaign_id=campaign_id_str," in src, (
+            "writing the column is useless unless the campaign path actually passes it"
+        )
+
+    def test_the_rollup_prefers_the_column_and_keeps_the_prefix_only_for_legacy_rows(self) -> None:
+        """Pre-VT-740 rows are permanently NULL and cannot be back-filled honestly, so the prefix
+        arm has to survive — but it must be scoped to those rows, not used in preference."""
+        pytest.importorskip("psycopg")
+        pytest.importorskip("pydantic")
+        import inspect
+
+        from orchestrator.db.wrappers import CampaignsWrapper
+
+        src = inspect.getsource(CampaignsWrapper.effect_state_rollup)
+        assert "m.campaign_id = c.id" in src, "the real column must be the primary join"
+        assert "m.campaign_id IS NULL" in src, (
+            "the idempotency-prefix fallback must be scoped to legacy NULL rows only"
+        )

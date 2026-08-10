@@ -509,6 +509,11 @@ def execute_approved_campaign(
                     language=language,  # type: ignore[arg-type]
                     template_params=body_params,
                     idempotency_key=idempotency_key,
+                    # VT-740: attribute the ledger row to THIS campaign. The column existed and was
+                    # never written, so effect-state ("did this partially send? may it be
+                    # re-driven?") had to match an idempotency-key prefix instead — a workaround
+                    # that cannot see the agent path at all.
+                    campaign_id=campaign_id_str,
                 )
                 result: SendWhatsappTemplateOutput = _send_fn(payload, pool=send_pool)
             except Exception as exc:  # noqa: BLE001
