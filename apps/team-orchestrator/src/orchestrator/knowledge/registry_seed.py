@@ -304,13 +304,42 @@ def _insert_card(conn: ConnectionLike, card: KnowledgeCard, *, supersedes_card_i
     )
 
 
-def _insert_source_edge(conn: ConnectionLike, card: KnowledgeCard, source_id: str) -> None:
+def _insert_source_edge(
+    conn: ConnectionLike,
+    card: KnowledgeCard,
+    source_id: str,
+    *,
+    independence_cluster: str | None = None,
+    supports: bool = True,
+) -> None:
+    """Attach one source to a card as evidence.
+
+    THE ONE WRITER for ``knowledge_card_sources``. VT-723 tried to add stance by re-implementing
+    this function instead of extending it, and the copy diverged from the schema — it inserted
+    ``supports`` and ``relevance`` columns that did not exist, so its first row raised
+    ``UndefinedColumn`` and the whole load committed nothing. Extend this; do not fork it.
+
+    ``supports=False`` records a source that REFUTES the claim. That distinction is load-bearing,
+    not bookkeeping: corroboration counting promotes a card by counting independent supporting
+    clusters, so an unmarked refutation would count toward promoting the very claim it demolishes —
+    the card would look better-corroborated the more authoritatively it was contradicted. Any
+    counting query MUST filter ``supports = true`` (migration 202).
+
+    ``independence_cluster`` defaults to the card's own; pass it only when the edge belongs to a
+    different cluster than the card declares.
+    """
     edge_id = uuid5(NAMESPACE_URL, f"viabe:o8:edge:{card.card_version_id}:{source_id}")
     conn.execute(
         "INSERT INTO public.knowledge_card_sources "
-        "(id, card_id, source_id, independence_cluster_id) VALUES (%s, %s, %s, %s) "
+        "(id, card_id, source_id, independence_cluster_id, supports) VALUES (%s, %s, %s, %s, %s) "
         "ON CONFLICT (card_id, source_id) DO NOTHING",
-        (edge_id, card.card_version_id, source_id, card.independence_cluster),
+        (
+            edge_id,
+            card.card_version_id,
+            source_id,
+            independence_cluster or card.independence_cluster,
+            supports,
+        ),
     )
 
 
