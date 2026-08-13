@@ -22,7 +22,7 @@ from orchestrator.knowledge.contracts import CardProvenance, CardStatus, Knowled
 from orchestrator.knowledge.ingestion import CandidateArtifact
 from orchestrator.knowledge.persisted_embeddings import card_content_digest
 from orchestrator.knowledge.registry_resolution import ResolutionPlan
-from orchestrator.knowledge.registry_seed import _insert_card, _json
+from orchestrator.knowledge.registry_seed import _insert_card, _insert_source_edge, _json
 from orchestrator.knowledge_global_purity import assert_global_payload_pure
 
 EXPECTED_T4_CARDS = 18
@@ -414,12 +414,11 @@ def persist_corroboration_plan(conn: ConnectionLike, plan: T4CorroborationPlan) 
         )
     for artifact in plan.source_candidates:
         _insert_card(conn, artifact.card, supersedes_card_id=None)
-        _insert_evidence_edge(
+        _insert_source_edge(
             conn,
-            card=artifact.card,
-            source_id=artifact.card.provenance.source_ids[0],
+            artifact.card,
+            artifact.card.provenance.source_ids[0],
             independence_cluster=artifact.card.independence_cluster,
-            supports=True,
         )
 
     conn.execute(
@@ -432,19 +431,18 @@ def persist_corroboration_plan(conn: ConnectionLike, plan: T4CorroborationPlan) 
     for item in plan.transitions:
         _insert_card(conn, item.resolved, supersedes_card_id=item.prior.card_version_id)
         for edge in item.edges:
-            _insert_evidence_edge(
+            _insert_source_edge(
                 conn,
-                card=item.resolved,
-                source_id=edge.source_id,
+                item.resolved,
+                edge.source_id,
                 independence_cluster=edge.independence_cluster,
                 supports=edge.stance is not EvidenceStance.REFUTES,
             )
-        _insert_evidence_edge(
+        _insert_source_edge(
             conn,
-            card=item.resolved,
-            source_id=item.prior.provenance.source_ids[0],
+            item.resolved,
+            item.prior.provenance.source_ids[0],
             independence_cluster=item.prior.independence_cluster,
-            supports=True,
         )
         event_type = "dispute" if item.resolved.status is CardStatus.DISPUTED else "promotion"
         conn.execute(
@@ -490,23 +488,6 @@ def copy_corroboration_embeddings(conn: ConnectionLike, plan: T4CorroborationPla
                 digest,
             ),
         )
-
-
-def _insert_evidence_edge(
-    conn: ConnectionLike,
-    *,
-    card: KnowledgeCard,
-    source_id: str,
-    independence_cluster: str,
-    supports: bool,
-) -> None:
-    edge_id = uuid5(NAMESPACE_URL, f"viabe:o8:edge:{card.card_version_id}:{source_id}")
-    conn.execute(
-        "INSERT INTO public.knowledge_card_sources "
-        "(id, card_id, source_id, independence_cluster_id, supports, relevance) "
-        "VALUES (%s, %s, %s, %s, %s, 1) ON CONFLICT (card_id, source_id) DO NOTHING",
-        (edge_id, card.card_version_id, source_id, independence_cluster, supports),
-    )
 
 
 __all__ = [
