@@ -332,7 +332,14 @@ def build_corroboration_plan(
                 "corpus_version_id": str(corpus_id),
                 "status": status,
                 "retrieval_eligible": False,
-                "corroboration_cluster_count": row.total_independence_cluster_count,
+                # CORROBORATING clusters only, never the total. `contracts.py` gates a T4 card's
+                # exit from research-only on this field being >= 2, so a total that includes
+                # REFUTING clusters would promote a claim in proportion to how authoritatively it
+                # was contradicted — migration 202's warning, one layer up from the SQL it warned
+                # about. The +1 is the card's own originating cluster, which supports its own
+                # claim; `qualifying_new_cluster_count` is the independent corroborating count and
+                # is validated to equal the corroborating edges exactly.
+                "corroboration_cluster_count": 1 + row.qualifying_new_cluster_count,
                 "provenance": provenance,
             }
         )
@@ -431,12 +438,25 @@ def persist_corroboration_plan(conn: ConnectionLike, plan: T4CorroborationPlan) 
     for item in plan.transitions:
         _insert_card(conn, item.resolved, supersedes_card_id=item.prior.card_version_id)
         for edge in item.edges:
+            if edge.stance is EvidenceStance.PARTIAL:
+                # `knowledge_card_sources.supports` is a BOOLEAN, so persisting PARTIAL means
+                # choosing between calling it support (it would then count as full corroboration
+                # in any `WHERE supports = true` aggregate — the inversion migration 202 exists to
+                # prevent) and calling it refutation (a source that partly supports a claim is not
+                # a source that contradicts it). Both are lies, so refuse instead of picking one.
+                # Today no PARTIAL edge reaches here: partial evidence only appears on the two
+                # research_only rows, whose transitions are skipped. If that changes, the schema
+                # needs a three-valued stance BEFORE this can persist — fail loudly, not quietly.
+                raise CorroborationError(
+                    f"{item.legacy_id}: partial evidence cannot persist as a boolean stance; "
+                    "extend the schema to a three-valued stance first"
+                )
             _insert_source_edge(
                 conn,
                 item.resolved,
                 edge.source_id,
                 independence_cluster=edge.independence_cluster,
-                supports=edge.stance is not EvidenceStance.REFUTES,
+                supports=edge.stance is EvidenceStance.CORROBORATES,
             )
         _insert_source_edge(
             conn,

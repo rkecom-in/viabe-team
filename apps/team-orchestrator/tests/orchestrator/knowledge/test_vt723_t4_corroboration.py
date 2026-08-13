@@ -77,6 +77,106 @@ def artifacts():
     return parent, sources, candidates, delta
 
 
+def _builder():
+    """The build script, imported for its committed SOURCES table. Import is side-effect free."""
+
+    import sys
+
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from scripts.business_knowledge import build_o8_t4_corroboration as module
+
+    return module
+
+
+def test_no_card_carries_a_predicate_or_a_decision_its_source_never_gave(artifacts) -> None:
+    """CL-2026-08-13-judgment-vs-citation, enforced against the committed artifacts.
+
+    The original builder stamped the parent T4 forum card's `claim_key` onto every distillation and
+    set `claim_value` to `spec["action"]`. So a card whose claim faithfully cited the CGST Act
+    carried a predicate demanding a notice-upload checklist and a value instructing the owner to
+    "classify the statutory ground before changing tax treatment" — neither of which the Act says.
+    That is judgment riding a source's tier, and it was one builder line, not 33 authoring errors.
+
+    This test needs no archive: the SOURCES table is committed code, so the committed data can be
+    checked against the specs it was generated from. That is what makes it runnable in CI, and what
+    stops the artifacts and the builder drifting apart.
+    """
+    parent, sources, candidates, _delta = artifacts
+    builder = _builder()
+
+    spec_by_url = {spec["url"]: spec for spec in builder.SOURCES}
+    assert len(spec_by_url) == len(builder.SOURCES) == 33
+    card_by_version = {candidate.card.card_version_id: candidate.card for candidate in candidates}
+    parent_predicates = {
+        card.claim_key.predicate
+        for card in parent.members
+        if card.source_class is SourceClass.T4_EXPERIENTIAL
+    }
+    assert parent_predicates, "the T4 parents must be present for this to mean anything"
+
+    for source in sources:
+        spec = spec_by_url[source.canonical_url]
+        card = card_by_version[source.candidate_card_version_id]
+        assert card.claim_key.predicate == builder.evidence_predicate(spec["claim"]), (
+            f"{source.source_id}: predicate must be derived from the card's OWN claim"
+        )
+        assert card.claim_key.predicate not in parent_predicates, (
+            f"{source.source_id}: inheriting the parent's behavioural predicate is the defect"
+        )
+        assert card.claim_value.value == card.claim, (
+            f"{source.source_id}: a card carrying a source's tier may assert only the cited claim"
+        )
+        assert card.claim_value.value != spec["action"], (
+            f"{source.source_id}: `action` is OUR recommendation, not the source's — it may not "
+            "ride the source's tier"
+        )
+        assert card.distillation_note.startswith("Cited: "), (
+            f"{source.source_id}: the note records what the source says, not a decision we made"
+        )
+        # The spec keeps `action` deliberately, as provenance of what the acquisition was chasing.
+        # Asserting it is still there is what keeps the negative assertion above meaningful.
+        assert spec["action"], f"{source.source_id}: acquisition intent must stay recorded"
+
+    assert len({card.claim_key.predicate for card in card_by_version.values()}) == 33, (
+        "33 distinct claims must yield 33 distinct claim identities"
+    )
+
+
+@pytest.mark.skipif(
+    not (ROOT / "archives/business-knowledge/research/vt723-t4-corroboration").is_dir(),
+    reason="local-only source archive is unavailable; committed artifacts remain validated",
+)
+def test_local_source_bytes_verify_and_regeneration_is_deterministic(artifacts) -> None:
+    """The verifiability condition of the ruling, made falsifiable instead of asserted.
+
+    `archives/` is gitignored (~200MB of third-party pages, never committed), so this cannot be an
+    unconditional test — but "deterministic regeneration: 33 sources" was in the PR body with
+    nothing behind it, and the only assertions on the archive were a path prefix and a 64-hex
+    shape. Neither would notice if the recorded digest belonged to a different document.
+
+    Two things are checked where the archive exists: the recorded digest IS the sha256 of the real
+    acquired bytes, and re-running the builder over those bytes reproduces the committed artifacts
+    exactly.
+    """
+    import hashlib
+
+    _parent, sources, _candidates, _delta = artifacts
+    for source in sources:
+        path = ROOT / source.local_archive_path
+        assert path.is_file(), f"{source.source_id}: recorded archive path does not resolve"
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        assert digest == source.local_archive_sha256 == source.content_hash, (
+            f"{source.source_id}: recorded digest is not the digest of these bytes"
+        )
+
+    builder = _builder()
+    manifests, candidates, delta = builder.build()
+    assert manifests == jsonl("t4_corroboration_sources.jsonl")
+    assert candidates == jsonl("t4_corroboration_candidates.jsonl")
+    assert delta == jsonl("t4_corroboration_delta.jsonl")
+
+
 def test_all_sources_pass_real_vt710_pipeline_and_raw_stays_local(artifacts) -> None:
     parent, sources, candidates, _delta = artifacts
     assert len(sources) == len(candidates) == 33
@@ -115,10 +215,13 @@ def test_all_sources_pass_real_vt710_pipeline_and_raw_stays_local(artifacts) -> 
         # may retain its primary source's T1/T1v class; authorship authority remains seed.
         assert candidate.authority is EvidenceAuthority.SEED
 
-        # The card is a new source for an existing semantic claim. Its identity and applicability
-        # therefore match that claim, not a legacy artifact ID or a generic evidence predicate.
+        # The card is a new source for an existing semantic claim, so it shares that claim's
+        # SUBJECT — a topic dimension. It must NOT share the parent's PREDICATE: that predicate is
+        # a behavioural instruction the T4 forum author gave, and copying it onto a card that
+        # carries a primary source's tier is exactly the smuggling CL-2026-08-13 forbids. This
+        # assertion used to require the opposite; it was pinning the defect in place.
         assert candidate.claim_key.subject == target.claim_key.subject
-        assert candidate.claim_key.predicate == target.claim_key.predicate
+        assert candidate.claim_key.predicate != target.claim_key.predicate
         assert candidate.claim_key.predicate != "independent_evidence"
         if candidate.source_class is not SourceClass.T1_REGULATORY:
             assert candidate.applicability == target.applicability

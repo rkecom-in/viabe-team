@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import subprocess
 import sys
 from collections import Counter
@@ -798,6 +799,30 @@ SOURCES = [
 ]
 
 
+def evidence_predicate(claim: str) -> str:
+    """Derive a card's claim predicate from ITS OWN claim.
+
+    This function exists because of the defect it replaces. The predicate used to be copied from
+    the parent T4 forum card, so a card whose `claim` faithfully cites the CGST Act carried a
+    predicate demanding a "notice-upload and supporting-document checklist" — a behavioural control
+    the Act has no concept of. Under CL-2026-08-13-judgment-vs-citation that is judgment riding a
+    source's tier: the claim falls if the Act vanishes, the checklist does not.
+
+    A predicate derived from the card's own claim cannot smuggle an instruction the source never
+    gave. Retrieval matches on the predicate, so this is the field where the difference is load
+    bearing, not cosmetic.
+    """
+    predicate = ""
+    for word in re.findall(r"[a-z0-9]+", claim.casefold()):
+        candidate = f"{predicate}_{word}" if predicate else word
+        if len(candidate) > 200:  # ClaimKey.predicate max_length
+            break
+        predicate = candidate
+    if not predicate:
+        raise ValueError(f"claim yields no predicate: {claim!r}")
+    return predicate
+
+
 class DistillationExtractor:
     tools_enabled: Literal[False] = False
 
@@ -805,16 +830,15 @@ class DistillationExtractor:
         row = json.loads(raw_text)
         return ExtractedClaimDraft(
             claim=row["claim"],
-            distillation_note=f"Decision: {row['action']}\nEvidence locator: {row['locator']}",
-            # The new card is an independently sourced statement of an EXISTING claim. Preserve
-            # that claim's semantic identity instead of minting a generic "independent_evidence"
-            # predicate or embedding a legacy artifact ID in the subject. This lets conflict and
-            # corroboration resolution compare like with like.
+            # "Cited", not "Decision". The card records what the source says and where it says it.
+            # The owner-facing decision that used to live here was authored by us, not by the
+            # source, and a card carrying a source's tier may not assert it.
+            distillation_note=f"Cited: {row['claim']}\nEvidence locator: {row['locator']}",
+            # The SUBJECT is a topic dimension and is legitimately shared with the claim this
+            # source was acquired to corroborate. The PREDICATE is not: see evidence_predicate.
             claim_subject=row["claim_key"]["subject"],
             claim_predicate=row["claim_key"]["predicate"],
-            claim_value=TypedClaimValue(
-                value_type=ClaimValueType.TEXT, value=row["action"]
-            ),
+            claim_value=TypedClaimValue(value_type=ClaimValueType.TEXT, value=row["claim"]),
         )
 
 
@@ -912,12 +936,20 @@ def build() -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, 
     support_by_legacy: dict[str, list[dict[str, Any]]] = {}
     for spec, path, digest, source_id in prepared:
         primary_parent = original[spec["supports"][0]["legacy_id"]]["card"]
+        # The extraction input carries only what the card is allowed to assert: the cited claim,
+        # where in the source it sits, and an identity whose predicate comes from the claim itself.
+        # `spec["action"]` is deliberately ABSENT — it is our hypothesis about what an owner should
+        # then do, it is not in the source, and a card carrying the source's tier may not smuggle
+        # it. It stays in the acquisition table as provenance of intent, and a test asserts no
+        # card's value ever equals it again.
         raw = json.dumps(
             {
                 "claim": spec["claim"],
-                "action": spec["action"],
                 "locator": "; ".join(item["locator"] for item in spec["supports"]),
-                "claim_key": primary_parent["claim_key"],
+                "claim_key": {
+                    **primary_parent["claim_key"],
+                    "predicate": evidence_predicate(spec["claim"]),
+                },
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -1099,7 +1131,9 @@ def main() -> int:
 - VT-710 pipeline results: **{len(candidates)} inert candidates**, all embedding-deferred
 - Source-tier mix: **{tiers["t1"]} T1 / {tiers["t1v"]} T1v / {tiers["t2"]} T2 / {tiers["t3"]} T3**
 - Authorship authority: **seed** for all Codex distillations; none labelled owner, VTR, or verified outcome
-- Claim identity/applicability: inherited from the exact target claim; no generic evidence keys or universal-by-default cards
+- Claim identity: subject inherited from the target claim, **predicate derived from each card's OWN claim** (it used to be inherited, which made a cited fact carry an invented behavioural instruction); no universal-by-default cards
+- Byte binding: each card reaches its source bytes as card -> `provenance.source_ids[0]` -> `knowledge_sources.content_hash`, which is the sha256 of the acquired archive file. `source_content_hash` is the hash of our own extraction input and binds nothing about the source
+- Source verifiability: archives are **local-only and gitignored**, so byte verification and deterministic regeneration run only where the archive is present; both are asserted by skip-guarded tests rather than claimed here
 - Evidence-state result: **{counts["candidate"]} candidate / {counts["disputed"]} disputed / {counts["research_only"]} research_only**
 - Semantic retellings counted as corroboration: **0**
 - Paywall circumvention: **0**; paywalled candidates were skipped and logged
