@@ -49,7 +49,9 @@ def _real_card() -> KnowledgeCard:
     cluster-count assertion pass or fail depending on history.
     """
 
-    line = (CORPUS / "t4_corroboration_candidates.jsonl").read_text(encoding="utf-8").splitlines()[0]
+    line = (
+        (CORPUS / "t4_corroboration_candidates.jsonl").read_text(encoding="utf-8").splitlines()[0]
+    )
     card = CandidateArtifact.model_validate(json.loads(line)).card
     fresh = card.model_copy(update={"card_id": str(uuid4()), "card_version_id": str(uuid4())})
     return KnowledgeCard.model_validate(fresh.model_dump(mode="json"))
@@ -59,15 +61,18 @@ def _insert_source(conn: Any, source_id: str, source_class: str) -> None:
     conn.execute(
         "INSERT INTO public.knowledge_sources "
         "(id, canonical_url, publisher, source_class, content_hash, acquired_at, usage_rights, "
-        " retention_class, tainted) "
+        " retention_class, tainted, expires_at) "
         "VALUES (%s, %s, 'VT-723 edge-writer test', %s, %s, now(), %s::jsonb, "
-        " 'lifecycle_managed', true) ON CONFLICT (id) DO NOTHING",
+        " 'lifecycle_managed', true, "
+        " CASE WHEN %s = 't4' THEN now() + interval '90 days' ELSE NULL END) "
+        "ON CONFLICT (id) DO NOTHING",
         (
             source_id,
             f"https://example.invalid/vt723/{source_id}",
             source_class,
             uuid4().hex + uuid4().hex,
             _json({"status": "unknown"}),
+            source_class,
         ),
     )
 
