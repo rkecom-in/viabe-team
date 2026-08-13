@@ -7,12 +7,13 @@ from collections import Counter
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
+from uuid import NAMESPACE_URL, uuid5
 
 import pytest
 
 pytest.importorskip("pydantic")
 
-from orchestrator.knowledge.contracts import CardStatus, SourceClass
+from orchestrator.knowledge.contracts import CardStatus, EvidenceAuthority, SourceClass
 from orchestrator.knowledge.ingestion import CandidateArtifact
 from orchestrator.knowledge.persisted_embeddings import card_content_digest
 from orchestrator.knowledge.registry_full import build_full_plan, load_independence_audit
@@ -77,7 +78,7 @@ def artifacts():
 
 
 def test_all_sources_pass_real_vt710_pipeline_and_raw_stays_local(artifacts) -> None:
-    _parent, sources, candidates, _delta = artifacts
+    parent, sources, candidates, _delta = artifacts
     assert len(sources) == len(candidates) == 33
     assert len({source.independence_cluster for source in sources}) == 33
     assert all(source.source_class in {"t1", "t1v", "t2", "t3"} for source in sources)
@@ -85,6 +86,7 @@ def test_all_sources_pass_real_vt710_pipeline_and_raw_stays_local(artifacts) -> 
     assert all(source.paywall_access_circumvented is False for source in sources)
     assert all(source.local_archive_path.startswith("archives/") for source in sources)
     assert all(len(source.local_archive_sha256) == 64 for source in sources)
+    assert all(source.content_hash == source.local_archive_sha256 for source in sources)
     assert all(candidate.pipeline_steps == PIPELINE_STEPS for candidate in candidates)
     assert all(candidate.expression_originality.mode.value == "checked" for candidate in candidates)
     assert all(
@@ -92,6 +94,34 @@ def test_all_sources_pass_real_vt710_pipeline_and_raw_stays_local(artifacts) -> 
     )
     assert all(candidate.embedding_state.value == "pending" for candidate in candidates)
     assert all(candidate.card.retrieval_eligible is False for candidate in candidates)
+
+    candidate_by_version = {candidate.card.card_version_id: candidate for candidate in candidates}
+    parent_by_card_id = {card.card_id: card for card in parent.members}
+    for source in sources:
+        candidate = candidate_by_version[source.candidate_card_version_id].card
+        parent_id = str(
+            uuid5(NAMESPACE_URL, f"viabe:o8:card:{source.supports[0].legacy_id}")
+        )
+        target = parent_by_card_id[parent_id]
+
+        # Provenance is complete per card: the source, acquisition date and source tier are bound
+        # to the candidate rather than inferred later from its prose.
+        assert candidate.provenance.source_ids == (source.source_id,)
+        assert candidate.provenance.publisher == source.publisher
+        assert candidate.provenance.retrieved_at == source.acquired_at
+        assert candidate.source_class.value == source.source_class
+
+        # Codex-authored distillation is never labelled owner/VTR/verified-human evidence. A fact
+        # may retain its primary source's T1/T1v class; authorship authority remains seed.
+        assert candidate.authority is EvidenceAuthority.SEED
+
+        # The card is a new source for an existing semantic claim. Its identity and applicability
+        # therefore match that claim, not a legacy artifact ID or a generic evidence predicate.
+        assert candidate.claim_key.subject == target.claim_key.subject
+        assert candidate.claim_key.predicate == target.claim_key.predicate
+        assert candidate.claim_key.predicate != "independent_evidence"
+        if candidate.source_class is not SourceClass.T1_REGULATORY:
+            assert candidate.applicability == target.applicability
 
 
 def test_delta_accounts_for_every_t4_claim_and_real_negative_findings(artifacts) -> None:
@@ -201,3 +231,17 @@ def test_persistence_is_append_only_complete_and_uses_real_evidence_clusters(art
     ]
     manifest_clusters = {source.independence_cluster for source in sources}
     assert manifest_clusters <= {params[3] for params in source_edges}  # type: ignore[index]
+
+    source_by_id = {source.source_id: source for source in sources}
+    refuting_ids = {
+        source.source_id
+        for source in sources
+        if any(support.stance.value == "refutes" for support in source.supports)
+    }
+    assert refuting_ids
+    persisted_support = {
+        params[2]: params[4]  # type: ignore[index]
+        for params in source_edges
+        if params[2] in source_by_id  # type: ignore[index]
+    }
+    assert all(persisted_support[source_id] is False for source_id in refuting_ids)

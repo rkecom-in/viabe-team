@@ -4,6 +4,10 @@
 Raw HTML/PDF files are local-only inputs under archives/. Tracked outputs contain governed source
 metadata, independently authored candidates, evidence locators, and disposition changes. There is
 no network, database, embedding, or deployed-environment access in this builder.
+
+Run with the orchestrator environment (from ``apps/team-orchestrator``)::
+
+    uv run python ../../scripts/business_knowledge/build_o8_t4_corroboration.py
 """
 
 from __future__ import annotations
@@ -13,7 +17,7 @@ import json
 import subprocess
 import sys
 from collections import Counter
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Literal
@@ -56,7 +60,7 @@ MANIFEST_OUT = CORPUS / "t4_corroboration_sources.jsonl"
 CANDIDATES_OUT = CORPUS / "t4_corroboration_candidates.jsonl"
 DELTA_OUT = CORPUS / "t4_corroboration_delta.jsonl"
 REPORT_OUT = CORPUS / "T4_CORROBORATION_REPORT.md"
-ACQUIRED_AT = datetime(2026, 8, 5, 12, 0, tzinfo=UTC)
+ACQUIRED_AT = datetime(2026, 8, 5, 12, 0, tzinfo=timezone.utc)
 RIGHTS_REVIEW = {
     "status": "unknown",
     "license_id": None,
@@ -134,6 +138,29 @@ B31 = "bk031-partner-network-co-selling-borrows-trust"
 B32 = "bk032-brand-building-memory-proof-and-promise"
 B33 = "bk033-presell-commitments-before-build-or-scale"
 B113 = "bk113-good-glamm-integration-capacity"
+
+TARGET_LEGACY_IDS = frozenset(
+    {
+        B1,
+        B2,
+        B4,
+        B5,
+        B6,
+        B18,
+        B19,
+        B20,
+        B24,
+        B25,
+        B26,
+        B27,
+        B28,
+        B29,
+        B31,
+        B32,
+        B33,
+        B113,
+    }
+)
 
 
 SOURCES = [
@@ -779,8 +806,12 @@ class DistillationExtractor:
         return ExtractedClaimDraft(
             claim=row["claim"],
             distillation_note=f"Decision: {row['action']}\nEvidence locator: {row['locator']}",
-            claim_subject=row["subject"],
-            claim_predicate="independent_evidence",
+            # The new card is an independently sourced statement of an EXISTING claim. Preserve
+            # that claim's semantic identity instead of minting a generic "independent_evidence"
+            # predicate or embedding a legacy artifact ID in the subject. This lets conflict and
+            # corroboration resolution compare like with like.
+            claim_subject=row["claim_key"]["subject"],
+            claim_predicate=row["claim_key"]["predicate"],
             claim_value=TypedClaimValue(
                 value_type=ClaimValueType.TEXT, value=row["action"]
             ),
@@ -837,6 +868,14 @@ def source_text(path: Path) -> str:
 
 
 def build() -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    original: dict[str, dict[str, Any]] = {}
+    for line in (CORPUS / "candidate_cards.jsonl").read_text(encoding="utf-8").splitlines():
+        row = json.loads(line)
+        if row["legacy_id"] in TARGET_LEGACY_IDS:
+            original[row["legacy_id"]] = row
+    if set(original) != TARGET_LEGACY_IDS:
+        raise ValueError("the exact 18 T4 parent candidates were not found")
+
     decisions: dict[str, SourceRightsDecision] = {}
     prepared: list[tuple[dict[str, Any], Path, str, str]] = []
     for spec in SOURCES:
@@ -872,26 +911,29 @@ def build() -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, 
     candidates: list[dict[str, Any]] = []
     support_by_legacy: dict[str, list[dict[str, Any]]] = {}
     for spec, path, digest, source_id in prepared:
+        primary_parent = original[spec["supports"][0]["legacy_id"]]["card"]
         raw = json.dumps(
             {
                 "claim": spec["claim"],
                 "action": spec["action"],
                 "locator": "; ".join(item["locator"] for item in spec["supports"]),
-                "subject": spec["supports"][0]["legacy_id"],
+                "claim_key": primary_parent["claim_key"],
             },
             sort_keys=True,
             separators=(",", ":"),
         )
-        applicability = (
-            Applicability(
+        if spec["source_class"] == "t1":
+            applicability = Applicability(
                 jurisdictions=(spec["jurisdiction"],),
                 effective_from=datetime.fromisoformat(
                     spec["effective_from"].replace("Z", "+00:00")
                 ),
             )
-            if spec["source_class"] == "t1"
-            else Applicability(universal=True)
-        )
+        else:
+            # Evidence is not universal merely because it is non-regulatory. Inherit the exact
+            # target claim's business applicability (B2B/ecommerce/India/etc.) so retrieval cannot
+            # confidently apply a scoped study to every tenant and channel.
+            applicability = Applicability.model_validate(primary_parent["applicability"])
         candidate = pipeline.ingest(
             AcquiredSource(
                 source_id=source_id,
@@ -926,7 +968,10 @@ def build() -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, 
                 "title": spec["title"],
                 "publisher": spec["publisher"],
                 "source_class": spec["source_class"],
-                "content_hash": candidate.source_content_hash,
+                # knowledge_sources describes the acquired source reproduction, not our JSON
+                # distillation. Keep that byte hash distinct from CandidateArtifact's
+                # source_content_hash (which binds the owned extraction input).
+                "content_hash": digest,
                 "acquired_at": ACQUIRED_AT.isoformat().replace("+00:00", "Z"),
                 "local_archive_path": str(path.relative_to(REPO_ROOT)),
                 "local_archive_sha256": digest,
@@ -955,36 +1000,6 @@ def build() -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, 
                     "qualifies_for_threshold": item["qualifies_for_threshold"],
                 }
             )
-
-    target_ids = {
-        B1,
-        B2,
-        B4,
-        B5,
-        B6,
-        B18,
-        B19,
-        B20,
-        B24,
-        B25,
-        B26,
-        B27,
-        B28,
-        B29,
-        B31,
-        B32,
-        B33,
-        B113,
-    }
-    original = {}
-    for line in (
-        (CORPUS / "candidate_cards.jsonl").read_text(encoding="utf-8").splitlines()
-    ):
-        row = json.loads(line)
-        if row["legacy_id"] in target_ids:
-            original[row["legacy_id"]] = row
-    if len(original) != 18:
-        raise ValueError("the exact 18 T4 parent candidates were not found")
 
     skipped = {
         B25: [
@@ -1076,17 +1091,27 @@ def main() -> int:
     write_jsonl(CANDIDATES_OUT, candidates)
     write_jsonl(DELTA_OUT, delta)
     counts = Counter(row["resolved_status"] for row in delta)
+    tiers = Counter(row["source_class"] for row in manifests)
     report = f"""# VT-723 T4 corroboration report
 
 - Exact forum claims reviewed: **{len(delta)}**
 - New governed source clusters: **{len(manifests)}**
 - VT-710 pipeline results: **{len(candidates)} inert candidates**, all embedding-deferred
+- Source-tier mix: **{tiers["t1"]} T1 / {tiers["t1v"]} T1v / {tiers["t2"]} T2 / {tiers["t3"]} T3**
+- Authorship authority: **seed** for all Codex distillations; none labelled owner, VTR, or verified outcome
+- Claim identity/applicability: inherited from the exact target claim; no generic evidence keys or universal-by-default cards
 - Evidence-state result: **{counts["candidate"]} candidate / {counts["disputed"]} disputed / {counts["research_only"]} research_only**
 - Semantic retellings counted as corroboration: **0**
 - Paywall circumvention: **0**; paywalled candidates were skipped and logged
 - Raw source reproductions committed: **0**; archive inputs remain local-only
 - Retrieval eligibility granted: **0**
 - Effect authority granted: **0**
+
+## Landing posture
+
+This corpus lands in **SHADOW**. The retrieval call site is not wired and prompt injection remains
+locked off. These cards and evidence transitions become durable reviewable substrate only; this
+change makes no claim of current product impact.
 
 bk028-comment-sample-loop-for-service-demand is disputed: a SaaS field experiment supports
 carefully targeted free trials, while an independent randomized study found free distribution can

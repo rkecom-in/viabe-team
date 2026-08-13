@@ -419,6 +419,7 @@ def persist_corroboration_plan(conn: ConnectionLike, plan: T4CorroborationPlan) 
             card=artifact.card,
             source_id=artifact.card.provenance.source_ids[0],
             independence_cluster=artifact.card.independence_cluster,
+            supports=True,
         )
 
     conn.execute(
@@ -436,12 +437,14 @@ def persist_corroboration_plan(conn: ConnectionLike, plan: T4CorroborationPlan) 
                 card=item.resolved,
                 source_id=edge.source_id,
                 independence_cluster=edge.independence_cluster,
+                supports=edge.stance is not EvidenceStance.REFUTES,
             )
         _insert_evidence_edge(
             conn,
             card=item.resolved,
             source_id=item.prior.provenance.source_ids[0],
             independence_cluster=item.prior.independence_cluster,
+            supports=True,
         )
         event_type = "dispute" if item.resolved.status is CardStatus.DISPUTED else "promotion"
         conn.execute(
@@ -495,13 +498,14 @@ def _insert_evidence_edge(
     card: KnowledgeCard,
     source_id: str,
     independence_cluster: str,
+    supports: bool,
 ) -> None:
     edge_id = uuid5(NAMESPACE_URL, f"viabe:o8:edge:{card.card_version_id}:{source_id}")
     conn.execute(
         "INSERT INTO public.knowledge_card_sources "
         "(id, card_id, source_id, independence_cluster_id, supports, relevance) "
-        "VALUES (%s, %s, %s, %s, TRUE, 1) ON CONFLICT (card_id, source_id) DO NOTHING",
-        (edge_id, card.card_version_id, source_id, independence_cluster),
+        "VALUES (%s, %s, %s, %s, %s, 1) ON CONFLICT (card_id, source_id) DO NOTHING",
+        (edge_id, card.card_version_id, source_id, independence_cluster, supports),
     )
 
 
