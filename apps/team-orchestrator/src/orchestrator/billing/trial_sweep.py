@@ -11,8 +11,14 @@ VT-365 (Fazal 2026-06-09): NO trial extensions, no money clawback. A trial that
 elapses without an explicit owner `subscribe` simply EXPIRES to `lapsed`
 (dormant, re-subscribable). The old extend/exhaust + clawback paths are removed.
 
-NO model calls (Pillar 1). The owner notify is an INJECTABLE seam — the real owner-WABA
-send is gate-live (NEEDS-FAZAL: provision the Meta SIDs); the default stub logs.
+NO model calls (Pillar 1). The owner notify is an INJECTABLE seam and ``notify_fn`` is a
+REQUIRED keyword argument of ``run_trial_evaluation_body`` — there is deliberately NO
+default (VT-745). The old ``_default_notify`` logging stub was a silent no-op sitting one
+missing kwarg away from the money path: a caller that forgot ``notify_fn`` expired trials
+and told the owner NOTHING, and the only thing standing between that and production was a
+test on the CALLER. Omitting it now raises at the call site, before any tenant is touched.
+The registry templates (`trial_ending`, `trial_subscribe_link`) are audience=owner,
+approved_for_live=true, with real en/hi SIDs — the production notify path is live.
 Idempotent: expire → `lapsed` (re-scan skips it — scope is phase='trial' only).
 apply_transition is the SOLE phase mutator.
 """
@@ -28,16 +34,6 @@ logger = logging.getLogger(__name__)
 
 # Owner notify seam: (tenant_id, template_name, language, params) -> None.
 NotifyFn = Callable[[UUID, str, str, dict[str, Any]], None]
-
-
-def _default_notify(
-    tenant_id: UUID, template_name: str, language: str, params: dict[str, Any]
-) -> None:
-    """STUB owner notify (owner-WABA gate-live, NEEDS-FAZAL SIDs). Logs intent."""
-    logger.info(
-        "trial_sweep: notify queued tenant=%s template=%s lang=%s (owner-WABA gate-live)",
-        tenant_id, template_name, language,
-    )
 
 
 def _owner_notify(
@@ -327,13 +323,30 @@ def _apply_trial_transition(tenant_id: UUID, event: str) -> None:
 
 
 def run_trial_evaluation_body(
-    now: datetime | None = None, *, notify_fn: NotifyFn | None = None,
+    now: datetime | None = None, *, notify_fn: NotifyFn,
 ) -> list[Any]:
-    """Daily trial sweep body. Returns the verdicts acted on. No model calls (Pillar 1)."""
+    """Daily trial sweep body. Returns the verdicts acted on. No model calls (Pillar 1).
+
+    VT-745: ``notify_fn`` is REQUIRED and has NO default. This sweep expires trials —
+    telling the owner is not an optional decoration of that, it IS the other half of it.
+    A silently-defaulted no-op notify meant a forgotten kwarg shipped "trials expire and
+    nobody is told"; omitting the kwarg now fails at the call site instead. Pass an
+    explicit no-op ONLY in a test that is deliberately asserting non-notify behaviour.
+
+    The callable check runs BEFORE the scan so a bad wiring raises while zero tenants have
+    been transitioned — a mid-loop ``None`` would otherwise strand the first tenant already
+    moved to `lapsed` with no notify sent and the rest of the sweep unrun.
+    """
     from orchestrator.billing.trial_evaluator import evaluate_trial
 
+    if not callable(notify_fn):
+        raise TypeError(
+            "run_trial_evaluation_body requires a callable notify_fn "
+            f"(got {type(notify_fn).__name__}); the trial sweep must never expire a "
+            "trial without a live owner-notify seam (VT-745)"
+        )
     now = now or datetime.now(timezone.utc)
-    notify = notify_fn or _default_notify
+    notify = notify_fn
     acted: list[Any] = []
     for tid in _scan_active_trials(now):
         # VT-374 (trial_sweep, evaluate_tenant) seam — per-tenant pause check at loop top.

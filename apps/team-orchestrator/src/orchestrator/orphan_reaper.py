@@ -320,10 +320,18 @@ def reap_stalled_manager_tasks(*, pool: Any = None, age_hours: int = _STALLED_TA
             _notify_approval_holders(approval_holders)
         if not n and not n_woken and not n_orphaned:
             logger.info("VT-557 retry-ladder reaper: no stalled or wakeable manager_tasks")
-        return n
     except Exception:  # noqa: BLE001 — best-effort by design; must never block boot
         logger.warning("VT-557 retry-ladder reaper sweep failed (best-effort)", exc_info=True)
         return 0
+    finally:
+        # VT-740 — the crashed-campaign terminalizer runs on THIS sweep's schedule
+        # (STALLED_TASK_SWEEP_CRON, every 10 min) rather than as a 12th registered cron. It has
+        # its own connection + its own try/except, so it can neither see nor corrupt the ladder's
+        # transaction above, and a failure here can never change the ladder's result. In `finally`
+        # deliberately: a ladder failure is not a reason to leave a crashed campaign stranded
+        # 'approved' forever — the two sweeps are independent.
+        reap_crashed_campaigns(pool=pool)
+    return n
 
 
 def _alert_orphaned_tasks(rows: Any) -> None:
@@ -404,6 +412,250 @@ def _notify_approval_holders(rows: Any) -> None:
         except Exception:  # noqa: BLE001 — one notify failing must not stop the rest or the reaper
             logger.warning(
                 "VT-668 approval-holder notify failed (fail-soft) task=%s", task_id, exc_info=True
+            )
+
+
+# ---------------------------------------------------------------------------
+# VT-740 — the crashed-campaign terminalizer.
+#
+# WHY THIS EXISTS. ``campaign/execute.py`` advances a campaign to 'sent' only AFTER the whole
+# fan-out loop returns, and the only other writer is the VT-558 operator cancel. So a campaign
+# whose executor DIED at recipient 40 of 100 stays ``status='approved'`` FOREVER: nothing ever
+# moves it, its remainder is never surfaced, and any effect-state predicate of the form "does this
+# tenant have an approved campaign that already delivered?" stays permanently TRUE. That last
+# property is what killed the second wake-gate attempt (VT-740): the condition the gate fired on
+# was the condition that never cleared, so every protected tenant would eventually wedge with
+# ``blocked`` (∈ TASK_ACTIVE) holding its one active slot. Terminalizing the campaign is the fix
+# for the ROOT of that, and it is the shape Clau ratified over a third wake gate.
+#
+# WHY 'failed' AND NOT 'sent'. The sweep cannot prove a campaign COMPLETED. ``remainder == 0`` is
+# not evidence: a recipient skipped for opt-out / complaint-freeze / frequency is processed
+# correctly and is never "delivered", so a fully-processed campaign and one that died on its last
+# recipient can look identical from the ledger. Claiming 'sent' would tell the owner and the VTR
+# that a campaign finished when it may not have — the dangerous direction. 'failed' claims nothing
+# about delivery; the real intended/delivered/remainder numbers reach the VTR through
+# ``prod_workflow_diagnosis`` (which reads the SAME ledger join used below).
+#
+# WHY THIS CANNOT KILL A LIVE FAN-OUT. Three independent guards: (1) the candidate must ALREADY
+# have written at least one ``campaign_messages`` row (``last_message_at IS NOT NULL``) — a
+# campaign that has not started is never touched; (2) that last row must be older than
+# ``_CRASHED_CAMPAIGN_AGE_HOURS``, and the fan-out loop has NO pacing/sleep — it writes a ledger
+# row per recipient back-to-back — so a two-hour gap is not a slow campaign, it is a dead one;
+# (3) the UPDATE re-checks, at write time, that no message newer than the observed
+# ``last_message_at`` has appeared, which closes the read→write race with a loop that resumed in
+# between. The UPDATE is additionally CAS'd on ``status = 'approved'``, so a loop that reached its
+# own status advance first wins.
+_CRASHED_CAMPAIGN_AGE_HOURS = 2
+_CRASHED_CAMPAIGN_LIMIT = 200
+_CRASHED_CAMPAIGN_TERMINAL = "failed"
+
+# The campaign→message link, SHARED by the candidate SELECT (dict params) and the terminalize
+# UPDATE (dict params).
+#
+# ``starts_with(a, b)`` here is load-bearing, not style. The reverted second attempt shared a
+# fragment containing ``LIKE c.id::text || ':%'`` between a no-param query and a param-carrying
+# one: psycopg parses ``%`` ONLY when ``params is not None``, so the fragment parsed fine in one
+# caller and raised ``ProgrammingError: only '%s', '%b', '%t' are allowed as placeholders`` on
+# EVERY call in the other — gate live, safety valve dead. Doubling to ``%%`` inverts the bug
+# instead of fixing it: with ``params=None`` psycopg sends the string VERBATIM, so the server sees
+# a literal ``%%`` and LIKE matches a literal percent sign — silently zero rows, the exact
+# "inert gate" class that killed attempt #1. ``starts_with`` contains no ``%`` at all and is
+# therefore correct in BOTH modes. Proved against the pinned psycopg in
+# tests/orchestrator/test_vt740_crashed_campaign_terminalization.py.
+#
+# The first arm (``m.campaign_id = c.id``) is the real column, populated at write time since
+# VT-740; the second arm covers rows written BEFORE that, which are permanently NULL and cannot be
+# back-filled honestly. Same two arms as ``CampaignsWrapper.effect_state_rollup``, so the reaper
+# and the VTR diagnosis count the same sends.
+_CAMPAIGN_MSG_LINK = (
+    "(m.campaign_id = c.id "
+    "     OR (m.campaign_id IS NULL "
+    "         AND starts_with(m.idempotency_key, c.id::text || ':')))"
+)
+
+_CRASHED_CAMPAIGN_CANDIDATES_SQL = (
+    "SELECT c.id::text AS campaign_id, c.tenant_id::text AS tenant_id, "
+    "       ms.delivered, ms.attempted, ms.last_message_at, "
+    "       (SELECT count(*) FROM campaign_recipients r "
+    "         WHERE r.tenant_id = c.tenant_id AND r.campaign_id = c.id) AS intended "
+    "  FROM campaigns c "
+    "  JOIN LATERAL ( "
+    "        SELECT count(*) FILTER (WHERE m.send_status = ANY(%(delivered)s)) AS delivered, "
+    "               count(*) FILTER (WHERE NOT (m.send_status = ANY(%(delivered)s))) AS attempted, "
+    "               max(m.created_at) AS last_message_at "
+    "          FROM campaign_messages m "
+    "         WHERE m.tenant_id = c.tenant_id "
+    "           AND " + _CAMPAIGN_MSG_LINK + " "
+    "       ) ms ON TRUE "
+    " WHERE c.status = 'approved' "
+    "   AND ms.last_message_at IS NOT NULL "
+    "   AND ms.last_message_at < now() - make_interval(hours => %(age_hours)s) "
+    " ORDER BY ms.last_message_at "
+    " LIMIT %(limit)s"
+)
+
+_TERMINALIZE_CRASHED_CAMPAIGN_SQL = (
+    "UPDATE campaigns AS c SET status = %(terminal)s "
+    " WHERE c.tenant_id = %(tenant)s AND c.id = %(campaign)s AND c.status = 'approved' "
+    # Read→write race guard: if the (presumed dead) fan-out wrote another ledger row after the
+    # candidate SELECT observed ``last_message_at``, it is alive — leave it alone.
+    "   AND NOT EXISTS (SELECT 1 FROM campaign_messages m "
+    "                    WHERE m.tenant_id = c.tenant_id "
+    "                      AND " + _CAMPAIGN_MSG_LINK + " "
+    "                      AND m.created_at > %(observed_last)s) "
+    "RETURNING c.id::text"
+)
+
+
+def reap_crashed_campaigns(
+    *, pool: Any = None, age_hours: int = _CRASHED_CAMPAIGN_AGE_HOURS,
+    limit: int = _CRASHED_CAMPAIGN_LIMIT,
+) -> int:
+    """VT-740 — move a crashed, partially-executed campaign to a TERMINAL status and ALERT.
+
+    Returns the number of campaigns terminalized. Best-effort, cross-tenant (service-role — a
+    stranded campaign can belong to any tenant, and a sweep cannot run inside one tenant's RLS
+    scope; this file is the VT-72 allowlisted sweep). NEVER raises.
+
+    This CONTAINS and REPORTS; it does not resolve. It never re-sends, never cancels the
+    remainder, and never claims a campaign completed — the VTR decides what happens to the
+    customers who were never messaged (Fazal 2026-07-10: no blind re-run, no silent disable).
+    """
+    try:
+        from orchestrator.prod_workflow_diagnosis import _DELIVERED
+    except Exception:  # noqa: BLE001 — never let an import break the reaper
+        # A second literal ('sent', 'template_sent') here would be a SECOND definition of
+        # "delivered" that can drift from the one the VTR diagnosis reads. Fail closed instead:
+        # without it we cannot say what reached a customer, so we terminalize nothing.
+        logger.warning("VT-740 crashed-campaign sweep: delivered-status import failed", exc_info=True)
+        return 0
+    try:
+        terminalized: list[dict[str, Any]] = []
+        with _service_pool(pool).connection() as conn:
+            candidates = conn.execute(
+                _CRASHED_CAMPAIGN_CANDIDATES_SQL,
+                {"delivered": list(_DELIVERED), "age_hours": age_hours, "limit": limit},
+            ).fetchall()
+            for row in candidates:
+                r = dict(row) if isinstance(row, dict) else {
+                    "campaign_id": row[0], "tenant_id": row[1], "delivered": row[2],
+                    "attempted": row[3], "last_message_at": row[4], "intended": row[5],
+                }
+                updated = conn.execute(
+                    _TERMINALIZE_CRASHED_CAMPAIGN_SQL,
+                    {
+                        "terminal": _CRASHED_CAMPAIGN_TERMINAL,
+                        "tenant": str(r["tenant_id"]),
+                        "campaign": str(r["campaign_id"]),
+                        "observed_last": r["last_message_at"],
+                        "delivered": list(_DELIVERED),
+                    },
+                ).fetchall()
+                if updated:
+                    terminalized.append(r)
+        if terminalized:
+            logger.warning(
+                "VT-740 crashed-campaign sweep: terminalized %d campaign(s) stranded 'approved' "
+                "with no ledger progress for >%dh -> '%s' (remainder is NOT auto-resolved; the "
+                "VTR decides)", len(terminalized), age_hours, _CRASHED_CAMPAIGN_TERMINAL,
+            )
+            _alert_crashed_campaigns(terminalized)
+        else:
+            logger.info("VT-740 crashed-campaign sweep: none")
+        return len(terminalized)
+    except Exception:  # noqa: BLE001 — best-effort by design; must never break the reaper
+        logger.warning("VT-740 crashed-campaign sweep failed (best-effort)", exc_info=True)
+        return 0
+
+
+def _alert_crashed_campaigns(rows: Any) -> None:
+    """VT-740 — one durable ``tenant_alerts`` row per terminalized campaign.
+
+    A ``logger.warning`` pages nobody: it is pull-only, and a partially-sent campaign whose
+    remainder was never messaged needs a human TODAY. ``dispatch_alert`` writes the row (Ops
+    Console + VTR surfaces read it) and fires Telegram/email, dev-routed so a dev/canary tenant
+    never pages Fazal.
+
+    Severity is the effect: a campaign that already DELIVERED to real people is an 'escalation'
+    (critical — real customers are half-messaged and a human must decide the remainder); one that
+    delivered nothing is a 'silent_terminal' (warning — it ended with no effect and the owner was
+    never told). Both kinds are existing ``tenant_alerts_trigger_kind_check`` members (mig 172);
+    a new kind would need a migration, and this lane allocates none.
+
+    CL-390: counts + ids only — never a customer id, phone, or message body. Fail-soft per row.
+    """
+    try:
+
+        from orchestrator.alerts.dispatch import dispatch_alert
+        from orchestrator.alerts.triggers import Trigger, severity_for
+    except Exception:  # noqa: BLE001 — alerts import must never break the reaper
+        logger.warning("VT-740 crashed-campaign alert import failed (fail-soft)", exc_info=True)
+        return
+    # AGGREGATE PER TENANT — one alert carrying every campaign, NOT one alert per campaign.
+    #
+    # `alerts.dispatch._dedup_key` is `f"{tenant_id}:{trigger_kind}"` on a 5-minute window, and it
+    # is NOT campaign-scoped. This sweep terminalizes up to _CRASHED_CAMPAIGN_LIMIT (200) campaigns
+    # in one sub-second tick, so a per-campaign loop would fire alert #1 and have every other one
+    # silently deduped away.
+    #
+    # That would be a REGRESSION IN RECOVERABILITY, not just a missed notification. The terminal
+    # status IS the idempotency key (the CAS is on `status = 'approved'`), so a campaign flipped to
+    # 'failed' is never a candidate again — un-alerted and no longer findable by the
+    # "approved with no ledger progress" shape that used to surface it. Half-messaged real customer
+    # cohorts would be silently forgotten, which is the exact harm this sweep exists to surface.
+    # The guaranteed trigger is the sweep's FIRST production run, which clears the whole historical
+    # backlog at once.
+    by_tenant: dict[str, list[dict[str, Any]]] = {}
+    for r in rows:
+        by_tenant.setdefault(str(r["tenant_id"]), []).append(r)
+
+    for tenant_key, group in by_tenant.items():
+        try:
+            from uuid import UUID as _UUID
+
+            per_campaign = []
+            for r in group:
+                delivered = int(r.get("delivered") or 0)
+                intended = int(r.get("intended") or 0)
+                per_campaign.append({
+                    "campaign_id": str(r["campaign_id"]),
+                    "intended": intended,
+                    "delivered": delivered,
+                    "attempted_not_delivered": int(r.get("attempted") or 0),
+                    "remainder": max(0, intended - delivered),
+                })
+            reached = [c for c in per_campaign if c["delivered"]]
+            total_remainder = sum(c["remainder"] for c in per_campaign)
+            # 'escalation' the moment ANY of them reached a real person — the worst case in the
+            # group decides, because that is the one that needs a human today.
+            kind = "escalation" if reached else "silent_terminal"
+            plural = "s" if len(per_campaign) != 1 else ""
+            dispatch_alert(Trigger(
+                tenant_id=_UUID(tenant_key),
+                trigger_kind=kind,
+                severity=severity_for(kind),
+                message_text=(
+                    f"{len(per_campaign)} campaign{plural} were stranded 'approved' with a dead "
+                    f"executor and have been terminalized to '{_CRASHED_CAMPAIGN_TERMINAL}'. "
+                    f"{len(reached)} of them had ALREADY delivered to real customers; "
+                    f"{total_remainder} customer(s) across the group were NEVER messaged. "
+                    "Nothing was auto-resolved and nothing was re-run (re-running would re-message "
+                    "everyone already contacted). Work them on the failed-workflow diagnosis view. "
+                    f"Campaign ids: {', '.join(c['campaign_id'] for c in per_campaign)}"
+                ),
+                payload={
+                    "campaigns": per_campaign,
+                    "campaign_count": len(per_campaign),
+                    "campaigns_that_reached_customers": len(reached),
+                    "total_remainder": total_remainder,
+                    "terminalized_to": _CRASHED_CAMPAIGN_TERMINAL,
+                    "reaped_by": "vt740_crashed_campaign_sweep",
+                },
+            ))
+        except Exception:  # noqa: BLE001 — one tenant's alert must not stop the rest or the reaper
+            logger.warning(
+                "VT-740 crashed-campaign alert dispatch failed for one tenant (fail-soft)",
+                exc_info=True,
             )
 
 
@@ -503,5 +755,6 @@ def _alert_silent_terminals(rows: Any) -> None:
 __all__ = [
     "reap_orphan_runs",
     "reap_stalled_manager_tasks",
+    "reap_crashed_campaigns",
     "detect_silent_terminal_runs",
 ]

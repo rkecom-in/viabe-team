@@ -165,6 +165,16 @@ _PURGE_ORDER: tuple[str, ...] = (
     "agent_draft_batches",
     "agent_work_items",
     "agent_customer_contacts",
+    # VT-741 (mig 201): the customer-attributed hook-link binding + click state. It links a
+    # /r/<token> link to an identified end customer and records their click behaviour — subject
+    # data, a DIFFERENT privacy class from hook_links (which is deny-all + PII-free by design and
+    # is NOT swept, see the note in integrations/hook_links.py). Its FKs are composite ones to
+    # customers/hook_links; the tenants row is ANONYMIZED not deleted on DSR, so no cascade ever
+    # reaches it and this sweep is the only erasure path. Registered in the SAME change as the
+    # migration, deliberately — the exact omission that already shipped on episodic_events and the
+    # L2 surfaces. Ordered before agent_drafts' neighbours is irrelevant (nothing FKs to it); it
+    # sits next to agent_customer_contacts because that is the other per-customer engagement table.
+    "customer_hook_links",
     # VT-369 PR-2: the per-(tenant, agent) autonomy state (trust counters + grant evidence link).
     # Leaf (FK tenants only; CASCADE never fires — the tenant row is anonymized, not deleted).
     "tenant_agent_autonomy",
