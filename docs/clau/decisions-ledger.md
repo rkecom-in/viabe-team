@@ -615,8 +615,36 @@ authored-by.** Provenance is a question you ask, not a property you infer from w
    records is metadata. Check bytes before citing counts. (Caught the 720-byte "225 answers" file
    and the 1,760-byte "825 rules" file; missed on both until too late.)
 3. **AI-authored content may never enter above T4**, and T4 is not retrieval-eligible.
+   **AMENDED by CL-2026-08-13-judgment-vs-citation (Fazal) — see that entry.** The T4 ceiling binds
+   AI-authored JUDGMENT. AI-DISTILLED CITATIONS of primary sources carry the source's class, with
+   `authority=seed` recording AI authorship, IFF verifiable against the cited source. Unverifiable
+   collapses back to T4.
 4. **The moat requires a human or an outcome.** Only Fazal's own judgment, or a measured tenant
    result, can ever be Tier 1. Nothing generated can be promoted into it.
+
+## CL-2026-08-13-judgment-vs-citation — Standing (Fazal: "Go ahead with your recommendation")
+
+**Resolves the literal collision between CL-2026-08-11 rule 3 ("nothing AI-authored above T4") and
+CL-2026-07-26 (source-class describes the SOURCE; authorship lives in `authority`).** Raised by CC
+during the PR #553 review; both rulings survive because they govern different objects.
+
+**The rule:**
+> **AI-authored JUDGMENT — opinions, recommendations, distilled "lessons", anything whose truth
+> rests on the author's reasoning — enters at T4, ceiling, permanently.**
+> **AI-DISTILLED CITATIONS — restatements of a primary source's fact — carry the SOURCE'S class
+> (t1/t1v/t2/t3), with `authority=seed` recording the AI authorship, ON THE CONDITION that the
+> citation is VERIFIABLE against the cited source: resolvable source, binding hash, reproducible
+> claim. A citation that cannot be verified against its source is not a citation — it is the AI's
+> assertion, and it collapses to T4.**
+
+**The boundary condition is enforcement, not paperwork.** CC's #553 blocking findings (source hash
+binding zero of 33 cards; all archive files unreachable) are exactly the verifiability condition
+failing — which is why #553 cannot land until they are fixed, and why fixing them is what makes
+this ruling honest rather than a relabeling. **A distillation is never evidence of itself.**
+
+**Test heuristic for future reviews:** ask "if the cited source vanished, would the claim still
+stand?" If yes (it rests on the author's reasoning) → judgment → T4. If no (it falls with the
+source) → citation → source's class, if verifiable.
 
 **Consequence for the O8 program:** with this corpus reclassified, the honest statement is that
 **Viabe holds no proprietary business-judgment corpus today.** The path to one is (a) Fazal

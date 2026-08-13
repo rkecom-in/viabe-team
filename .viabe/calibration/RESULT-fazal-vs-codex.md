@@ -212,3 +212,52 @@ than inflates agreement, so ~88% remains a floor.
 **Conclusion unchanged and now better evidenced: judgment is commodity, do not build a judgment
 corpus. What is NOT commodity is the willingness to commit — and that is a tuning decision, not a
 knowledge base.**
+
+---
+---
+
+# ARM 4 — gpt-5.6-luna, the PRODUCTION model, ×3 (scored by Clau 2026-08-14)
+
+Raw: `luna-25-answers.json` (CC, unscored, model confirmed `gpt-5.6-luna`, byte-identical prompt).
+
+## Against the pre-registered prediction (mine, 1300Z brief)
+Predicted 16–20 directional, low confidence. **Measured (majority-vote across the 3 runs): ~21/25
+directional — top of my range, essentially frontier-grade.** The genuine rule-divergences by
+majority are **Q02 and Q05 — the exact two that replicated across Codex and ChatGPT.** Luna even
+matches Fazal on Q18, where Codex diverged. On single-sample QUALITY, the commodity finding
+extends to our cheap production model.
+
+## BUT the pre-registered instability rule fires — and instability is the finding
+
+*"Self-consistency <3/3 on more than ~5 questions: instability outranks accuracy."* Measured:
+**10 of 25 questions are not identical across the three runs.** ~5 are cosmetic (option supersets,
+ordering). **~5 are meaningful:**
+
+| Q | The three runs | Why it matters |
+|---|---|---|
+| **Q01** | **4 → 3 → 2. Three different answers, three different FRAMES** (margin-protection · partial rollout · the overdraft arbitrage). Run 3 does Fazal's arithmetic perfectly (≈₹4,800 net); runs 1–2 never attempt it | The capability exists and surfaces ONE RUN IN THREE |
+| **Q12** | run 1: **"accept the data sale if customers opt in"** · runs 2–3: refuse outright | **A consent-posture flip.** One run in three gives materially laxer privacy advice on the same facts |
+| Q02 | 3 → 4 → 4 | hold-vs-tier flip |
+| Q09 | 4 → 3 → 4 | remedy flips between alterations and keep-advance-take-piece |
+| Q25 | 2 → 3+6 → 3+6 | the festival bet flips between the small bet and the full-bet-with-clause |
+
+## THE VERDICT — changes what we fix, not what we believe
+
+1. **Quality: commodity, confirmed at our price point.** By majority vote luna reaches Fazal's call
+   ~21/25. Cards-as-knowledge stay dead; the corpus decision is unchanged.
+2. **Stability is the real product gap.** An owner asking the same question twice can get different
+   advice — and on Q12, different *consent posture*. This is the SAME root as VT-738's M4 (classifier
+   variance) and the Q01 frame-lottery: sampling variance on decisive turns, not missing knowledge.
+3. **Therefore the fix is STRUCTURAL, not knowledge:** (a) **majority-of-3 self-consistency on
+   DECISIVE advisory turns** — the tier policy already prices exactly this class (FAST = "a person
+   waiting at a decisive moment"; ×3 on the cheap model is still cheap); (b) **pinned tenant
+   directives (VT-725 control plane) as the per-tenant consistency lever** — a directive does not
+   flap run-to-run; (c) the decisiveness/commit tuning from Arm 3. Effects were never at risk —
+   consent GATES are deterministic (Q12's flip could only ever mis-advise, not mis-send).
+4. **VT-725 gate (e) stays the only launch-blocking RAG item.** Nothing here revives knowledge
+   injection.
+
+**Prediction ledger, kept honest:** my 16–20 band was WRONG on the top end (measured ~21, frontier
+level) — I under-rated the cheap model's single-sample quality for the second time in one week. The
+instability call was RIGHT and pre-registered. Q01 as the computed-divergence candidate was
+one-third right: it diverged by RANDOMNESS, not by inability.
