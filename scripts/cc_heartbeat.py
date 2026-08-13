@@ -59,11 +59,18 @@ def write(state: str) -> dict[str, str]:
     unchanged = prior.get("state") == state
     beat = {
         "state": state,
+        # Written into the file so a bare `cat` carries the contract, not just `--read`.
+        "stale_after_minutes": _STALE_WORKING_MINUTES,
         "state_since": prior.get("state_since", now) if unchanged else now,
         "beat_at": now,
     }
     HEARTBEAT.write_text(json.dumps(beat) + "\n", encoding="utf-8")
     return beat
+
+
+#: A `working` state older than this is reported STALE by --read (exit 3). 30 min is well past any
+#: single build/test/push step; anything longer without a state change means the process is gone.
+_STALE_WORKING_MINUTES = 30.0
 
 
 def _stale_minutes(beat: dict[str, str]) -> float | None:
@@ -89,7 +96,23 @@ def main() -> int:
             return 1
         held = _stale_minutes(beat)
         held_txt = f"{held:.0f} min" if held is not None else "unknown"
-        print(f"state={beat.get('state')}  held_for={held_txt}  beat_at={beat.get('beat_at')}")
+        state = str(beat.get("state") or "")
+        print(f"state={state}  held_for={held_txt}  beat_at={beat.get('beat_at')}")
+        # A `working` that has not changed in over half an hour is self-evidently stale: it is
+        # claiming work is in flight while nothing has moved. Reporting that as a normal reading —
+        # which this did, exit 0 and all — is worse than an empty file, because it actively tells
+        # a reader the work is alive. CC's state read `working` for TWO DAYS while dead
+        # (2026-08-10 → 08-13) and every `--read` in between looked healthy.
+        # Non-zero exit so a scripted check fails rather than merely printing.
+        if state.startswith("working") and held is not None and held > _STALE_WORKING_MINUTES:
+            hours = held / 60
+            print(
+                f"STALE: state has been '{state.split(':')[0]}' for {hours:.1f}h "
+                f"(> {_STALE_WORKING_MINUTES:.0f} min) with no state change. Treat as DEAD, not "
+                "in-flight — reconcile against `git log` and the signal inboxes before believing "
+                "any work is underway."
+            )
+            return 3
         return 0
 
     if args.state == "working":

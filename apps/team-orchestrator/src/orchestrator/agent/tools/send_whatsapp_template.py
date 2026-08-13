@@ -507,14 +507,16 @@ def _write_campaign_message(
     )
 
 
-def _frequency_suppressed(cur: Any, tenant_id: str, customer_id: str) -> tuple[bool, str]:
+def _frequency_suppressed(
+    cur: Any, tenant_id: str, customer_id: str, phone_e164: str | None
+) -> tuple[bool, str]:
     """VT-740 — thin adapter so the choke's gate stack reads uniformly and the frequency policy
     stays in one module. Fail-CLOSED on any error: an exception here suppresses the send, because
     the alternative is a database blip becoming a duplicate message to a real person."""
     try:
         from orchestrator.agents.send_frequency import is_suppressed
 
-        return is_suppressed(tenant_id, customer_id, conn=cur)
+        return is_suppressed(tenant_id, customer_id, conn=cur, phone_e164=phone_e164)
     except Exception:  # noqa: BLE001 — see the docstring; never fail OPEN on this path
         logger.warning(
             "send_whatsapp_template: frequency gate raised tenant=%s customer=%s — suppressing",
@@ -694,8 +696,11 @@ def send_whatsapp_template(
                 #
                 # SUPPRESSION, never authorization: it can only stop a send. Every gate above
                 # (opt-out, complaint, and the opt-in check below) still binds unchanged.
+                # VT-741: pass the phone this handler ALREADY resolved. Re-reading `customers`
+                # inside the frequency module was both a VT-72 wrapper-layer violation and an
+                # avoidable round trip per recipient on a pool near the Supavisor client cap.
                 suppressed, suppress_reason = _frequency_suppressed(
-                    cur, payload.tenant_id, payload.customer_id,
+                    cur, payload.tenant_id, payload.customer_id, customer.get("phone_e164"),
                 )
                 if suppressed:
                     logger.info(

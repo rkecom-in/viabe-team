@@ -621,7 +621,12 @@ def _guarantee_campaign_consumer(
         status = str(bound["status"])
         task_id = bound["id"]
         if status in ("dead_letter", "blocked"):
-            task_store.redrive_task(tenant_id, task_id, conn=conn)
+            redriven = task_store.redrive_task(tenant_id, task_id, conn=conn)
+            # VT-740 — the effect-check this path never had. It REPORTS, it does not BLOCK: see
+            # _report_effect_on_redrive for why refusing here would be the wrong trade.
+            _report_effect_on_redrive(
+                conn, tenant_id, task_id, from_status=status, redriven=redriven
+            )
             _ack_owner_stalled_campaign(conn, tenant_id, reset=True)
         elif status in ("completed", "failed", "cancelled"):
             _ack_owner_stalled_campaign(conn, tenant_id, reset=False)
@@ -630,6 +635,130 @@ def _guarantee_campaign_consumer(
         logger.warning(
             "VT-668 consumer-guarantee failed (fail-soft) tenant=%s approval=%s",
             tenant_id, approval_id, exc_info=True,
+        )
+
+
+#: VT-740 — campaign statuses whose delivered-effect is worth surfacing when a redrive resumes a
+#: dead task.
+#:
+#: 'approved' is a campaign still mid-flight. **'failed' is here because the crashed-campaign sweep
+#: in the SAME change flips exactly 'approved' -> 'failed' after 2h** — and without it the two
+#: halves of this work cancelled each other out. The redrive path is only reached when the bound
+#: task is 'blocked' or 'dead_letter', which takes >= 1h to reach the first blocked rung and
+#: (per this module's own VT-668 note) around 6h to dead_letter. So in the canonical case — the
+#: owner replies hours after the crash, which is the whole reason this seam exists — the campaign
+#: has ALREADY been terminalized, the live set was empty, and the alert could never fire. Only a
+#: redrive landing inside a narrow ~1h window would ever have alerted.
+#:
+#: 'cancelled' and 'rejected' stay out: those are deliberate human decisions, not crashes.
+#: 'sent' stays out: a completed fan-out has no remainder to warn about. 'proposed' has no executor.
+#: Noise is bounded by the delivered-effect filter downstream — a campaign only surfaces here if it
+#: actually reached customers — so admitting 'failed' cannot make every tenant look effectful.
+_LIVE_CAMPAIGN_STATUSES = frozenset({"approved", "failed"})
+
+
+def _report_effect_on_redrive(
+    conn: Any,
+    tenant_id: UUID | str,
+    task_id: Any,
+    *,
+    from_status: str,
+    redriven: bool,
+) -> None:
+    """VT-740 — REPORT what already reached customers when an owner approval redrives a dead task.
+
+    WHY THIS REPORTS INSTEAD OF BLOCKING. This seam fires on the owner's EXPLICIT APPROVAL of a
+    ``campaign_send``. Refusing the redrive on an effect signal would convert an authorization into
+    silence — which is precisely the VT-668 failure this whole function exists to prevent, and it
+    would fail in the direction where the owner believes they authorized a send and nothing happens
+    and nobody says so. The customer-facing harm a block would buy (a real person messaged twice) is
+    already closed path-independently at the send choke by VT-740's per-recipient suppression, which
+    needs no campaign→task attribution — and attribution is exactly what this seam does not reliably
+    have (``manager_tasks.source_message_ref`` is a nullable pointer holding either a run_id or a
+    message_sid). So: proceed, and make sure a human can SEE it. If a block is ever wanted here it
+    must come with a bounded release path, or it recreates the VT-736 wedge.
+
+    WHY THE READ IS SAVEPOINTED. ``runner.try_resume_pending_approval`` wraps the whole resolution
+    in ``conn.transaction()``. A server-side error on this connection ABORTS that transaction; a
+    fail-soft ``except`` would then swallow the Python exception while the owner's COMMIT silently
+    became a ROLLBACK — the owner's authoritative decision, undone by an observability read. The
+    nested ``conn.transaction()`` is a SAVEPOINT, so a failure here rolls back to the savepoint and
+    the resolution survives. ``dispatch_alert`` runs OUTSIDE it, on its own pooled connection.
+
+    CL-390: campaign ids + counts only — never a customer id, phone, or message body.
+    """
+    try:
+        from orchestrator.prod_workflow_diagnosis import _DELIVERED, EffectState
+
+        effects: list[EffectState] = []
+        # SAVEPOINT — see the docstring. Everything that touches ``conn`` lives in here.
+        with conn.transaction():
+            from orchestrator.db.wrappers import CampaignsWrapper
+
+            wrapper = CampaignsWrapper()
+            live_ids = {
+                str(row.get("id"))
+                for row in wrapper.list_recent_basic(tenant_id, limit=50, conn=conn)
+                if str(row.get("status")) in _LIVE_CAMPAIGN_STATUSES
+            }
+            if live_ids:
+                for row in wrapper.effect_state_rollup(
+                    tenant_id, delivered_statuses=_DELIVERED, conn=conn
+                ):
+                    if str(row.get("campaign_id")) not in live_ids:
+                        continue
+                    effects.append(EffectState(
+                        campaign_id=str(row.get("campaign_id")),
+                        intended=int(row.get("intended") or 0),
+                        delivered=int(row.get("delivered") or 0),
+                        attempted_not_delivered=int(row.get("attempted") or 0),
+                        unattributable_delivered=int(row.get("unattributable_delivered") or 0),
+                    ))
+
+        effectful = [e for e in effects if e.kind != "no_effect"]
+        if not effectful:
+            # Nothing the ledger can attribute to a live campaign — the redrive is unremarkable.
+            logger.info(
+                "VT-740 redrive effect-check: no live-campaign effect for tenant=%s task=%s "
+                "(redrive proceeds)", tenant_id, task_id,
+            )
+            return
+
+        from orchestrator.alerts.dispatch import dispatch_alert
+        from orchestrator.alerts.triggers import Trigger, severity_for
+
+        worst = "partial_send" if any(e.kind == "partial_send" for e in effectful) else (
+            "unknown" if any(e.kind == "unknown" for e in effectful) else "complete"
+        )
+        remainder = sum(e.remainder for e in effectful)
+        delivered = sum(e.delivered for e in effectful)
+        dispatch_alert(Trigger(
+            tenant_id=tenant_id if isinstance(tenant_id, UUID) else UUID(str(tenant_id)),
+            trigger_kind="escalation",
+            severity=severity_for("escalation"),
+            message_text=(
+                f"Owner approved a campaign_send whose executor was '{from_status}'; the task was "
+                f"redriven (redriven={redriven}). The ledger shows {delivered} customer(s) "
+                f"ALREADY messaged on this tenant's live campaign(s) and {remainder} never "
+                f"messaged (effect={worst}). The redrive was NOT blocked — an owner authorization "
+                "must not resolve into silence — so confirm no duplicate send resulted and decide "
+                "the remainder."
+            ),
+            payload={
+                "task_id": str(task_id),
+                "from_status": from_status,
+                "redriven": bool(redriven),
+                "effect_kind": worst,
+                "delivered": delivered,
+                "remainder": remainder,
+                "campaign_ids": [e.campaign_id for e in effectful],
+                "detected_by": "vt740_redrive_effect_check",
+            },
+        ))
+    except Exception:  # noqa: BLE001 — visibility must never unwind the owner's resolution
+        logger.warning(
+            "VT-740 redrive effect-check failed (fail-soft; the redrive stands) tenant=%s task=%s",
+            tenant_id, task_id, exc_info=True,
         )
 
 
