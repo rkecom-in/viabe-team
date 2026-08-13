@@ -1,5 +1,17 @@
 {
-  "bk019-bulky-product-shipping-unit-economics-local-first": "Both qualifying clusters fail: the USPS tariff is US-specific and non-transferable, and the SBA page does not discuss shipping at all (freight/postage/carrier/dimension/fulfil = 0 hits). Nothing corroborates the India shipping conclusion.",
-  "bk031-partner-network-co-selling-borrows-trust": "The two 'independent' clusters are Cai & Szeidl field experiments in the same Chinese province, and one paper cites the other \u2014 one research program counted twice. Neither studies co-selling, and the trust claim is attached to the paper that does not contain it.",
-  "bk032-brand-memory-proof-and-promise": "Both clusters are opinion posts: a 5-paragraph blog deferring to a book, and a blog post that is not the report its URL names. Neither carries the memory/proof/promise content."
+  "bk019-bulky-product-shipping-unit-economics-local-first": {
+    "after": "All affected evidence edges are non-qualifying. Unearned source tiers were demoted to T4 and the Cai/Szeidl retellings share one independence cluster.",
+    "after_status": "research_only",
+    "before": "Both qualifying clusters fail: the USPS tariff is US-specific and non-transferable, and the SBA page does not discuss shipping at all (freight/postage/carrier/dimension/fulfil = 0 hits). Nothing corroborates the India shipping conclusion."
+  },
+  "bk031-partner-network-co-selling-borrows-trust": {
+    "after": "All affected evidence edges are non-qualifying. Unearned source tiers were demoted to T4 and the Cai/Szeidl retellings share one independence cluster.",
+    "after_status": "research_only",
+    "before": "The two 'independent' clusters are Cai & Szeidl field experiments in the same Chinese province, and one paper cites the other \u2014 one research program counted twice. Neither studies co-selling, and the trust claim is attached to the paper that does not contain it."
+  },
+  "bk032-brand-memory-proof-and-promise": {
+    "after": "All affected evidence edges are non-qualifying. Unearned source tiers were demoted to T4 and the Cai/Szeidl retellings share one independence cluster.",
+    "after_status": "research_only",
+    "before": "Both clusters are opinion posts: a 5-paragraph blog deferring to a book, and a blog post that is not the report its URL names. Neither carries the memory/proof/promise content."
+  }
 }
