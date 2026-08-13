@@ -26,6 +26,7 @@ from orchestrator.knowledge.registry_seed import _insert_card, _insert_source_ed
 from orchestrator.knowledge_global_purity import assert_global_payload_pure
 
 EXPECTED_T4_CARDS = 18
+EXPECTED_SOURCE_CARDS = 33
 MIN_NEW_CLUSTERS = 2
 
 
@@ -198,6 +199,78 @@ class T4CorroborationPlan:
     @property
     def disputed_count(self) -> int:
         return sum(item.resolved.status is CardStatus.DISPUTED for item in self.transitions)
+
+
+class SourceVerificationRow(_StrictModel):
+    """One card's verdict from reading the archived source bytes it cites.
+
+    `landing_grade` is not trusted from the file — `assert_corpus_verified` recomputes it from the
+    verdicts, so editing the boolean cannot open the gate.
+    """
+
+    index: int = Field(ge=0)
+    card_version_id: str = Field(min_length=1)
+    source_id: str = Field(min_length=1)
+    source_title: str = Field(min_length=1)
+    local_archive_path: str = Field(min_length=1)
+    recorded_source_class: str = Field(min_length=1)
+    recorded_confidence: str = Field(min_length=1)
+    recorded_jurisdictions: tuple[str, ...] = ()
+    claim_verdict: str = Field(min_length=1)
+    vanish_verdict: str = Field(min_length=1)
+    action_in_source: str = Field(min_length=1)
+    tier_verdict: str = Field(min_length=1)
+    jurisdiction_verdict: str = Field(min_length=1)
+    confidence_verdict: str = Field(min_length=1)
+    landing_grade: bool
+    notes: str = Field(min_length=1)
+
+    @property
+    def verified(self) -> bool:
+        return (
+            self.claim_verdict == "SUPPORTED"
+            and self.vanish_verdict == "CITATION"
+            and self.tier_verdict == "TIER_OK"
+            and self.jurisdiction_verdict == "OK"
+            and self.confidence_verdict == "OK"
+        )
+
+
+def assert_corpus_verified(rows: Sequence[Mapping[str, Any]]) -> tuple[SourceVerificationRow, ...]:
+    """Refuse to load a corpus whose cards are not verified against their own sources.
+
+    CL-2026-08-13-judgment-vs-citation makes a source tier conditional on the citation being
+    verifiable against the cited source. Reading the 33 archived sources established that most are
+    not: claims that are not at the cited locator, behavioural instructions the source never gives,
+    a portal page explaining an Act carrying the Act's tier, a US postal tariff carrying `IN`, and
+    two cards whose recorded URL does not identify the archived bytes at all.
+
+    A report can assert compliance; a gate cannot. This one runs before any write, so the corpus
+    physically cannot enter the registry while a single card's tier is unearned. It is not advice
+    about the data — it is the reason the data is still out.
+    """
+
+    try:
+        parsed = tuple(SourceVerificationRow.model_validate(row) for row in rows)
+    except (TypeError, ValueError) as exc:
+        raise CorroborationError(f"invalid source verification record: {exc}") from exc
+    if len(parsed) != EXPECTED_SOURCE_CARDS or len({row.index for row in parsed}) != len(parsed):
+        raise CorroborationError(
+            f"verification must cover exactly {EXPECTED_SOURCE_CARDS} unique cards"
+        )
+    unverified = [row for row in parsed if not row.verified]
+    if unverified:
+        detail = "; ".join(
+            f"[{row.index}] {row.source_title[:48]}: claim={row.claim_verdict} "
+            f"vanish={row.vanish_verdict} tier={row.tier_verdict} "
+            f"jurisdiction={row.jurisdiction_verdict} confidence={row.confidence_verdict}"
+            for row in unverified
+        )
+        raise CorroborationError(
+            f"{len(unverified)} of {len(parsed)} cards are not verified against their sources, so "
+            f"their tiers are unearned and this corpus may not be loaded: {detail}"
+        )
+    return parsed
 
 
 def load_source_manifest(rows: Sequence[Mapping[str, Any]]) -> tuple[CorroborationSource, ...]:
@@ -511,9 +584,12 @@ def copy_corroboration_embeddings(conn: ConnectionLike, plan: T4CorroborationPla
 
 
 __all__ = [
+    "EXPECTED_SOURCE_CARDS",
     "CorroborationDeltaRow",
     "CorroborationError",
     "CorroborationSource",
+    "SourceVerificationRow",
+    "assert_corpus_verified",
     "EvidenceEdge",
     "EvidenceStance",
     "ResolutionStatus",

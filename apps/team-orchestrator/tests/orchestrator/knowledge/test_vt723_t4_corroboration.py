@@ -77,6 +77,105 @@ def artifacts():
     return parent, sources, candidates, delta
 
 
+def test_unverified_cards_cannot_be_loaded_and_the_boolean_is_not_trusted() -> None:
+    """The gate's MECHANISM, tested on synthetic rows so it stays true as the corpus is fixed.
+
+    Reading the 33 archived sources found that only 6 cards are verified against what their source
+    actually says. Under CL-2026-08-13 the other 27 carry tiers they have not earned, so the corpus
+    may not be loaded — and the enforcement has to be a gate rather than a sentence in a report,
+    because the previous version of this row asserted its posture in a report while `--execute`
+    would have written regardless.
+    """
+    from orchestrator.knowledge.t4_corroboration import (
+        EXPECTED_SOURCE_CARDS,
+        assert_corpus_verified,
+    )
+
+    def row(index: int, **overrides: object) -> dict[str, Any]:
+        base: dict[str, Any] = {
+            "index": index,
+            "card_version_id": f"card-{index}",
+            "source_id": f"source-{index}",
+            "source_title": "A governed primary source",
+            "local_archive_path": "archives/business-knowledge/research/x/y.html",
+            "recorded_source_class": "t2",
+            "recorded_confidence": "medium",
+            "recorded_jurisdictions": (),
+            "claim_verdict": "SUPPORTED",
+            "vanish_verdict": "CITATION",
+            "action_in_source": "SOURCE_STATES_IT",
+            "tier_verdict": "TIER_OK",
+            "jurisdiction_verdict": "OK",
+            "confidence_verdict": "OK",
+            "landing_grade": True,
+            "notes": "verified against the archived bytes",
+        }
+        base.update(overrides)
+        return base
+
+    clean = [row(index) for index in range(EXPECTED_SOURCE_CARDS)]
+    assert len(assert_corpus_verified(clean)) == EXPECTED_SOURCE_CARDS
+
+    # Each verdict dimension independently blocks the load. A card whose claim is not in its source,
+    # or that is really the author's judgment, or whose tier belongs to a different artifact, or
+    # that claims a jurisdiction its source has no authority over, is not loadable.
+    for field, value in (
+        ("claim_verdict", "NOT_FOUND"),
+        ("vanish_verdict", "JUDGMENT"),
+        ("tier_verdict", "TIER_SHOULD_BE_t3"),
+        ("jurisdiction_verdict", "IN_WRONG"),
+        ("confidence_verdict", "HIGH_TO_MEDIUM"),
+    ):
+        broken = [row(index) for index in range(EXPECTED_SOURCE_CARDS)]
+        broken[7] = row(7, **{field: value})
+        with pytest.raises(CorroborationError, match="not verified against their sources"):
+            assert_corpus_verified(broken)
+
+    # The stored `landing_grade` boolean is recomputed, never trusted — otherwise the cheapest way
+    # past the gate would be to edit one word in a data file.
+    forged = [row(index) for index in range(EXPECTED_SOURCE_CARDS)]
+    forged[3] = row(3, claim_verdict="NOT_FOUND", landing_grade=True)
+    with pytest.raises(CorroborationError, match="not verified against their sources"):
+        assert_corpus_verified(forged)
+
+    # A truncated record cannot pass by omitting the cards that fail.
+    with pytest.raises(CorroborationError, match="exactly 33 unique cards"):
+        assert_corpus_verified(clean[:6])
+
+
+def test_the_committed_verification_record_reflects_the_real_corpus_state() -> None:
+    """Documents what the source reading found, and keeps the gate honest about today.
+
+    Deliberately NOT an assertion that N cards fail — that would have to be edited every time a
+    card is fixed, and a test nobody can satisfy gets deleted. It asserts the record COVERS every
+    card and that the gate's verdict follows the record, so whichever way the corpus moves, the
+    load gate and the evidence stay in agreement.
+    """
+    from orchestrator.knowledge.t4_corroboration import (
+        EXPECTED_SOURCE_CARDS,
+        SourceVerificationRow,
+        assert_corpus_verified,
+    )
+
+    rows = jsonl("t4_corroboration_verification.jsonl")
+    parsed = [SourceVerificationRow.model_validate(item) for item in rows]
+    assert len(parsed) == EXPECTED_SOURCE_CARDS
+    cards = {
+        item["card"]["card_version_id"] for item in jsonl("t4_corroboration_candidates.jsonl")
+    }
+    assert {item.card_version_id for item in parsed} == cards, (
+        "every card must carry a verdict; a card with no verdict is an unverified card"
+    )
+    assert all(item.landing_grade == item.verified for item in parsed), (
+        "the stored boolean must agree with the verdicts it is derived from"
+    )
+    if all(item.verified for item in parsed):
+        assert_corpus_verified(rows)
+    else:
+        with pytest.raises(CorroborationError, match="not verified against their sources"):
+            assert_corpus_verified(rows)
+
+
 def _builder():
     """The build script, imported for its committed SOURCES table. Import is side-effect free."""
 

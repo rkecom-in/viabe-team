@@ -1129,7 +1129,8 @@ def main() -> int:
 - Exact forum claims reviewed: **{len(delta)}**
 - New governed source clusters: **{len(manifests)}**
 - VT-710 pipeline results: **{len(candidates)} inert candidates**, all embedding-deferred
-- Source-tier mix: **{tiers["t1"]} T1 / {tiers["t1v"]} T1v / {tiers["t2"]} T2 / {tiers["t3"]} T3**
+- Source-tier mix **as recorded at build time**: **{tiers["t1"]} T1 / {tiers["t1v"]} T1v / {tiers["t2"]} T2 / {tiers["t3"]} T3**. This is what the acquisition asserted, NOT a verified mix — see the verification record below, which found most of these tiers unearned
+- **Source verification: `T4_CORROBORATION_VERIFICATION.md` + `t4_corroboration_verification.jsonl`.** Every card was checked against the bytes of the source it cites. `assert_corpus_verified` REFUSES to load the corpus while any card is unverified, and it runs before the database connection is opened. Three promotions out of research-only are recorded as unsound because their qualifying clusters do not hold (`t4_corroboration_unsound_promotions.json`)
 - Authorship authority: **seed** for all Codex distillations; none labelled owner, VTR, or verified outcome
 - Claim identity: subject inherited from the target claim, **predicate derived from each card's OWN claim** (it used to be inherited, which made a cited fact carry an invented behavioural instruction); no universal-by-default cards
 - Byte binding: each card reaches its source bytes as card -> `provenance.source_ids[0]` -> `knowledge_sources.content_hash`, which is the sha256 of the acquired archive file. `source_content_hash` is the hash of our own extraction input and binds nothing about the source

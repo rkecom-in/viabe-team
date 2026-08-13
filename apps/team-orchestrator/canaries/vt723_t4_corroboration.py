@@ -164,9 +164,19 @@ def main() -> int:
     from psycopg.rows import dict_row
 
     from orchestrator.knowledge.t4_corroboration import (
+        assert_corpus_verified,
         copy_corroboration_embeddings,
         persist_corroboration_plan,
     )
+
+    # BEFORE the connection is even opened. Every card's tier is conditional on the citation being
+    # verifiable against its cited source (CL-2026-08-13-judgment-vs-citation), and reading all 33
+    # archived sources found most are not: claims absent from the cited locator, instructions the
+    # source never gives, a four-sentence portal page carrying an Act's tier, a US postal tariff
+    # scoped to India, and two cards whose recorded URL does not identify the archived bytes.
+    # The previous version of this file asserted that posture in a report. A report cannot stop a
+    # load; this can.
+    assert_corpus_verified(jsonl("t4_corroboration_verification.jsonl"))
     from scripts.apply_migrations import guard_environment
 
     dsn = database_url()
