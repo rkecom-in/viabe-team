@@ -189,8 +189,18 @@ def test_manager_review_ask_owner_opens_pending_question(pool):
         text_call=_FakeClient({"status": "needs_owner_input", "owner_question": "which cohort?"}),
     )
     assert result.outcome == "ask_owner"
+    # VT-755 NOTE: this `waiting_owner` assertion encodes the CURRENT behaviour, which VT-755 scope 0
+    # will change — parking on a question that was never emitted is precisely the wedge (nothing can
+    # wake it, and the reaper excludes waiting_owner). It stays asserted until the emitter lands and the
+    # park becomes conditional on confirmed delivery. Flagged rather than silently kept.
     assert task_store.get_task(tid, task_id)["status"] == "waiting_owner"
-    open_qs = pending_questions.get_open(tid, task_id=task_id)
+    # VT-755: get_open() shows DELIVERED questions by default. This test is about the review branch
+    # OPENING a question row, not about the owner being able to answer it, so it reads the undelivered
+    # view explicitly. (The neighbouring VT-606 test's docstring already states this row's principle —
+    # "nothing would ever answer a question that was never asked" — but applied it only to the
+    # empty-question-text case; VT-755 is that same principle holding for EVERY question, because
+    # pending_questions has no emitter at all.)
+    open_qs = pending_questions.get_open(tid, task_id=task_id, include_undelivered=True)
     assert len(open_qs) == 1
     assert open_qs[0]["question_text"] == "which cohort?" or "which cohort" in open_qs[0]["question_text"]
 
