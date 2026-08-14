@@ -752,9 +752,105 @@ def _alert_silent_terminals(rows: Any) -> None:
             logger.warning("VT-552 silent_terminal alert dispatch failed (fail-soft)", exc_info=True)
 
 
+#: VT-755 — how long a task may sit 'waiting_owner' with no wake path before it is a WEDGE rather than
+#: a race. Deliberately generous: the legitimate approval park runs to a 48h TTL, and this detector
+#: must never fire on one of those (it can't — the predicate requires no open approval AND no wake
+#: stamp — but the grace makes a mid-park write in flight impossible to catch either).
+_WEDGE_AGE_HOURS = 2
+
+
+def detect_wedged_tenants(*, pool: Any = None, age_hours: int = _WEDGE_AGE_HOURS) -> int:
+    """VT-755 — find tenants whose Manager is WEDGED and page a human. Returns the count found.
+
+    A task parked ``waiting_owner`` is UNREACHABLE when it has neither of the two things that can move
+    it: an open ``pending_approvals`` row (which ``mark_approval_resolved`` →
+    ``_wake_waiting_workflow`` would resolve) nor a ``stall_metadata->>'wait_workflow_id'`` stamp (the
+    VT-671 DBOS.send target). And the retry ladder cannot help: ``reap_stalled_manager_tasks``
+    deliberately EXCLUDES ``waiting_owner`` so it can never burn an awaiting-approval task to
+    dead_letter (``task_store.py:280``) — correct for approvals, fatal for this shape.
+
+    WHY THIS IS 'critical' AND NOT ANOTHER STALL WARNING. Because ``waiting_owner`` is in
+    ``TASK_ACTIVE``, ``queue_promotion.promote_next_queued_task`` refuses to advance anything while the
+    parked task sits there — and the promoter is only ever invoked from a TERMINAL task's workflow
+    tail, which this task will never reach. **So every later objective for that tenant queues behind it
+    forever.** The Manager does not degrade, it ends, and no seam recovers from it unaided. The alert IS
+    the recovery path.
+
+    Measured on deployed dev 2026-08-14: 4 of 7 ``waiting_owner`` tasks were in this state, and 1
+    tenant already had a ``queued`` task stranded behind one.
+
+    Detect-and-alert only — it mutates NOTHING. Un-wedging means deciding what happens to the parked
+    objective (cancel it? escalate it? ask the owner something answerable?), which is VT-755's other
+    scope items, not a sweep's call. Best-effort and never raises, like every detector here.
+    """
+    try:
+        with _service_pool(pool).connection() as conn:
+            rows = conn.execute(
+                "SELECT t.id, t.tenant_id, t.updated_at, "
+                "       (SELECT count(*) FROM manager_tasks q "
+                "          WHERE q.tenant_id = t.tenant_id AND q.status = 'queued') AS queued_behind "
+                "FROM manager_tasks t "
+                "WHERE t.status = 'waiting_owner' "
+                "  AND t.updated_at < now() - make_interval(hours => %s) "
+                "  AND t.stall_metadata->>'wait_workflow_id' IS NULL "
+                "  AND NOT EXISTS (SELECT 1 FROM pending_approvals p "
+                "                  WHERE p.tenant_id = t.tenant_id AND p.resolved_at IS NULL) "
+                "LIMIT 200",
+                (age_hours,),
+            ).fetchall()
+        if rows:
+            _alert_wedged_tenants(rows)
+        return len(rows)
+    except Exception:  # noqa: BLE001 — a detector must never block boot or a scheduler tick
+        logger.warning("VT-755 wedged-tenant detector failed (best-effort)", exc_info=True)
+        return 0
+
+
+def _alert_wedged_tenants(rows: Any) -> None:
+    """One ``wedged_tenant`` alert per unreachable park (fail-soft).
+
+    The message names the CONSEQUENCE, not the symptom: an operator reading "task parked" would triage
+    it as one stuck job, when in fact nothing that tenant asks will run again until a human intervenes.
+    """
+    try:
+        from uuid import UUID
+
+        from orchestrator.alerts.dispatch import dispatch_alert
+        from orchestrator.alerts.triggers import Trigger, severity_for
+    except Exception:  # noqa: BLE001
+        logger.warning("VT-755 wedged_tenant alert import failed (fail-soft)", exc_info=True)
+        return
+    for row in rows:
+        try:
+            tid = row["tenant_id"] if isinstance(row, dict) else row[1]
+            task_id = row["id"] if isinstance(row, dict) else row[0]
+            queued = int((row["queued_behind"] if isinstance(row, dict) else row[3]) or 0)
+            dispatch_alert(Trigger(
+                tenant_id=tid if isinstance(tid, UUID) else UUID(str(tid)),
+                trigger_kind="wedged_tenant",
+                severity=severity_for("wedged_tenant"),
+                message_text=(
+                    f"WEDGED: task {task_id} is parked 'waiting_owner' with NO open approval and NO "
+                    f"wake stamp, so nothing can wake it and the retry ladder excludes it. "
+                    f"{queued} later objective(s) are already queued behind it and CANNOT run — "
+                    "'waiting_owner' counts as active, so the queue promoter is blocked until this "
+                    "task reaches terminal, which it never will. This tenant's Manager is dead until "
+                    "someone cancels or escalates that task. Nothing sent; nothing lost yet."
+                ),
+                payload={
+                    "task_id": str(task_id),
+                    "queued_behind": queued,
+                    "detected_by": "vt755_wedged_tenant_detector",
+                },
+            ))
+        except Exception:  # noqa: BLE001
+            logger.warning("VT-755 wedged_tenant alert dispatch failed (fail-soft)", exc_info=True)
+
+
 __all__ = [
     "reap_orphan_runs",
     "reap_stalled_manager_tasks",
     "reap_crashed_campaigns",
     "detect_silent_terminal_runs",
+    "detect_wedged_tenants",
 ]

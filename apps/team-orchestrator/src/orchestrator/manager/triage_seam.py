@@ -735,10 +735,28 @@ def triage_seam(
             # correlate_reply's own implicit "most-recent-for-tenant" fallback, which could
             # resolve the wrong task's question if more than one happened to be open at once.
             target: dict[str, Any] = open_questions[0]
-            pending_questions.correlate_reply(
+            correlated = pending_questions.correlate_reply(
                 tenant_id, message_text, message_sid,
                 question_id=target["id"], task_id=target["task_id"],
             )
+            # VT-755 — HONOUR the return. This previously returned skip_legacy_dispatch=True
+            # unconditionally, so a correlation that did NOT happen still swallowed the owner's message:
+            # it was neither recorded as an answer nor dispatched as an instruction. On dev the message
+            # in question was "haan theek hai, bhej do unhe" — send it to them. If nothing correlated,
+            # fall through to normal dispatch and let the message be read as what it is.
+            #
+            # `get_open` now returns DELIVERED questions only, so this branch is unreachable while
+            # `pending_questions` has no emitter. The guard stays because unreachable-today is not
+            # closed, and this is the seam where the swallow actually happened.
+            if correlated is None:
+                logger.warning(
+                    "VT-755: triage routed answer_pending but nothing correlated (tenant=%s "
+                    "question=%s) — falling through to dispatch rather than swallowing the message",
+                    tenant_id, target["id"],
+                )
+                return TriageSeamResult(
+                    outcome=result.outcome, task_id=None, skip_legacy_dispatch=False
+                )
             return TriageSeamResult(
                 outcome=result.outcome, task_id=target["task_id"], skip_legacy_dispatch=True
             )

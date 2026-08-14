@@ -219,7 +219,12 @@ def test_enforce_answer_pending_correlates_and_skips_legacy(pool, monkeypatch: p
     from orchestrator.manager import triage_seam as ts
 
     tid = _seed_tenant(pool)
-    pending_questions.ask(tid, "which cohort?")
+    qid = pending_questions.ask(tid, "which cohort?")
+    # VT-755: `ask` no longer implies DELIVERED — an undelivered question is invisible to
+    # `get_open` and unanswerable by `correlate_reply`, because on dev an owner's actual
+    # instruction was consumed as the answer to a question that was never sent. These seam tests
+    # describe the flow AFTER the owner received the question, so the delivery is now explicit.
+    pending_questions.mark_delivered(tid, qid)
     _mock_triage(monkeypatch, "answer_pending")
 
     result = ts.triage_seam(tid, "the VIP cohort", "SM666", mode="enforce")
@@ -250,7 +255,13 @@ def test_enforce_answer_pending_binds_to_the_owning_task_not_tenant_latest(
                 (tid, t, f"ref-{t}", f"idem-{t}"),
             )
     older_qid = pending_questions.ask(tid, "older question?", task_id=older_task)
-    pending_questions.ask(tid, "newer question?", task_id=newer_task)
+    newer_qid = pending_questions.ask(tid, "newer question?", task_id=newer_task)
+    # VT-755: `ask` no longer implies DELIVERED — an undelivered question is invisible to
+    # `get_open` and unanswerable by `correlate_reply`, because on dev an owner's actual
+    # instruction was consumed as the answer to a question that was never sent. These seam tests
+    # describe the flow AFTER the owner received the question, so the delivery is now explicit.
+    pending_questions.mark_delivered(tid, older_qid)
+    pending_questions.mark_delivered(tid, newer_qid)
     _mock_triage(monkeypatch, "answer_pending")
 
     result = ts.triage_seam(tid, "answering the FIRST one", "SM665", mode="enforce")
@@ -339,7 +350,12 @@ def test_triage_turn_receives_the_real_has_active_task_and_has_open_question_kwa
         ManagerPlan(objective="active", steps=[PlanStep(step_seq=1, kind="verification")]),
         source_message_sid=f"SM{uuid4().hex}",
     )
-    pending_questions.ask(tid, "which cohort?", task_id=task_id)
+    qid = pending_questions.ask(tid, "which cohort?", task_id=task_id)
+    # VT-755: `has_open_question` now means "the owner has a question they could actually answer", i.e.
+    # open AND DELIVERED. An asked-but-unsent question must read as False — the classifier must not be
+    # told the owner is mid-conversation about something they never received. Delivery is explicit here
+    # because this test is asserting the TRUE case.
+    assert pending_questions.mark_delivered(tid, qid) is True
 
     captured_kwargs = {}
 

@@ -696,7 +696,12 @@ def test_ask_owner_answer_is_threaded_into_the_redispatch_situation(
         if not call_state["asked"]:
             call_state["asked"] = True
             _apply_outcome(tid, task_id, step_id, "ask_owner")
-            pending_questions.ask(tid, "which cohort should we target?", task_id=task_id)
+            qid = pending_questions.ask(tid, "which cohort should we target?", task_id=task_id)
+            # VT-755: `ask` no longer implies DELIVERED — an unsent question is unanswerable, because on
+            # dev an owner's real instruction was consumed as the answer to a question that was never
+            # emitted. This test is about answer THREADING, which presupposes the owner got the question
+            # and replied, so the delivery is stated explicitly instead of being accidentally true.
+            pending_questions.mark_delivered(tid, qid)
             return "ask_owner", None
         _apply_outcome(tid, task_id, step_id, "complete")
         return "complete", None

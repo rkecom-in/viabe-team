@@ -11,6 +11,7 @@ test_sr_loop_e2e in the pre-push DB job; these are the seam units.
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from typing import Any
 from uuid import uuid4
 
@@ -20,6 +21,25 @@ pytest.importorskip("anthropic")
 pytest.importorskip("psycopg")
 
 from orchestrator.agent import approval_resume as ar  # noqa: E402
+
+class _FakeConn:
+    """A stand-in for the resolve connection.
+
+    VT-747: `_wake_waiting_workflow` now SAVEPOINTs its `find_task_for_resolved_approval` read, because
+    a try/except cannot make a statement fail-soft on a shared transaction — only a SAVEPOINT can, and
+    without one a server-side error there silently turned the owner's COMMIT into a ROLLBACK. A real
+    psycopg connection supports nesting, so this fake has to as well; `object()` no longer models the
+    contract under test.
+
+    nullcontext, not a recording stub, on purpose: these are SEAM units asserting the DBOS.send hint,
+    and savepoint bookkeeping is not what they are about. The transaction SEMANTICS are proven against a
+    live Postgres in tests/orchestrator/test_vt747_ack_cannot_roll_back_an_approval.py — the only place
+    they can be, since a fake connection cannot abort a server-side transaction.
+    """
+
+    def transaction(self):
+        return nullcontext(self)
+
 
 
 def _patch_bound(monkeypatch: pytest.MonkeyPatch, bound: dict[str, Any] | None) -> None:
@@ -41,7 +61,7 @@ def test_wake_sends_to_stamped_workflow_id(monkeypatch: pytest.MonkeyPatch) -> N
         "id": str(uuid4()), "status": "waiting_owner", "approval_type": "campaign_send",
         "stall_metadata": {"awaiting_approval_run_id": "x", "wait_workflow_id": "manager_task:t:1-redrive-2"},
     })
-    ar._wake_waiting_workflow(object(), uuid4(), uuid4())
+    ar._wake_waiting_workflow(_FakeConn(), uuid4(), uuid4())
     assert sent == [("manager_task:t:1-redrive-2", "resolved", "owner_signal")]
 
 
@@ -54,13 +74,13 @@ def test_wake_noop_without_stamp_or_task(monkeypatch: pytest.MonkeyPatch) -> Non
     )
     # No bound task → no send.
     _patch_bound(monkeypatch, None)
-    ar._wake_waiting_workflow(object(), uuid4(), uuid4())
+    ar._wake_waiting_workflow(_FakeConn(), uuid4(), uuid4())
     # Bound but pre-VT-671 park (no stamp) → no send (poll ladder covers).
     _patch_bound(monkeypatch, {
         "id": str(uuid4()), "status": "waiting_owner", "approval_type": "campaign_send",
         "stall_metadata": {"awaiting_approval_run_id": "x"},
     })
-    ar._wake_waiting_workflow(object(), uuid4(), uuid4())
+    ar._wake_waiting_workflow(_FakeConn(), uuid4(), uuid4())
     assert sent == []
 
 
@@ -75,7 +95,7 @@ def test_wake_fails_soft(monkeypatch: pytest.MonkeyPatch) -> None:
         "id": str(uuid4()), "status": "waiting_owner", "approval_type": "campaign_send",
         "stall_metadata": {"wait_workflow_id": "wf-1"},
     })
-    ar._wake_waiting_workflow(object(), uuid4(), uuid4())  # must not raise
+    ar._wake_waiting_workflow(_FakeConn(), uuid4(), uuid4())  # must not raise
 
 
 def test_park_stamps_wait_workflow_id(monkeypatch: pytest.MonkeyPatch) -> None:

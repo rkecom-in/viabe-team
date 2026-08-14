@@ -114,18 +114,25 @@ def _select_open_question(
     question_id: UUID | str | None,
     task_id: UUID | str | None,
 ) -> UUID | None:
+    # VT-755 — `delivered_at IS NOT NULL` on EVERY branch. A question the owner never received cannot
+    # be the thing they just answered, so binding their message to it destroys their actual intent: on
+    # dev 2026-08-14 the owner's "haan theek hai, bhej do unhe" (send it to them) was recorded as the
+    # answer to a question that appears nowhere in conversation_log. This is defence in depth — the
+    # primary gate is `get_open`, which stops the turn routing to `answer_pending` at all — because the
+    # swallow happens in TWO places and closing only one leaves the other live.
+    _delivered = " AND delivered_at IS NOT NULL"
     if question_id is not None:
         sql = ("SELECT id FROM pending_questions "
-               "WHERE tenant_id = %s AND id = %s AND status = 'open'")
+               f"WHERE tenant_id = %s AND id = %s AND status = 'open'{_delivered}")
         params: tuple[Any, ...] = (str(tenant_id), str(question_id))
     elif task_id is not None:
         sql = ("SELECT id FROM pending_questions "
-               "WHERE tenant_id = %s AND task_id = %s AND status = 'open' "
+               f"WHERE tenant_id = %s AND task_id = %s AND status = 'open'{_delivered} "
                "ORDER BY asked_at DESC LIMIT 1")
         params = (str(tenant_id), str(task_id))
     else:
         sql = ("SELECT id FROM pending_questions "
-               "WHERE tenant_id = %s AND status = 'open' ORDER BY asked_at DESC LIMIT 1")
+               f"WHERE tenant_id = %s AND status = 'open'{_delivered} ORDER BY asked_at DESC LIMIT 1")
         params = (str(tenant_id),)
     row = conn.execute(sql, params).fetchone()
     return _uuid(row) if row is not None else None
@@ -151,22 +158,61 @@ def get_latest_answered(tenant_id: UUID | str, task_id: UUID | str) -> dict[str,
     return dict(row) if row is not None else None
 
 
-def get_open(tenant_id: UUID | str, *, task_id: UUID | str | None = None) -> list[dict[str, Any]]:
+def get_open(
+    tenant_id: UUID | str,
+    *,
+    task_id: UUID | str | None = None,
+    include_undelivered: bool = False,
+) -> list[dict[str, Any]]:
+    """Open questions for the tenant (or one task). **Delivered ones only, by default.**
+
+    VT-755 — the default excludes `delivered_at IS NULL`, and that is the load-bearing part. This
+    function is what `triage_seam` reads to decide whether a turn routes to `answer_pending`, so an
+    UNDELIVERED question here causes the owner's message to be consumed as its answer. Measured on dev
+    2026-08-14: the owner said *"haan theek hai, bhej do unhe"* ("yes fine, send it to them"), it was
+    bound to a question that appears nowhere in `conversation_log`, and their instruction was discarded
+    as clarification. `pending_questions` has no emitter, so **every** question is currently
+    undelivered — which means this default makes owner messages fall through to normal dispatch, where
+    a send instruction is read as a send instruction. That is the correct behaviour while the ask
+    cannot be delivered.
+
+    ``include_undelivered=True`` is for the seam that will eventually SEND these — an emitter must be
+    able to see the un-sent ones — and for operator/forensic reads. It must never be used by a caller
+    deciding whether the owner has a question to answer.
+    """
+    delivered_clause = "" if include_undelivered else " AND delivered_at IS NOT NULL"
+    cols = (
+        "SELECT id, task_id, question_kind, question_text, status, asked_at, expires_at, delivered_at "
+        "FROM pending_questions WHERE tenant_id = %s"
+    )
     with tenant_connection(tenant_id) as conn:
         if task_id is not None:
             rows = conn.execute(
-                "SELECT id, task_id, question_kind, question_text, status, asked_at, expires_at "
-                "FROM pending_questions WHERE tenant_id = %s AND task_id = %s AND status = 'open' "
-                "ORDER BY asked_at",
+                f"{cols} AND task_id = %s AND status = 'open'{delivered_clause} ORDER BY asked_at",
                 (str(tenant_id), str(task_id)),
             ).fetchall()
         else:
             rows = conn.execute(
-                "SELECT id, task_id, question_kind, question_text, status, asked_at, expires_at "
-                "FROM pending_questions WHERE tenant_id = %s AND status = 'open' ORDER BY asked_at",
+                f"{cols} AND status = 'open'{delivered_clause} ORDER BY asked_at",
                 (str(tenant_id),),
             ).fetchall()
     return [dict(r) for r in rows]
+
+
+def mark_delivered(tenant_id: UUID | str, question_id: UUID | str) -> bool:
+    """VT-755 — stamp a question as actually EMITTED to the owner. Returns True iff a row flipped.
+
+    The emission path calls this AFTER the send succeeds, never before: `delivered_at` is the fact that
+    makes a question answerable, so stamping it optimistically would recreate the defect it exists to
+    close. Idempotent — a second call on an already-stamped row is a no-op returning False.
+    """
+    with tenant_connection(tenant_id) as conn, conn.transaction():
+        cur = conn.execute(
+            "UPDATE pending_questions SET delivered_at = now(), updated_at = now() "
+            "WHERE tenant_id = %s AND id = %s AND delivered_at IS NULL",
+            (str(tenant_id), str(question_id)),
+        )
+    return bool(getattr(cur, "rowcount", 0))
 
 
 def expire_stale(*, pool: Any = None) -> int:
@@ -194,7 +240,25 @@ def expire_stale(*, pool: Any = None) -> int:
 
 
 def _redact_text(text: str) -> str:
-    out = redact(text)
+    """Redact PII from an owner-facing question/answer WITHOUT destroying the text.
+
+    VT-755 — ``hash_long_body=False`` is load-bearing, not a relaxation. The default replaces any
+    string over ``_LONG_BODY_THRESHOLD`` (200) chars **wholesale** with a ``<body:hash:…>`` token, a
+    rule that exists to bound LOG and span size. A pending question is not a log line: **it is text
+    destined for the owner.** Measured on deployed dev 2026-08-14, **3 of 4 open questions had been
+    stored as `<body:hash:…>`** — unsendable at rest, so the ask could never be delivered even once it
+    has a delivery path. The two questions that survived intact were simply under 200 chars.
+
+    This is the SAME opt-out VT-632 established for owner-facing sends (``reply_to_owner.py:85``,
+    ``embeddings.py:100``) and whose rationale ``_redact_str``'s own docstring already states: *"Owner
+    facing sends pass False … the pattern + registry substitutions above are the PII protection there,
+    not the whole-body hash."* ``pending_questions`` was an owner-facing send that never got the flag.
+
+    **PII protection is UNCHANGED**: PAN, IFSC, GSTIN, email, Luhn-validated cards, Aadhaar, E.164 and
+    Indian-10-digit phones are all still substituted, and the customer-name registry still applies.
+    Only the whole-body hash is skipped. CL-390 holds — nothing raw is persisted.
+    """
+    out = redact(text, hash_long_body=False)
     return out if isinstance(out, str) else str(out)
 
 
