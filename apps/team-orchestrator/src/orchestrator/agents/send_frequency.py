@@ -222,8 +222,28 @@ _assert_tier_order_invariants()
 #:
 #: That degradation is SAFE — a missing signal can only push a customer toward Tier C, the longest
 #: interval and the most suppression — but it is NOT the rule Fazal ratified, so it must not be
-#: reported as if it were. VT-745 wires the mint into the send path; until it lands, any analysis of
-#: tier distribution is analysing two signals, not three.
+#: reported as if it were. Any analysis of tier distribution is analysing two signals, not three.
+#:
+#: **VT-745 INVESTIGATED 2026-08-14: "wire the mint into the send path" IS NOT AVAILABLE, and the
+#: reason is deeper than a missing caller.** Two independent findings:
+#:
+#:   1. **No customer-audience template can carry a link.** Every customer template in
+#:      ``config/twilio_templates.yaml`` (``team_winback_simple``, ``team_winback_offer``,
+#:      ``team_opt_out_confirmation``, …) declares only text positionals — none has a URL/link
+#:      variable. The one link-bearing template, ``trial_subscribe_link``, is audience=owner. So
+#:      there is nowhere in an approved customer message to PUT a tracked link. Free-form is not an
+#:      escape: it needs an open 24h window, and a win-back targets lapsed customers by definition.
+#:   2. **A hook link would not make sense in a WhatsApp message anyway.** ``GET /r/{token}``
+#:      redirects to the tenant's ``wa.me`` (``api/hook_links.py:68``) — it exists to pull someone
+#:      from OUTSIDE WhatsApp into a chat. Sending it to a customer already in WhatsApp redirects
+#:      them to where they already are.
+#:
+#: So ``clicked`` is not "unwired", it is **unobtainable through any channel this product has**.
+#: Closing it needs a Fazal/Meta decision — either a new customer template carrying a URL variable,
+#: or amending the ratified rule to the two signals that exist. Until one of those happens this note
+#: IS the deliverable, and ``test_vt745_click_signal_honesty.py`` fails the moment reality changes and
+#: this text does not (a production mint caller appears, or a customer template gains a link
+#: variable), so the note cannot rot into the next stale-status defect.
 #:
 #: This is the fifth thing this week found built, exported and called by nothing (the O8 retrieval
 #: engine, ``prod_workflow_diagnosis``, two reverted wake gates). Writing the shortfall down here,
