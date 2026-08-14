@@ -1795,11 +1795,24 @@ def _settle_db_asserts(
     """
     started = time.time()
     ceiling = started + _DB_ASSERT_SETTLE_CEILING_S
+    # VT-753 — the settle's scope must MATCH THE ASSERT'S scope. A `tenant_wide: true` assert can be
+    # satisfied by work on ANY task (that is the whole point of the flag: a campaign INSERTed on turn
+    # N's run, checked on turn N+1), so waiting only on THIS turn's task could stop while the work that
+    # would satisfy the assert is still running under another key. Observed on
+    # sr_always_confirm_first_contact_floor, whose step-0 asserts are all tenant_wide.
+    probe_sid = (
+        None
+        if any(
+            isinstance(step.get(k), dict) and step[k].get("tenant_wide")
+            for k in ("assert_route", "assert_side_effects", "assert_grounded_count")
+        )
+        else turn_sid
+    )
     while db_failures and time.time() < ceiling:
         in_flight = _turn_work_in_flight(
             dsn,
             tenant_id,
-            turn_sid,
+            probe_sid,
             spawn_grace_left=(time.time() - started) < _DB_ASSERT_SPAWN_GRACE_S,
         )
         if not in_flight:

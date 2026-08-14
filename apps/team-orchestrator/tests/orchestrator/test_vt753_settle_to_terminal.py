@@ -46,6 +46,43 @@ def _fast_settle(monkeypatch):
     monkeypatch.setattr(ch, "_DB_ASSERT_SETTLE_POLL_S", 0.05)
 
 
+def test_a_tenant_wide_assert_waits_on_TENANT_WIDE_work_not_just_this_turns_task(monkeypatch):
+    """VT-753 — the settle's scope must match the ASSERT's scope.
+
+    `tenant_wide: true` exists precisely because the satisfying write may belong to a different run
+    (campaign INSERTed on turn N, checked on turn N+1). So a tenant_wide assert must not wait only on
+    THIS turn's task — it would stop while the work that would satisfy it is still running under
+    another key. Caught on the first VT-753 re-drive scenario, whose step-0 asserts are all tenant_wide.
+    """
+    seen: list[str | None] = []
+
+    def fake_in_flight(dsn, tenant_id, turn_sid, *, spawn_grace_left):
+        seen.append(turn_sid)
+        return False
+
+    monkeypatch.setattr(ch, "_turn_work_in_flight", fake_in_flight)
+    monkeypatch.setattr(ch, "_evaluate_db_asserts", lambda *a, **k: ["still failing"])
+
+    ch._settle_db_asserts(
+        "dsn://fake", "tenant-1", "run-1",
+        {"assert_route": {"expect_sr_delegation": True, "tenant_wide": True}},
+        turn_sid="SM-vt753", db_failures=["fail"],
+    )
+    assert seen == [None], (
+        f"a tenant_wide assert must probe TENANT-WIDE (sid None), not this turn's sid: {seen}"
+    )
+
+    seen.clear()
+    ch._settle_db_asserts(
+        "dsn://fake", "tenant-1", "run-1",
+        {"assert_route": {"expect_sr_delegation": True}},  # turn-scoped
+        turn_sid="SM-vt753", db_failures=["fail"],
+    )
+    assert seen == ["SM-vt753"], (
+        f"a turn-scoped assert must still wait on THIS turn's task only: {seen}"
+    )
+
+
 def _settle(monkeypatch, *, in_flight, evaluations):
     """Drive `_settle_db_asserts` with a scripted work-state probe and a scripted assert sequence.
 
