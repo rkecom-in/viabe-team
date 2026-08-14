@@ -30,11 +30,59 @@ disagreement is stated.
 (`agent_corrections` + VT-561 snapshot columns), a per-customer contact ledger with delivery *and*
 read state (`agent_customer_contacts`, mig 127/161/200), a lifetime owner conversation
 (`conversation_log`, mig 164), a supersede-not-edit plan spine (`manager_tasks` / `manager_task_steps`
-+ mig 165), and a live revenue-attribution writer (`billing/attribution_writer.py:74`, reachable from
-the daily DBOS job at `scheduled_triggers.py:229`).
++ mig 165), and a revenue-attribution writer (`billing/attribution_writer.py:74`, reachable from the
+daily DBOS job at `scheduled_triggers.py:229` — **but see §0: it is reachable and cannot match a row,
+so it has never recorded a business result**).
 
-**Of VT-744's six required fields, four are substantially CAPTURED, two are PARTIAL, none is a
-greenfield build.** This row is small. That is the correct outcome.
+**Of VT-744's six required fields, three are substantially CAPTURED, two are PARTIAL, and one (3b) is
+NOT CAPTURED — corrected 2026-08-14, see the retraction immediately below.** None is a greenfield
+build. This row is small. That is the correct outcome.
+
+---
+
+## 0. WHAT "CAPTURED" MEANS IN THIS DOCUMENT — and one retraction (added 2026-08-14, VT-748)
+
+**The standard, stated so a later reader knows what they are being told.** A field is **CAPTURED** only
+if all three hold:
+
+1. **A schema exists** to hold it.
+2. **A production caller writes it** — not a function that could write it, a caller that does. A chain
+   that exists in code and is invoked by nothing is NOT captured.
+3. **The write can actually land**: its predicates can be satisfied by the data other production paths
+   actually produce.
+
+Test (3) was added because of the retraction below and it is the one this audit originally skipped.
+**The check is empirical: query the table on a real environment and look at the rows.** Reading the code
+is how a false CAPTURED gets written.
+
+### RETRACTION — field 3b said "BUSINESS RESULT: CAPTURED — and this surprised me". That was WRONG.
+
+It passed tests (1) and (2) — real schema, real daily DBOS caller — and failed (3), which was not being
+applied. `attribution_writer` joins `entry_type = 'payment'`; every producer writes `'sale'`. So the
+mechanism runs on schedule and matches nothing, and **no tenant's business result has ever been
+recorded.** Dev shows 50 `sale` / 0 `payment`. The 18 rows in `attributions` are stale May fixtures with
+NULL `customer_id` — they are what made "CAPTURED" look plausible from the code.
+
+This mattered more than a wrong cell: **an audit that overstates coverage causes exactly the gap it was
+written to prevent.** Nobody builds capture for something already marked captured, so the year passes
+unrecorded. Mechanism + decision are rostered as **VT-754**.
+
+### Re-check of every other CAPTURED verdict against test (3)
+
+| verdict | production writer | can its writes land? | holds? |
+|---|---|---|---|
+| **1 — ACTION** | ~70 `event_kind=` emit sites across `src/orchestrator` | unconditional INSERTs, no cross-subsystem predicate | **holds** |
+| **2 — CONTEXT** | `agent/dispatch.py:987-1018` on every dispatch | unconditional | **holds** |
+| **3 — delivered/read** | `agents/customer_send.py:998-1064` reconciler | **agent path only** — resolves `message_sid` against `agent_customer_contacts` ONLY (`:1031`), so a campaign/template send has no delivery state. Already recorded as PARTIAL, and the reason is the same *shape* as 3b: one subsystem's rows are invisible to another's reader | **holds as PARTIAL** |
+| **3 — opted out** | `customers.opt_out_status` + `record_of_consent` | written on the live opt-out path | **holds** |
+| **6 — superseded steps** | `manager/plan_store.py:470-510` | unconditional on revision | **holds** |
+| `tm_audit_log` | INSERT-only, app_role | unconditional | **holds** |
+| `owner_notifications` | one row per owner send | unconditional | **holds** |
+| `campaign_recipients` | cohort write at plan time | 13 rows on dev — populated | **holds** |
+| `agent_customer_contacts` | one row per real agent send | 161/200 delivery states written by the reconciler | **holds** |
+
+Only 3b failed. The two PARTIALs were already honest. **Per the row's boundary: verdicts were NOT
+softened wholesale — over-reporting gaps wastes the same budget as under-reporting them.**
 
 **But there are four gaps that are genuinely worth closing**, and one of them (§5.1) is the single
 highest-value row in the whole ledger by the row's own argument. There is also a **direct conflict
@@ -53,7 +101,7 @@ and `email`) is a live DPDP defect, not a VT-744 concern.
 | **1b** | **…on whose AUTHORITY** (autonomous / owner-approved / VTR-directed) | **PARTIAL** | Only the agent-draft send path stamps it: `agent_customer_contacts.autonomy_level` `CHECK IN ('L2','L3')` (`127_vt369_agent_customer_contacts.sql:16`), written at `agents/customer_send.py:764` and `:896`. **L2 ≈ owner-approved, L3 ≈ autonomous — there is no third value, so "VTR-directed" is inexpressible.** The **campaign/template send path carries no authority column at all**: `campaign_messages` (mig `049:66-84`) has none, and `_write_campaign_message` (`agent/tools/send_whatsapp_template.py:489-506`) writes none. Authority on that path is only *inferable* by joining a `pending_approvals` row that may not exist. |
 | **2** | **CONTEXT at decision time** | **CAPTURED** | `tm_audit_log.snapshot_id` = sha256 of the assembled context blocks, computed at `agent/dispatch.py:987-1004` and emitted as `event_kind='context_assembled'` with the raw blocks in `input` (`agent/dispatch.py:1005-1018`). Plan step + objective: `manager_tasks.objective` / `manager_task_steps` (mig 151/152), revision-versioned by mig 165. Capability invoked: `tool_invoked` / `tool_result` (`observability/langchain_callback.py:218,230`). Model/cost per call: `llm_call_events` (mig `173:65-79`). Reasoning depth by reference: `reasoning_ref → pipeline_steps` (mig `147:50`). **Honest limit, already documented at `observability/tm_audit.py:120-125`: only emitted reasoning is captured; `snapshot_id` gives input-replayability, not decision-determinism.** |
 | **3** | **OUTCOME** — delivered / read / replied / clicked / opted out / blocked / failed | **PARTIAL** | **delivered / read / failed / undelivered: CAPTURED, agent path only** — `agent_customer_contacts.delivery_status` (mig `161`, widened to include `'read'` by mig `200`), reconciled at `agents/customer_send.py:998-1064`. **The reconciler resolves `message_sid` against `agent_customer_contacts` ONLY** (`customer_send.py:1031`), so **a campaign/template send has no delivery state anywhere** — `campaign_messages.send_status` (mig `049:76-78`) records transport acceptance, not delivery. **replied: PARTIAL** — the fact of an inbound is a mutable timestamp (`wa_conversations.last_inbound_at`, mig `070:17`, upserted at `integrations/customer_inbound.py:98-101`; also `customers.last_inbound_at`), **not an append-only event and not attributed to a specific outbound message**. **clicked: NOT CAPTURED** — `hook_links.click_count` (mig `071:20`) is a per-token counter with no customer and no message; VT-741 §THE SIGNALS states the customer-message click table is unbuilt, and no migration up to 200 adds one. **opted out: CAPTURED** — `customers.opt_out_status` (mig `045:32`) + `record_of_consent` (mig 067). **blocked: NOT CAPTURED as a distinct state** — VT-741 §6 requires it; `_DELIVERY_FAILURE_STATES` (`customer_send.py:977`) is `{failed, undelivered}` with no block class. |
-| **3b** | **BUSINESS RESULT** (order placed, amount, none) | **CAPTURED — and this surprised me** | `attributions` (mig `023:15-24`) had no writer for a long time and several code comments still say so (`agent/tools/match_transactions.py:30`). **That is stale.** `billing/attribution_writer.py:74` inserts real rows, called from `billing/attribution_close.py:28`, driven by the daily 2 AM IST DBOS handler `attribution_close_scheduled` → `run_attribution_close_body` → `close_attribution` (`scheduled_triggers.py:222-229`). It joins `campaign_recipients` → `customer_ledger_entries` (`entry_type='payment'`, mig 061, written at `integrations/ledger.py:100`) in a 7-day window. **Conditional on ledger ingestion actually producing payment rows for that tenant — but the mechanism is live, not a shell.** |
+| **3b** | **BUSINESS RESULT** (order placed, amount, none) | **NOT CAPTURED — corrected 2026-08-14, see the retraction below** | The mechanism is real and reachable (`billing/attribution_writer.py:74` ← `attribution_close.py:28` ← the daily 2 AM IST DBOS handler at `scheduled_triggers.py:222-229`) — and it **cannot match a row**. The join predicate is `cle.entry_type = 'payment'` (`attribution_writer.py:85`); **every production producer writes `'sale'`** (`ingest.py:185`, `upi_export.py:280`, `_image_adapter.py:224`, `imported_transactions.py:67` default). MEASURED on dev 2026-08-14: `customer_ledger_entries` = **50 `sale`, 0 `payment`**; the 18 `attributions` rows are 2026-05 fixtures with NULL `customer_id`/`attribution_method`, not writer output. The `'payment'`→`'sale'` change was **deliberate** (VT-417 PR-3: SR's lapsed detector counts only `'sale'`, so `'payment'` made every UPI sale invisible to win-back) and must not be reverted. Compounding it: nothing writes `campaigns.attribution_close_at` (1 of 34 rows on dev), so the eligibility scan finds ~nothing even before the join. **Rostered as VT-754, which carries the revenue-semantics decision Fazal owns.** |
 | **4** | **OWNER'S REACTION** — approved / edited / rejected / ignored | **PARTIAL — and this is the important one** | `agent_corrections` (mig 154) + VT-561 columns (mig 160) is a genuinely good store: `correction_kind IN ('edit','reject','approve')`, `correction_text` PII-redacted **not** sha256'd, `proposal_snapshot` captured *before* `redact_batch_close` destroys the drafts. Written at four sites in `agents/approval_glue.py:322, 364, 402, 434`. **Three concrete holes:** (a) **it only fires for `approval_type='agent_customer_send'`** — `apply_agent_decision` returns `None` for every other type at `agents/approval_glue.py:283-284`, so a **`campaign_send` approval (mig `052:47-49`) — the dominant path today — writes no correction row at all**; (b) **`corrected_snapshot` is a parameter that no caller ever passes** (declared `correction_store.py:138`, inserted `:166`, and `grep corrected_snapshot=` across `src/` returns zero call sites) — so an edit has a *before* and no *after*, which is exactly what exit gate (c) asks for; (c) **"ignored" is not recorded** — the `timeout`/`defer` branch at `approval_glue.py:456-482` writes `redact_batch_close` and a regression counter but **never calls `record_correction`**. |
 | **5** | **VTR INTERVENTION and its REASON** | **PARTIAL** | The intervention IS captured: `ops_audit` (mig 074, append-only by convention) written from `escalations.py:119`, `api/ops_common.py:84`, `api/ops_runcontrol.py:87`; plus `tm_audit` `autonomy_change` (`agents/autonomy.py:219,269,328,528,555`) and `ownership_decision` (`api/ops_vtr_console.py:571`). **The REASON is optional at every layer.** `VtrAutonomyOverrideBody.reason: str = ""` (`api/ops_vtr_console.py:102`), `VtrBatchCancelBody.reason: str = ""` (`:108`), and `ops_audit.detail TEXT NULL` (mig `074:20`). **Exit gate (d) — "an override with no reason is rejected at write time" — is not met today, at either the API boundary or the DB.** Separately, `agent_corrections.authority` defaults to `'owner'` and **no call site ever passes `'vtr'`** (`correction_store.py:139`; the four `approval_glue` calls omit it), so a VTR correction is indistinguishable from an owner one in the trainable store. |
 | **6** | **What was NOT done** (rejected alternative) | **PARTIAL, leaning NOT CAPTURED** | What exists: **superseded plan steps survive** — `manager_task_steps.status='superseded'` with `plan_revision`, supersede-not-edit by design (mig `165` header; `manager/plan_store.py:470-510`), so an abandoned step keeps its `detail`. `agent_drafts.skip_reason` records *why* a draft was not sent (`agents/customer_send.py:356`, `:92`), and `manager_asserted_facts.status IN ('active','superseded','retracted')` + `superseded_by` (mig `187:33-36`) retains retracted assertions. Non-admitted decisions get a breadcrumb: `campaign_first_contact_not_admitted`, `campaign_revision_not_admitted` (`manager/triage_seam.py:610, 419`), `policy_shadow` (`agents/customer_send_choke.py:235`). **What does NOT exist: the alternative the Manager considered and rejected.** Nothing writes it — `grep -iE "alternative\|counterfactual\|considered_options"` over `src/` returns only `first_data_step/method_selector.py:141` (unrelated, ingestion method choice) and `knowledge/admission.py:446` (offline ablation). And the one place a rejected output *is* recorded — `emission_gate._emit_blocked_audit` — stores **only `sha256(blocked_text)`** (`agent/emission_gate.py:1039-1045`), so the substance of what the Manager was stopped from saying is destroyed by design. |

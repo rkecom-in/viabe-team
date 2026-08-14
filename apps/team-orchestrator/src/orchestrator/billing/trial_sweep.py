@@ -294,10 +294,21 @@ def _scan_active_trials(now: datetime) -> list[UUID]:
         return [UUID(str(r["id"])) for r in cur.fetchall()]
 
 
-def _apply_trial_transition(tenant_id: UUID, event: str) -> None:
+def _apply_trial_transition(tenant_id: UUID, event: str) -> str:
     """Load the tenant's current phase + trial start, build a SubscriberState, and
     call apply_transition (the SOLE phase mutator). Best-effort re. DBOS context:
-    log + continue under a sync canary."""
+    log + continue under a sync canary.
+
+    VT-748 — RETURNS ITS OUTCOME, one of:
+
+      ``"applied"`` — the phase moved.
+      ``"noop"``    — the tenant was not in 'trial' (an idempotent re-run; already transitioned).
+      ``"failed"``  — the mutation raised and was swallowed.
+
+    It previously returned None, so the caller could not tell "expired" from "we tried to expire and
+    it blew up", and went on to message the owner either way. A subscribe link sent to a tenant whose
+    phase never moved tells them their trial ended when it did not — a false claim on the money path.
+    """
     from orchestrator.graph import get_pool
     from orchestrator.state import new_subscriber_state
     from orchestrator.transitions import apply_transition
@@ -311,14 +322,67 @@ def _apply_trial_transition(tenant_id: UUID, event: str) -> None:
             )
             row = cur.fetchone()
         if row is None or row["phase"] != "trial":
-            return
+            return "noop"
         state = new_subscriber_state(tenant_id, phase=row["phase"])
         state["trial_started_at"] = row["trial_started_at"]
         apply_transition(state, event, {"reason": "vt90_trial_sweep"})
+        return "applied"
     except Exception:  # noqa: BLE001 — phase mutate is best-effort under the sweep
         logger.exception(
             "trial_sweep: %s transition failed tenant=%s; sweep continues",
             event, tenant_id,
+        )
+        return "failed"
+
+
+def _alert_uninformed_trial_expiry(tenant_id: UUID, *, reason: str, transition: str) -> None:
+    """VT-748 — a trial that expires without the owner being told must at least not be silent to US.
+
+    THE FAIL-OPEN THIS CLOSES. ``run_trial_evaluation_body``'s expire branch called
+    ``_compose_trial_subscribe_link`` and sent the owner notification ONLY if it returned non-None.
+    That function returns None when ``OWNER_JWT_SECRET`` is unset/dormant **and on any exception at
+    all** (DB hiccup, import failure) — so the tenant moved to 'lapsed', their trial was over, and
+    they were told NOTHING, with nobody paged. That is the B9 theme exactly ("the owner is left
+    uninformed"), on the money path, and it sat about sixty lines below the VT-745 notify_fn fix that
+    the lane shipped instead.
+
+    WHY THIS ALERTS RATHER THAN SENDING A FALLBACK MESSAGE — stated explicitly, per the row's boundary
+    that a decision to proceed must name its reason. There is no approved link-less "your trial has
+    ended" template. ``trial_ending`` is a WARN template ("your trial period ends on {{2}}"), so
+    reusing it would tell a lapsed owner their trial is still running — trading silence for a false
+    statement, which is worse. Minting a new WhatsApp template needs Meta approval and is Fazal's call,
+    not mine; that is recorded in VT-748 as the follow-up. Until it exists, the honest closure is that
+    a human learns about every uninformed expiry.
+
+    The expiry itself is NOT reverted: VT-365 (Fazal 2026-06-09) forbids trial extensions, so
+    fail-closed here cannot mean "keep the trial alive". It means the silence stops being invisible.
+
+    Fail-soft: an alert failure must never break the daily sweep for the remaining tenants.
+    """
+    try:
+        from orchestrator.alerts.dispatch import dispatch_alert
+        from orchestrator.alerts.triggers import Trigger, severity_for
+
+        dispatch_alert(Trigger(
+            tenant_id=tenant_id,
+            trigger_kind="escalation",
+            severity=severity_for("escalation"),
+            message_text=(
+                f"Trial expiry processed for this tenant and the owner was NOT notified "
+                f"(reason={reason}, phase_transition={transition}). They have lapsed and, as far as "
+                "this sweep can tell, have heard nothing about it. Contact them, and check "
+                "OWNER_JWT_SECRET / the trial_subscribe_link template gates before the next 7 AM run."
+            ),
+            payload={
+                "reason": reason,
+                "phase_transition": transition,
+                "detected_by": "vt748_uninformed_trial_expiry",
+            },
+        ))
+    except Exception:  # noqa: BLE001 — the alert must never break the sweep's remaining tenants
+        logger.exception(
+            "trial_sweep: VT-748 uninformed-expiry alert failed tenant=%s reason=%s",
+            tenant_id, reason,
         )
 
 
@@ -377,14 +441,29 @@ def run_trial_evaluation_body(
             "trial_end_date": v.trial_end.date().isoformat() if v.trial_end else "",
         }
         if v.decision == "expire":
-            _apply_trial_transition(tid, "trial_expired")
+            transition = _apply_trial_transition(tid, "trial_expired")
             # VT-359: trial-end conversion nudge — the VT-332 subscribe-link send, fired ONCE at
             # trial-end. Composed here (SID + deep-link + single-use token); the actual owner-WABA
             # send is wired to the registry-driven owner notify (VT-426), fail-safe-skipping while
             # the SID is a pending stub. The owner can still subscribe from `lapsed` via this link.
             link_params = _compose_trial_subscribe_link(tid)
-            if link_params is not None:
+            if transition == "failed":
+                # VT-748 — do NOT tell an owner their trial ended when the phase mutation blew up.
+                # The subscribe link is a statement of fact about their account state; sending it on a
+                # failed transition is a false claim on the money path. Alert instead: the tenant is
+                # stranded in 'trial' past its end and only a human can reconcile that.
+                _alert_uninformed_trial_expiry(
+                    tid, reason="phase_transition_failed", transition=transition
+                )
+            elif link_params is not None:
                 notify(tid, "trial_subscribe_link", language, link_params)
+            else:
+                # VT-748 — THE FAIL-OPEN. The trial is over and the one message that would have told
+                # the owner could not be composed. Silence on the money path is the failure; see
+                # _alert_uninformed_trial_expiry for why this alerts instead of sending a substitute.
+                _alert_uninformed_trial_expiry(
+                    tid, reason="subscribe_link_compose_failed", transition=transition
+                )
         elif v.decision == "warn":
             notify(tid, "trial_ending", language, params)
     return acted
