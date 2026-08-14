@@ -19,7 +19,13 @@ from __future__ import annotations
 
 import pytest
 
-from orchestrator.manager import pending_questions as pq
+# The dep-less CI smoke job (uv --no-project --isolated) installs only pytest + pyyaml, and importing
+# `pending_questions` pulls db.tenant_connection -> psycopg. Without this guard the whole FILE errors at
+# COLLECTION there and the push is rejected — the trap that has bitten this repo before. These are pure
+# redaction assertions and need no database; the skip only covers the import chain.
+pytest.importorskip("psycopg")
+
+from orchestrator.manager import pending_questions as pq  # noqa: E402 — after the dependency guard
 
 _LONG_PREFIX = (
     "I couldn't build the win-back campaign yet because some information is missing, and I want to "
