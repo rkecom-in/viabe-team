@@ -681,14 +681,59 @@ def _build_dormant_cohort(tenant_id: UUID) -> tuple[list[CustomerFactBundle], bo
         )
         return [], False
 
-    with tenant_connection(tenant_id) as conn:
-        candidates = detect_lapsed_customers(
-            tenant_id, conn=conn, limit=DEFAULT_DETECTION_LIMIT
+    # VT-755 scope 4 — INSTRUMENT THE COUNT. Three very different outcomes are otherwise
+    # indistinguishable from outside, and the difference decides where to look:
+    #
+    #   (a) the consent gate closed          -> returns above, already logged
+    #   (b) the gate was OPEN and the cohort read returned ZERO candidates
+    #   (c) the read RAISED (e.g. _phone_hash_salt() fail-loud on an unset salt)
+    #
+    # Why this had to be added: on dev 2026-08-14 a tenant with 8 customers, 8 consents, 8 'sale'
+    # ledger rows, 6 of them lapsed >45d and `tenants.owner_inputs` TRUE still produced an empty
+    # cohort — and the specialist then returned `insufficient_data`, which is the head of the VT-755
+    # chain (an unanswerable question, never delivered, on a task that wedges the tenant). FOUR
+    # external hypotheses for that zero were tested and refuted, and the reason none could be
+    # confirmed is that the deciding predicate — the consent phone-token join, which hashes with a
+    # SEALED salt — cannot be evaluated from outside the container. Only the product can report it.
+    #
+    # `review.py`'s own comment on the branch that consumes this already calls the cohort read flaky
+    # ("the cohort read is separately flaky — RV-1"); this is what turns that into a number.
+    #
+    # Counts only, never a customer id/phone/name (CL-390).
+    try:
+        with tenant_connection(tenant_id) as conn:
+            candidates = detect_lapsed_customers(
+                tenant_id, conn=conn, limit=DEFAULT_DETECTION_LIMIT
+            )
+            bundles = [
+                build_customer_fact_bundle(tenant_id, cand.customer_id, conn=conn)
+                for cand in candidates
+            ]
+    except Exception:
+        # Deliberately NOT swallowed into safe-empty: re-raised after logging. A cohort read that
+        # blew up is not the same fact as "this tenant has no lapsed customers", and silently
+        # conflating them is what made this un-diagnosable. The consent gate above fail-closes on
+        # purpose (no PII on an unknown consent state); this is a different failure and stays loud.
+        logger.exception(
+            "VT-755: dormant-cohort read RAISED for tenant=%s (consent gate was OPEN) — the brain "
+            "will see no candidates; this is a READ FAILURE, not an empty cohort",
+            tenant_id,
         )
-        bundles = [
-            build_customer_fact_bundle(tenant_id, cand.customer_id, conn=conn)
-            for cand in candidates
-        ]
+        raise
+    if not bundles:
+        logger.warning(
+            "VT-755: dormant cohort is EMPTY for tenant=%s with the consent gate OPEN — "
+            "detect_lapsed_customers returned 0 candidates. The specialist will report "
+            "insufficient_data. If the tenant has lapsed customers, the consent phone-token join "
+            "(db.wrappers._LAPSED_CANDIDATES_SQL, salted with TEAM_PHONE_HASH_SALT) is the predicate "
+            "to check — it is the only one unverifiable from outside the container.",
+            tenant_id,
+        )
+    else:
+        logger.info(
+            "VT-755: dormant cohort built for tenant=%s — %d candidate(s), %d bundle(s)",
+            tenant_id, len(candidates), len(bundles),
+        )
     return bundles, bool(bundles)
 
 
