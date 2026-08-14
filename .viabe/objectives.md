@@ -10,7 +10,38 @@
 > newest CL/VT touching it is STALE and must be reconciled BEFORE any status claim is made from
 > this file. The scoreboard exists so Fazal can see the war in one page; a stale scoreboard is
 > worse than none — it launders drift as status.
-> Last updated: **2026-08-06, Clau audit-pass (Fazal-ordered)** — CURRENT STATE: **VT-734
+> Last updated: **2026-08-14, CC (measurement-integrity + stall-class pass)** — CURRENT STATE:
+> **The instrument that produced every "delegation miss" number was wrong, and fixing it found the
+> defect underneath.** VT-753 CLOSED: the harness claimed ROUTING verdicts from a 150s settle budget
+> against ~390s of measured work, so latency was reported as delegation failure; it now settles to
+> TERMINAL and an unmeasured run reports INDETERMINATE instead of counting as a miss. Gate (c)
+> re-driven on the fixed instrument, same deployed build: **TIMEOUTs 4 -> 0, two of seven scenarios
+> were pure latency and are now CLEAN** (that 2-of-7 is the size of the historical error, stated
+> conservatively), five failures survive a settle-to-terminal — **and FOUR OF THOSE FIVE ARE ONE
+> DEFECT.** The retracted 24%/33%/40% figures were very likely this artifact. Gate (c) is still not
+> closable AS A RATE, for a better reason than before: the instrument now works and says the dominant
+> term is VT-755, so a rate measured today would be measuring VT-755 and calling it delegation.
+> **VT-755 (Critical, n=4): `pending_questions` has NO EMITTER.** The Manager parks `waiting_owner`
+> on a question it never sends, `correlate_reply` then consumes the owner's real instruction ("haan
+> theek hai, bhej do unhe" — SEND IT) as that invisible question's answer, and because
+> `waiting_owner` counts as TASK_ACTIVE while the reaper excludes it, **one undelivered question
+> queues every later objective behind it forever — the tenant's Manager ends, not degrades.** Dev
+> census: 4 of 7 parked tasks un-wakeable, 3 of 4 open questions stored as an unsendable hash, 1
+> tenant already wedged. THREE of its seven defects closed (text survives redaction · an undelivered
+> question can no longer be answered, mig 204 · a wedge now pages `critical`, mig 205); the EMITTER
+> needs one Fazal call (it is the Manager's voice and must route through the single emission choke).
+> Also CLOSED today: **VT-747** (an ack could silently ROLL BACK an owner approval — the row named 1
+> un-savepointed statement, the audit found 4; a try/except cannot make a statement fail-soft on a
+> shared transaction), **VT-746** (VT-735's Fast-budget tripwire could never fire — the CHECK refused
+> the kind; closed with a test that enumerates every declared kind against the database, which then
+> caught VT-755's own new kind), **VT-748** (a trial could expire with the owner told nothing and
+> nobody paged; and the capture audit's "BUSINESS RESULT: CAPTURED" was FALSE), **VT-745** (`clicked`
+> is UNOBTAINABLE, not unwired — no customer template can carry a link). ROSTERED: **VT-754** —
+> attribution joins `entry_type='payment'` and every producer writes `'sale'`, so **revenue
+> attribution has never recorded anything for any tenant**; needs a Fazal semantics call. Gate (d)
+> (full pack x3) RUNNING on the fixed instrument. Safety throughout: `sends=0` on every no-send
+> scenario, and all campaign recipients are real customers of the correct tenant. Prior header
+> (2026-08-06, superseded): **VT-734 — CURRENT STATE: **VT-734
 > approval-breach FIXED + DEV-PROVEN** (mig 190; ordering invariant + repeat-refusal; breach repro
 > ×3 → pending/proposed/0-sent; the Manager's send claim was TRUE — CC's "fabricated claim" was its
 > own broken verification query, retracted). **Critical ×3 consistency gate IN FLIGHT on the full
@@ -137,6 +168,13 @@
   environmental faults on 2026-08-03/04). First dirty cycle = the first standing pack AFTER the
   promotion. **When one dirty cycle completes with no new failure class, O6 lifts AT RISK** per its
   own bar. An unmade roster call is how an objective gets overlooked while looking tracked.
+- Now (2026-08-14, CC): **STAYS AT RISK, and the reason is now named rather than statistical.** The
+  SR pack's residue is not a spread of flakes — after VT-753 fixed the instrument, four of the five real
+  failures are ONE defect (VT-755): a task parked on a question that was never sent, which then queues
+  every later objective for that tenant behind it forever. That is a real-tenant reliability failure of
+  the worst shape (silent, unrecoverable, unalarmed) and it is squarely this objective's bar. Three of
+  its defects are closed and a `critical` wedge alert now exists, so the failure is no longer SILENT —
+  but O6 does not lift on an alert, it lifts on the dirty cycle passing with no new failure class.
 - Now: diagnosis re-scored the pattern — canary-2 was HONEST behavior (no false claim; the
   scary read was wrong), canary-1 was a REAL harness-green≠real-green miss (integration state
   hijacked the export route) — fixed 42bd7e6, live re-proof pending (O2 gate). Score: 1 real
@@ -242,6 +280,13 @@ EXCEPT **O9** (held by Fazal's sequencing) and **O11's C4 graduation linkage** (
 O8/D7) — both deliberate, both stated rather than silent.
 
 ## O11 · Business judgment quality — measured, not asserted — IN PROGRESS (baseline is the next dev-queue stage)
+- Now (2026-08-14, CC): **the measurement itself was the blocker and is now fixed.** Every prior
+  "delegation miss" number on this objective was produced by a harness that claimed a ROUTING verdict
+  from a 150s clock against ~390s of real work (VT-753). It now settles to TERMINAL, and an unmeasured
+  run reports INDETERMINATE — a bucket that must never be folded into a miss rate. Gate (c) re-drive on
+  the fixed instrument: TIMEOUTs 4 -> 0, 2 of 7 scenarios were pure latency and are CLEAN, 5 real, 4 of
+  those 5 one defect. Gate (d) (full pack x3) is running. **No rate should be quoted from this objective
+  until VT-755 lands** — it would measure VT-755 and call it judgment.
 - Bar (phase1-plan Track D, reshaped 2026-07-01): the quality of the Manager's business
   DECISIONS and advice is SCORED, not assumed — the advice-quality eval (factuality /
   actionability / relevance / tone) runs on a held-out measurement set, and per-capability
