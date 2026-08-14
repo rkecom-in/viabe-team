@@ -358,7 +358,14 @@ _ASSISTANT_ROLES = frozenset({"manager", "bot", "assistant"})
 def _step_timed_out(step: dict[str, Any]) -> bool:
     """A step whose product LLM turn was cut off by the harness measurement clock. The runner records
     this as a non-terminal ``run_status`` (``running``) AND/OR a failure string carrying ``TIMEOUT``.
-    A step with ``run_status == 'completed'`` and no such failure is a GENUINE outcome."""
+    A step with ``run_status == 'completed'`` and no such failure is a GENUINE outcome.
+
+    VT-753's INDETERMINATE label is deliberately NOT included here, and its failure text deliberately
+    avoids the substring ``TIMEOUT`` so it cannot trip this by accident. The two are different things:
+    a TIMEOUT means the assistant's REPLY was cut off (so its absence must not be scored), whereas an
+    INDETERMINATE means a DB-state assert never reached terminal — the reply itself was captured and is
+    real product evidence. Exempting it would hide fabrications in text the product actually sent, the
+    exact trap ``_step_has_assistant_reply`` documents below."""
     if str(step.get("run_status", "")).strip().lower() in {"running", "timeout", "timed_out"}:
         return True
     for f in step.get("failures") or []:

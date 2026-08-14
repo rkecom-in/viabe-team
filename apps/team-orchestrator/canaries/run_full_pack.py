@@ -9,9 +9,12 @@ Also enforces the two GATE DEFINITION checks that don't need the judge model:
   - domain floors (manager>=40 / onboarding>=25 / integration>=25 / sr_autonomy_rails>=30) —
     mechanical, from the scenario's own ``domain`` field. A shortfall is an authoring gap, never
     silently reclassified.
-  - harness-clean count: every step must be PASS or XFAIL (a FAIL/XPASS/TIMEOUT step is a finding).
-    ``expected_fail`` scenarios are NOT excluded from this count (GATE DEFINITION) — they must
-    resolve XFAIL or XPASS like any other scenario, never silently dropped.
+  - harness-clean count: every step must be PASS or XFAIL (a FAIL/XPASS/TIMEOUT/INDETERMINATE step is
+    a finding). ``expected_fail`` scenarios are NOT excluded from this count (GATE DEFINITION) — they
+    must resolve XFAIL or XPASS like any other scenario, never silently dropped.
+    VT-753: INDETERMINATE is its own summary field and is NOT part of ``failed``. It means the turn's
+    async work was still producing when the settle ceiling fired — unmeasured, so it may not be
+    counted as clean, and may not be counted as a miss either. Report the bucket, never a blend.
 
 Diagnostic-first (Fazal/team-lead RUN directive, 2026-07-06): this tool does NOT stop on the first
 failure. It runs every scenario, collects every result, and reports the complete picture — a
@@ -101,7 +104,19 @@ def check_harness_clean(results: list[ch.StepResult]) -> list[str]:
     bad = [r for r in results if r.label not in ("PASS", "XFAIL")]
     if not bad:
         return []
-    return [f"{len(bad)} step(s) did not clear PASS/XFAIL ({', '.join(r.label for r in bad)})"]
+    # VT-753: an INDETERMINATE step is NOT clean — an unmeasured run must never count as a green one,
+    # or the ceiling becomes a way to pass by timing out. But it is also not a behavioural failure,
+    # so the finding text names the distinction rather than letting a reader tally it as a defect.
+    unmeasured = [r for r in bad if r.label == "INDETERMINATE"]
+    note = (
+        f" — {len(unmeasured)} of these are INDETERMINATE (async work still producing at the settle "
+        f"ceiling: UNMEASURED, not a behavioural failure; re-drive before reading as a defect)"
+        if unmeasured else ""
+    )
+    return [
+        f"{len(bad)} step(s) did not clear PASS/XFAIL "
+        f"({', '.join(r.label for r in bad)}){note}"
+    ]
 
 
 # --- orchestration (real DB/HTTP; not unit-tested directly — the logic above is) ------------------
@@ -159,6 +174,11 @@ def _write_json_report(
         "xpassed": sum(1 for r in results if r.label == "XPASS"),
         "failed": sum(1 for r in results if r.label == "FAIL"),
         "timed_out": sum(1 for r in results if r.label == "TIMEOUT"),
+        # VT-753 — its own field, deliberately NOT folded into `failed`. An INDETERMINATE step is one
+        # whose async work was still producing at the settle ceiling: unmeasured, not broken. Gate (c)
+        # was reported as a blended rate once and the number had to be withdrawn; this keeps the
+        # bucket visible in the machine-readable summary so the next report cannot blend it by accident.
+        "indeterminate": sum(1 for r in results if r.label == "INDETERMINATE"),
     }
     entry = ch._build_json_report(scenario, path_stem, tenant_id, steps, results, summary)
     ch._append_json_report(path, entry)
@@ -174,7 +194,17 @@ def main(argv: list[str] | None = None) -> int:
     # _D1_INTURN_WAIT_POLL_S ≈ 96s), or a turn whose async manager_task does not answer quickly is
     # recorded TIMEOUT by construction and the pack measures its own deadline. 90s sat UNDER that
     # floor and is why sr_consequential_bulk_send_requires_approval read as a defect for a week.
-    p.add_argument("--timeout", type=float, default=180.0)
+    #
+    # VT-753 scope 5 — RAISED 180 -> 300, and here is the measurement it is calibrated against so the
+    # next reader does not have to trust an adjective. MEASURED on deployed dev 2026-08-14 (VT-752),
+    # end-to-end SR delegation chain: 382 / 416 / 373s. At 180s, 10 of the 78 runs in the S1 gate (c)
+    # sweep recorded TIMEOUT — 13% of the denominator unmeasured because the harness clock, not the
+    # product, ran out. 300s does NOT cover the full ~390s chain on purpose: the turn's RUN completes
+    # at the sync ack (VT-642) well before the async chain does, and the async part is what the
+    # settle-to-terminal loop now waits on rather than a clock. If TIMEOUTs persist above ~5%, raise
+    # this WITH a fresh measurement and update this comment — do not raise it on a hunch, which is
+    # exactly how the 150s settle budget went 4x stale in silence.
+    p.add_argument("--timeout", type=float, default=300.0)
     p.add_argument(
         "--keep-tenants", action="store_true",
         help="skip teardown (debug — inspect the synthetic tenants after the run)",

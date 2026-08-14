@@ -156,7 +156,11 @@ class Turn:
 class StepResult:
     ok: bool
     xfail: bool  # a failure that was EXPECTED (a known, marked gap) — green for the exit code
-    label: str  # PASS | FAIL | XFAIL | XPASS
+    # PASS | FAIL | XFAIL | XPASS | TIMEOUT | INDETERMINATE. INDETERMINATE (VT-753) is neither a pass
+    # nor a failure: the turn's async work was still producing when the settle ceiling fired, so no
+    # DB-state verdict was reachable. It carries ok=False (an unmeasured step is not green) but must be
+    # bucketed apart from FAIL in every report — folding it into a miss rate is the bug VT-753 fixed.
+    label: str
     reasons: list[str]
     transcript: list[Turn]
     run_status: str | None
@@ -539,7 +543,9 @@ def assert_route(
         want = "delegation to Sales-Recovery" if expect_sr_delegation else "NO delegation"
         return [
             f"assert_route: expected {want} this turn, observed route={route!r} "
-            f"(campaigns row {'exists' if delegated else 'absent'})"
+            f"(campaigns row {'exists' if delegated else 'absent'}) — NOTE: route here is a PROXY, "
+            f"campaigns-row existence joined to this turn, not a recorded route column (VT-753 "
+            f"scope 3). Read it as 'a Sales-Recovery campaign was/wasn't attributable to this turn'."
         ]
     return []
 
@@ -1680,9 +1686,32 @@ def _evaluate_db_asserts(
     return failures
 
 
-# VT-633 async-settle budgets (see run_scenario_steps): the enforce loop's out-of-band beats are
-# arm-wait ≤96s + reaction poll ≤15s + the fan-out — 150s covers the chain with headroom.
-_DB_ASSERT_SETTLE_S = 150.0
+# VT-753 — SETTLE TO TERMINAL, NOT TO A CLOCK.
+#
+# The VT-633 budget here was 150s, justified as "arm-wait ≤96s + reaction poll ≤15s + the fan-out,
+# with headroom". MEASURED on deployed dev 2026-08-14 (VT-752), the same chain takes **382 / 416 /
+# 373s** — the budget was 4x stale, and every deadline in the system was calibrated below the real
+# work: this settle 150s, the step timeout 180s, the product's own in-turn D1 wait ~96s.
+#
+# The consequence was not "some flaky failures". It was a WRONG KIND OF VERDICT: the settle loop
+# expired, `assert_route` read "no campaigns row", and the harness reported
+# `expected delegation ... observed route='none'` — a ROUTING claim derived from a LATENCY fact. In
+# the S1 gate (c) pass-1 re-drive that claim was FALSE for 3 of the 4 scenarios it flagged: all
+# three had a campaigns row minutes later, status=proposed, task waiting_owner, nothing sent. The
+# retracted 24%/33%/40% delegation figures are very likely this artifact.
+#
+# A BUDGET IS THE WRONG PRIMITIVE. It encodes an assumption about latency, and that assumption goes
+# stale silently — the comment above claimed headroom right up until it was 4x short. So the loop
+# now polls the WORK, not the clock: it keeps settling while this turn's manager_task is still
+# PRODUCING, and stops the moment the task reaches terminal. The ceiling below is a HANG-STOP only,
+# deliberately far above the measured chain, and reaching it reports INDETERMINATE — never a routing
+# failure. An unmeasured run must look unmeasured, not clean and not broken.
+_DB_ASSERT_SETTLE_CEILING_S = 900.0
+# How long "no manager_task exists for this turn yet" still counts as in-flight. dispatch_brain
+# spawns the task out-of-band, so a zero-task read immediately after the turn means "not spawned
+# yet", not "will never spawn". Past this, a still-taskless turn is genuinely not delegating and the
+# assert may decide.
+_DB_ASSERT_SPAWN_GRACE_S = 90.0
 _DB_ASSERT_SETTLE_POLL_S = 5.0
 _LATE_REPLY_SWEEP_CAP_S = 120.0
 _LATE_REPLY_SWEEP_POLL_S = 10.0
@@ -1696,6 +1725,96 @@ _LATE_REPLY_SWEEP_POLL_S = 10.0
 # 'planned' (triage_seam) and runs planned->running->emit->waiting_owner, so the draft is always captured.
 # Inlined (not imported from the dbos-heavy task_store) to keep the harness import light.
 _PRODUCING_TASK_STATUSES = ("planned", "running", "verifying")
+
+
+def _turn_work_in_flight(
+    dsn: str, tenant_id: str, turn_sid: str | None, *, spawn_grace_left: bool
+) -> bool:
+    """VT-753 — is the async work THIS turn kicked off still producing?
+
+    Scoped to the turn via ``manager_tasks.source_message_ref`` (the plan_store spawn stamp — the
+    same key ``_campaign_id_for_run`` follows), with a tenant-wide fallback for turns that carry no
+    sid (unit fakes, tenant-wide asserts). ``spawn_grace_left`` covers the window before
+    dispatch_brain has spawned anything: zero tasks then means "not yet", not "never".
+
+    FAIL-SOFT DIRECTION IS THE WHOLE POINT, and it is the OPPOSITE of
+    ``_tenant_has_producing_task``. That one returns False on error because the late-reply sweep just
+    loses a no-op. Here, False means "the work is done, so the assert may now declare a routing
+    verdict" — so a probe error that returned False would manufacture exactly the false routing
+    verdict VT-753 exists to stop. On any error this returns True: the settle keeps waiting, and the
+    worst case is the ceiling firing and the step reporting INDETERMINATE. Unmeasured, never wrong.
+    """
+    try:
+        with _connect(dsn) as conn:
+            _set_operator_claim(conn)
+            if turn_sid is not None:
+                producing = conn.execute(
+                    "SELECT 1 FROM manager_tasks WHERE tenant_id = %s AND source_message_ref = %s "
+                    "AND status = ANY(%s) LIMIT 1",
+                    (str(tenant_id), turn_sid, list(_PRODUCING_TASK_STATUSES)),
+                ).fetchone()
+                if producing is not None:
+                    return True
+                any_task = conn.execute(
+                    "SELECT 1 FROM manager_tasks WHERE tenant_id = %s AND source_message_ref = %s "
+                    "LIMIT 1",
+                    (str(tenant_id), turn_sid),
+                ).fetchone()
+                # A task exists and is not producing => terminal. Decide now.
+                if any_task is not None:
+                    return False
+                # No task for this turn at all: in-flight only while the spawn grace holds.
+                return spawn_grace_left
+            row = conn.execute(
+                "SELECT 1 FROM manager_tasks WHERE tenant_id = %s AND status = ANY(%s) LIMIT 1",
+                (str(tenant_id), list(_PRODUCING_TASK_STATUSES)),
+            ).fetchone()
+            return row is not None or spawn_grace_left
+    except Exception:  # noqa: BLE001 — see docstring: errors settle toward WAITING, never toward a verdict
+        return True
+
+
+def _settle_db_asserts(
+    dsn: str,
+    tenant_id: str,
+    run_id: str | None,
+    step: dict[str, Any],
+    *,
+    turn_sid: str | None,
+    db_failures: list[str],
+) -> tuple[list[str], str]:
+    """Re-poll failing DB asserts until the turn's async work reaches TERMINAL. VT-753.
+
+    Returns ``(remaining_failures, settle_state)`` where ``settle_state`` is:
+
+    - ``"settled"``  — the asserts came good while polling. Ordinary PASS.
+    - ``"terminal"`` — the work finished and the asserts STILL fail. This is a real verdict: the
+      product had its chance and did not do the thing.
+    - ``"indeterminate"`` — the ceiling fired with work STILL producing. NOT a verdict. The caller
+      must bucket this apart from both clean and failing (gate (b)).
+    """
+    started = time.time()
+    ceiling = started + _DB_ASSERT_SETTLE_CEILING_S
+    while db_failures and time.time() < ceiling:
+        in_flight = _turn_work_in_flight(
+            dsn,
+            tenant_id,
+            turn_sid,
+            spawn_grace_left=(time.time() - started) < _DB_ASSERT_SPAWN_GRACE_S,
+        )
+        if not in_flight:
+            # Close the race between the status flip and the row write: the task can reach terminal
+            # in the same instant its campaign INSERT commits, and reading only at the top of the
+            # loop would call that a failure one poll too early.
+            return (
+                _evaluate_db_asserts(dsn, tenant_id, run_id, step, turn_sid=turn_sid),
+                "terminal",
+            )
+        time.sleep(_DB_ASSERT_SETTLE_POLL_S)
+        db_failures = _evaluate_db_asserts(dsn, tenant_id, run_id, step, turn_sid=turn_sid)
+    if not db_failures:
+        return db_failures, "settled"
+    return db_failures, "indeterminate"
 
 
 def _tenant_has_producing_task(dsn: str, tenant_id: str) -> bool:
@@ -1836,19 +1955,35 @@ def run_scenario_steps(
             # never satisfy this turn's assert no matter how long it polls
             # (`routing_db_proof_finance_vs_sr [1/3] step1`). That one needs the scenario's own
             # expectation re-examined, not a longer deadline.
+            #
+            # VT-753 — the settle no longer expires on a clock (see _DB_ASSERT_SETTLE_CEILING_S). It
+            # polls until this turn's manager_task reaches terminal, and a ceiling hit reports
+            # INDETERMINATE instead of inventing a routing failure.
+            settle_state = "settled"
             if db_failures and (
                 step.get("assert_side_effects")
                 or step.get("assert_grounded_count")
                 or step.get("assert_route")
             ):
-                _settle_deadline = time.time() + _DB_ASSERT_SETTLE_S
-                while db_failures and time.time() < _settle_deadline:
-                    time.sleep(_DB_ASSERT_SETTLE_POLL_S)
-                    db_failures = _evaluate_db_asserts(
-                        dsn, tenant_id, turn.run_id, step, turn_sid=turn.message_sid
-                    )
+                db_failures, settle_state = _settle_db_asserts(
+                    dsn, tenant_id, turn.run_id, step,
+                    turn_sid=turn.message_sid, db_failures=db_failures,
+                )
             failures = failures + db_failures
-            ok, xfail, label = classify_step(failures, expected_fail=step_xfail)
+            if db_failures and settle_state == "indeterminate":
+                # NOT a verdict, so it must not be classified as one — not FAIL, and not XFAIL
+                # either (a marked gap cannot be confirmed reproduced by an unfinished run). ok=False
+                # keeps an unmeasured step out of the green count; the distinct label keeps it out of
+                # the miss rate. This is VT-753 gate (b).
+                failures = [
+                    f"INDETERMINATE: the async work for this turn was still producing when the "
+                    f"{_DB_ASSERT_SETTLE_CEILING_S:.0f}s settle ceiling fired, so these DB asserts "
+                    f"never got a terminal state to judge — this is NOT a routing or side-effect "
+                    f"verdict, it is an unmeasured step. Bucket it apart from clean and from failing."
+                ] + failures
+                ok, xfail, label = False, False, "INDETERMINATE"
+            else:
+                ok, xfail, label = classify_step(failures, expected_fail=step_xfail)
 
         if verbose:
             print(f"\n  [step {i}] {label}  (run_status={turn.run_status}, reason={turn.ingress_reason})")
@@ -1988,10 +2123,15 @@ def cmd_script(args: argparse.Namespace) -> int:
     xpassed = sum(1 for r in results if r.label == "XPASS")
     failed = sum(1 for r in results if r.label == "FAIL")
     timed_out = sum(1 for r in results if r.label == "TIMEOUT")
+    indeterminate = sum(1 for r in results if r.label == "INDETERMINATE")
     print(f"\n=== summary: {passed} PASS, {xfailed} XFAIL (known gap), {xpassed} XPASS, {failed} FAIL, "
-          f"{timed_out} TIMEOUT ===")
+          f"{timed_out} TIMEOUT, {indeterminate} INDETERMINATE ===")
     if xpassed:
         print("    note: XPASS = a marked-gap step unexpectedly passed — the gap may have closed; re-check the mark.")
+    if indeterminate:
+        print("    note: INDETERMINATE (VT-753) = the turn's async work was STILL PRODUCING when the "
+              "settle ceiling fired. Not a routing/side-effect verdict and not a pass — an UNMEASURED "
+              "step. Never fold these into a miss rate; report the bucket.")
     if timed_out:
         print("    note: TIMEOUT = the run hadn't completed within --timeout — NOT a silent drop; re-run "
               "with a larger --timeout before treating this as a regression.")
