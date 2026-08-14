@@ -526,13 +526,22 @@ def _wake_waiting_workflow(conn: Any, tenant_id: UUID | str, approval_id: UUID |
     content-free hint on the owner-signal topic. The waiting loop's ``DBOS.recv`` returns early and
     RE-CHECKS the DB condition — the signal is a hint, never an authority, so a missed/duplicate
     send changes nothing but latency. Best-effort: any failure falls back to the poll ladder.
+
+    VT-747 sibling — SAVEPOINTED for the same reason as ``_ack_owner_stalled_campaign``. This was NOT
+    named in that row; it was found by the scope-2 audit ("enumerate every statement on the resolve
+    connection") and it has the identical shape: a read on the shared resolve ``conn`` inside a
+    fail-soft ``except``. A server-side error on that read aborts the owner's transaction, the except
+    swallows it, and the resolution is silently rolled back. ``DBOS.send`` stays outside the savepoint
+    — it is not a database statement on this connection.
     """
     try:
         from dbos import DBOS
 
         from orchestrator.manager import task_store
 
-        bound = task_store.find_task_for_resolved_approval(tenant_id, approval_id, conn=conn)
+        # SAVEPOINT — see the VT-747 note above.
+        with conn.transaction():
+            bound = task_store.find_task_for_resolved_approval(tenant_id, approval_id, conn=conn)
         if bound is None:
             return
         meta = bound.get("stall_metadata") or {}
@@ -615,13 +624,29 @@ def _guarantee_campaign_consumer(
     try:
         from orchestrator.manager import task_store
 
-        bound = task_store.find_task_for_resolved_approval(tenant_id, approval_id, conn=conn)
-        if bound is None or bound.get("approval_type") not in _LOOP_CONSUMER_APPROVAL_TYPES:
-            return  # no bound loop task (legacy graph-resume owns its own run), or not a loop send
-        status = str(bound["status"])
-        task_id = bound["id"]
+        # VT-747 sibling — SAVEPOINT. The docstring above promises this is "FULLY FAIL-SOFT: the
+        # owner's authoritative resolution must never be unwound by a consumer-guarantee error
+        # (Pillar 7)", but the ``except`` below could not deliver that: a server-side error on the
+        # find/redrive statements aborts the shared resolve transaction, and swallowing the Python
+        # exception then turns the owner's COMMIT into a silent ROLLBACK. Found by VT-747's scope-2
+        # audit, not named in the row.
+        #
+        # The redrive stays INSIDE this savepoint on purpose. A savepoint that completes releases into
+        # the enclosing transaction, so the documented "redrive commits atomically with the
+        # resolution" is preserved exactly; only the FAILURE path changes, from "unwind the owner's
+        # decision" to "abandon the redrive and keep the decision".
+        with conn.transaction():
+            bound = task_store.find_task_for_resolved_approval(tenant_id, approval_id, conn=conn)
+            if bound is None or bound.get("approval_type") not in _LOOP_CONSUMER_APPROVAL_TYPES:
+                return  # no bound loop task (legacy graph-resume owns its own run), or not a loop send
+            status = str(bound["status"])
+            task_id = bound["id"]
+            redriven = (
+                task_store.redrive_task(tenant_id, task_id, conn=conn)
+                if status in ("dead_letter", "blocked")
+                else False
+            )
         if status in ("dead_letter", "blocked"):
-            redriven = task_store.redrive_task(tenant_id, task_id, conn=conn)
             # VT-740 — the effect-check this path never had. It REPORTS, it does not BLOCK: see
             # _report_effect_on_redrive for why refusing here would be the wrong trade.
             _report_effect_on_redrive(
@@ -768,11 +793,30 @@ def _ack_owner_stalled_campaign(conn: Any, tenant_id: UUID | str, *, reset: bool
     so the loop cannot auto-resume the send). Free-form (the owner just replied ⇒ inside the 24h
     window) via the SAME ``send_freeform_message`` primitive the owner-notification path uses — no
     new transport. FULLY FAIL-SOFT: an ack-send failure must never unwind the resolution. CL-390:
-    no owner phone / body logged."""
+    no owner phone / body logged.
+
+    VT-747 — WHY THE READ IS SAVEPOINTED, and why "fail-soft" was a lie without one.
+    ``runner.try_resume_pending_approval`` wraps the whole resolution in ``conn.transaction()``. A
+    SERVER-SIDE error on this connection aborts that transaction. The ``except`` below then swallows
+    the Python exception — so this function reported success while the owner's COMMIT silently became
+    a ROLLBACK. The owner said yes, was told nothing was wrong, and the decision was discarded, with
+    the fail-soft handler ensuring nobody found out. **A try/except cannot make a statement fail-soft
+    on a shared transaction; only a SAVEPOINT can.** Same fix, same reasoning, as
+    ``_report_effect_on_redrive``.
+
+    ``send_freeform_message`` stays OUTSIDE the savepoint: it touches no connection, and holding a
+    savepoint open across a network round-trip on the money path buys nothing.
+
+    (VT-747 scope 3 — considered and rejected: moving this read to its own pooled connection, which
+    would REMOVE the hazard rather than scope it. Rejected because the Seoul pooler caps at 15
+    connections and this is the money path. A savepoint costs nothing and protects the same invariant.)
+    """
     try:
-        row = conn.execute(
-            "SELECT owner_phone FROM tenants WHERE id = %s", (str(tenant_id),)
-        ).fetchone()
+        # SAVEPOINT — see the docstring. Everything that touches ``conn`` lives in here.
+        with conn.transaction():
+            row = conn.execute(
+                "SELECT owner_phone FROM tenants WHERE id = %s", (str(tenant_id),)
+            ).fetchone()
         owner_phone = (row["owner_phone"] if isinstance(row, dict) else row[0]) if row else None
         if not owner_phone:
             logger.warning("VT-668 stalled-campaign ack: no owner_phone tenant=%s", tenant_id)

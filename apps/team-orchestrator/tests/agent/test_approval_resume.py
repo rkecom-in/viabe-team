@@ -124,6 +124,20 @@ class _CaptureConn:
         # the same recording/skip logic above.
         return nullcontext(self)
 
+    def transaction(self):
+        # VT-747: the resolve path now SAVEPOINTs every fail-soft statement that runs on the shared
+        # resolve connection (`_guarantee_campaign_consumer`, `_wake_waiting_workflow`,
+        # `_ack_owner_stalled_campaign`), because a try/except cannot make a statement fail-soft on a
+        # shared transaction — only a SAVEPOINT can. A real psycopg.Connection supports nesting, so
+        # this fake has to as well or it stops modelling the contract under test.
+        #
+        # nullcontext, not a recording stub, ON PURPOSE: these tests assert the SQL the seam emits, and
+        # savepoint bookkeeping is not that. The transaction SEMANTICS are proven against a live
+        # Postgres in tests/orchestrator/test_vt747_ack_cannot_roll_back_an_approval.py, which is the
+        # only place they can be — a fake connection cannot abort a server-side transaction, so a
+        # mocked "rollback" test would pass with the savepoints removed.
+        return nullcontext(self)
+
 
 def test_mark_resolved_sets_decision_status_and_guards_unresolved():
     conn = _CaptureConn()

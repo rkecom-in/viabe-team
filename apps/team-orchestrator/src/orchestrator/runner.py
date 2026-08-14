@@ -1028,18 +1028,36 @@ def try_resume_pending_approval(tenant_id: str, body: str, message_sid: str | No
             )
 
             _campaign_id = approval.get("campaign_id")
-            record_episodic_event(
-                tenant_id,
-                _l2_event,
-                payload={
-                    "campaign_id": _campaign_id,
-                    "approval_id": str(approval["id"]),
-                },
-                referenced_entity_type="campaign" if _campaign_id else "approval",
-                referenced_entity_id=_campaign_id or approval["id"],
-                event_id=deterministic_event_id(tenant_id, _l2_event, approval["id"]),
-                conn=conn,
-            )
+            # VT-747 sibling — SAVEPOINTED + caught. Found by that row's scope-2 audit ("enumerate
+            # every statement on the resolve connection"). This is an L2 OBSERVABILITY append, but it
+            # ran bare on the resolve connection: a failure here aborted the transaction and took the
+            # owner's authoritative approval down with it. The invariant VT-747 states is "the owner's
+            # resolution must commit even if every ack fails" — an episodic milestone is an ack.
+            #
+            # Unlike the fail-soft acks, this one propagated LOUDLY rather than silently, which is the
+            # better of the two failure modes but still the wrong outcome: a knowledge-graph write must
+            # not be able to veto a money-path decision. The trade this makes is explicit — a lost L2
+            # milestone becomes a WARNING in the logs, where previously a lost APPROVAL became an
+            # exception. Losing the milestone is recoverable; losing the approval is not.
+            try:
+                with conn.transaction():
+                    record_episodic_event(
+                        tenant_id,
+                        _l2_event,
+                        payload={
+                            "campaign_id": _campaign_id,
+                            "approval_id": str(approval["id"]),
+                        },
+                        referenced_entity_type="campaign" if _campaign_id else "approval",
+                        referenced_entity_id=_campaign_id or approval["id"],
+                        event_id=deterministic_event_id(tenant_id, _l2_event, approval["id"]),
+                        conn=conn,
+                    )
+            except Exception:  # noqa: BLE001 — an L2 milestone must never unwind the resolution
+                logger.warning(
+                    "VT-747: L2 %s milestone failed (fail-soft; the owner's resolution STANDS) "
+                    "tenant=%s approval=%s", _l2_event, tenant_id, approval["id"], exc_info=True,
+                )
 
     # VT-334: a defer that only EXTENDED the window leaves the run PAUSED — do not resume or
     # close. The owner gets another 48h; the next reply re-enters here.
