@@ -1964,10 +1964,21 @@ def run_scenario_steps(
             # after the triggering turn's run does. Two gate steps show the shape directly: their
             # step-0 draft only appears in the step-1 transcript.
             #
-            # Note what this does NOT fix: a campaign attributed to the PREVIOUS turn's run_id will
-            # never satisfy this turn's assert no matter how long it polls
-            # (`routing_db_proof_finance_vs_sr [1/3] step1`). That one needs the scenario's own
-            # expectation re-examined, not a longer deadline.
+            # Note what this does NOT fix: a campaign attributed to the PREVIOUS turn's run_id is not
+            # reachable by THIS turn's run-scoped assert, however long it polls
+            # (`routing_db_proof_finance_vs_sr [1/3] step1`) — a longer deadline is not the answer.
+            #
+            # CORRECTED 2026-08-15: this comment used to say such a campaign "will NEVER satisfy this
+            # turn's assert", and gate (d) falsified that — the same scenario FAILED in pass 1 and
+            # PASSED in pass 2 on an identical build. The reason is the VT-683 P2d keying two branches
+            # up: a run-scoped lookup ALSO resolves via `manager_tasks.source_message_ref = <this
+            # turn's sid>` -> the task's `awaiting_approval_run_id`. So it passes when the drafting task
+            # is keyed to THIS turn's sid and fails when it is keyed to the previous turn's — which
+            # depends on which message spawned the task, i.e. on TIMING, not on impossibility.
+            #
+            # Keep the operational conclusion (a longer deadline does not fix it) and drop the
+            # certainty: "never" was asserted from a single observation, which is exactly the kind of
+            # claim a x3 run exists to test.
             #
             # VT-753 — the settle no longer expires on a clock (see _DB_ASSERT_SETTLE_CEILING_S). It
             # polls until this turn's manager_task reaches terminal, and a ceiling hit reports
