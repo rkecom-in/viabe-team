@@ -174,12 +174,29 @@ def test_manager_review_revise_step_resets_pending(pool):
     assert steps[1]["status"] == "pending"
 
 
-def test_manager_review_ask_owner_opens_pending_question(pool):
+def test_manager_review_ask_owner_opens_pending_question(pool, monkeypatch):
+    """VT-755 scope 0 LANDED: the park is now conditional on CONFIRMED DELIVERY.
+
+    The previous version of this test asserted `waiting_owner` unconditionally and carried a note
+    saying so — parking on a question that was never emitted is precisely the wedge (nothing can wake
+    it, and the stall reaper excludes `waiting_owner`). With the emitter in place the question is sent
+    through the single owner-emission choke first, and only a real send earns the park.
+    """
     from orchestrator.manager import pending_questions, task_store
     from orchestrator.manager.review import manager_review
 
     tid = _seed_tenant(pool)
     task_id, step_id = _create_and_claim(pool, tid)
+
+    # The recipient is stubbed rather than written to `tenants.owner_phone`: owner_phone is UNIQUE
+    # across tenants, and no real number belongs in a test fixture (a seeded live number is one
+    # harness away from a real send).
+    sent: list[str] = []
+    monkeypatch.setattr("orchestrator.manager.owner_ask._owner_phone", lambda _t: "+910000000001")
+    monkeypatch.setattr(
+        "orchestrator.owner_surface.freeform_acks.send_freeform_ack",
+        lambda tenant_id, recipient, body: sent.append(body) or True,
+    )
 
     result = manager_review(
         tid, task_id, step_id,
@@ -189,11 +206,10 @@ def test_manager_review_ask_owner_opens_pending_question(pool):
         text_call=_FakeClient({"status": "needs_owner_input", "owner_question": "which cohort?"}),
     )
     assert result.outcome == "ask_owner"
-    # VT-755 NOTE: this `waiting_owner` assertion encodes the CURRENT behaviour, which VT-755 scope 0
-    # will change — parking on a question that was never emitted is precisely the wedge (nothing can
-    # wake it, and the reaper excludes waiting_owner). It stays asserted until the emitter lands and the
-    # park becomes conditional on confirmed delivery. Flagged rather than silently kept.
+    assert sent == ["which cohort?"], "the question was parked on without ever being sent"
     assert task_store.get_task(tid, task_id)["status"] == "waiting_owner"
+    delivered = pending_questions.get_open(tid, task_id=task_id)
+    assert len(delivered) == 1, "a sent question must be answerable (delivered_at stamped)"
     # VT-755: get_open() shows DELIVERED questions by default. This test is about the review branch
     # OPENING a question row, not about the owner being able to answer it, so it reads the undelivered
     # view explicitly. (The neighbouring VT-606 test's docstring already states this row's principle —
@@ -287,3 +303,40 @@ def test_manager_review_extraction_failure_fails_closed_to_escalate(pool):
     )
     assert result.outcome == "escalate"
     assert task_store.get_task(tid, task_id)["status"] == "blocked"
+
+
+def test_manager_review_ask_owner_ESCALATES_when_the_question_cannot_be_delivered(pool, monkeypatch):
+    """VT-755 scope 0, the other half. An undelivered question must NOT park the task.
+
+    A task parked on a question the owner never received is the immortal wedge scope 3 had to build a
+    detector for — `waiting_owner` is in TASK_ACTIVE, so the stall reaper skips it, and nothing can
+    ever wake it. Refusing the park removes the CONDITION rather than alerting on it.
+
+    The escalate must be the FULL escalate, not two status writes: a blocked task nobody was paged
+    about is the same silence VT-746 closed.
+    """
+    from orchestrator.manager import task_store
+    from orchestrator.manager.review import manager_review
+
+    tid = _seed_tenant(pool)  # no owner_phone on the row -> undeliverable
+    task_id, step_id = _create_and_claim(pool, tid)
+
+    incidents: list[dict] = []
+    monkeypatch.setattr(
+        "orchestrator.manager.review.create_incident",
+        lambda tenant_id, **kw: incidents.append(kw) or None,
+    )
+
+    result = manager_review(
+        tid, task_id, step_id,
+        situation="s", desired_outcome="d", acceptance_criteria=["done"],
+        raw_output="needs input",
+        has_next_step=True,
+        text_call=_FakeClient({"status": "needs_owner_input", "owner_question": "which cohort?"}),
+    )
+    assert result.outcome == "escalate", "an unasked question parked the task anyway"
+    assert task_store.get_task(tid, task_id)["status"] == "blocked"
+    assert incidents and incidents[0]["detail"]["reason"] == "ask_owner_undelivered", (
+        "the undelivered path blocked the task without raising an incident — a wedge nobody is paged "
+        "about"
+    )

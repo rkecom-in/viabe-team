@@ -313,14 +313,25 @@ def adapt_campaign_plan_to_specialist_return(
         r for r in (str(item.suggested_remediation or "").strip() for item in plan.missing_data) if r
     ]
     if remediations:
-        asks = "; ".join(remediations)
+        # VT-755 scope 1, ruling D-A (Fazal 2026-08-15) — RAW MODEL REMEDIATION NEVER REACHES AN
+        # OWNER. This used to splice `suggested_remediation` straight into the owner's message:
+        #
+        #     "Could you help with this: {'; '.join(remediations)}?"
+        #
+        # `MissingDataItem.suggested_remediation` is free text the model writes for an ENGINEERING
+        # audience, which is how "backfill the customer table" reaches a shop owner in Hinglish.
+        #
+        # The replacement does not classify the model's prose — the model's account of what is
+        # missing is exactly what may not reach the owner. It asks the TENANT'S OWN STATE (is a
+        # source connected, are there customers, is there purchase history) and says that, from a
+        # closed vocabulary of sentences we wrote. `gaps` still carries the model's words into
+        # `outcome_summary`, which is INTERNAL (the task's own record) and never owner-facing.
+        from orchestrator.manager.owner_ask import compose_owner_need
+
         return PlanSpecialistReturn(
             status="needs_owner_input",
             outcome_summary=f"insufficient data to propose a campaign: {gaps}",
-            owner_question=(
-                "I couldn't build the win-back campaign yet because some information is missing. "
-                f"Could you help with this: {asks}?"
-            ),
+            owner_question=compose_owner_need(tenant_id),
             reason_code="insufficient_data",
         )
     # No remediation the owner could act on → there is genuinely no path here. Return blocked with
@@ -377,6 +388,40 @@ class ManagerReviewResult:
             f"ManagerReviewResult(outcome={self.outcome!r}, "
             f"decision={self.decision.kind.value!r}, incident_id={self.incident_id})"
         )
+
+
+def _apply_escalate_effect(
+    tenant_id: UUID | str, task_id: UUID | str, step_id: UUID | str, *, reason: str | None
+) -> UUID | None:
+    """The escalate EFFECT — step failed, task blocked, incident raised to tier 2.
+
+    Extracted (VT-755) because the undelivered-question path must escalate IDENTICALLY, not
+    approximately. Inlining a second copy would have set the two statuses and quietly skipped the
+    incident, producing a blocked task nobody was paged about — the same silence VT-746 closed.
+
+    ``create_incident`` is idempotent per (run_id, incident_kind); ``task_id`` is a soft (no-FK)
+    correlation key reused in the run_id slot, so a repeat escalate for the SAME task never
+    double-creates (mirrors ``specialist_return._enforce_escalate``).
+    """
+    task_store.set_step_status(tenant_id, step_id, "failed", expected_from=("running",))
+    task_store.set_task_status(
+        tenant_id, task_id, "blocked", expected_from=tuple(task_store.TASK_NON_TERMINAL)
+    )
+    iid = create_incident(
+        tenant_id,
+        incident_kind="other",
+        run_id=task_id,
+        severity="warning",
+        detail={
+            "source": "manager_review",
+            "task_id": str(task_id),
+            "step_id": str(step_id),
+            "reason": reason,
+        },
+    )
+    if iid is not None:
+        escalate_incident(tenant_id, iid, to_tier=2)
+    return iid
 
 
 def manager_review(
@@ -487,38 +532,46 @@ def manager_review(
         # and records the decision.
         task_store.set_step_status(tenant_id, step_id, "pending", expected_from=("running",))
     elif outcome == "ask_owner":
-        task_store.set_step_status(tenant_id, step_id, "waiting", expected_from=("running",))
-        task_store.set_task_status(tenant_id, task_id, "waiting_owner", expected_from=("running",))
+        # VT-755 scope 0 — ASK, THEN ACTUALLY ASK. This branch used to write the question row and
+        # park `waiting_owner` with nothing ever sent: the durable loop then waited for an answer to
+        # a question the owner had never seen, which can only end at the poll ceiling hours later.
+        # The emitter goes through the SINGLE owner-emission choke (never a second send path — the
+        # Manager is ONE voice) and stamps `delivered_at` only on a real send, because that stamp is
+        # what makes the question answerable (scope 0b).
+        delivered = False
         if ret.owner_question:
             from orchestrator.manager import pending_questions
+            from orchestrator.manager.owner_ask import deliver_pending_question
 
-            pending_questions.ask(
+            question_id = pending_questions.ask(
                 tenant_id, ret.owner_question, task_id=task_id, question_kind="clarification",
             )
+            delivered = deliver_pending_question(tenant_id, question_id, ret.owner_question)
+
+        if delivered:
+            task_store.set_step_status(tenant_id, step_id, "waiting", expected_from=("running",))
+            task_store.set_task_status(
+                tenant_id, task_id, "waiting_owner", expected_from=("running",)
+            )
+        else:
+            # UNDELIVERED — do NOT park. A task parked on a question the owner never received is the
+            # immortal wedge scope 3 had to build a detector for; refusing the park here removes the
+            # condition instead of alerting on it. `escalate` is the honest branch: the loop's
+            # escalate handler arms an owner closure at the tail, so the turn ends with the owner
+            # told something rather than waiting on silence.
+            logger.warning(
+                "VT-755: ask_owner question undelivered tenant=%s task=%s — escalating instead of "
+                "parking on an unasked question",
+                tenant_id, task_id,
+            )
+            outcome = "escalate"
+            incident_id = _apply_escalate_effect(
+                tenant_id, task_id, step_id, reason="ask_owner_undelivered"
+            )
     elif outcome == "escalate":
-        task_store.set_step_status(tenant_id, step_id, "failed", expected_from=("running",))
-        task_store.set_task_status(
-            tenant_id, task_id, "blocked", expected_from=tuple(task_store.TASK_NON_TERMINAL)
+        incident_id = _apply_escalate_effect(
+            tenant_id, task_id, step_id, reason=ret.reason_code or decision.reason
         )
-        # incident_store.create_incident is idempotent per (run_id, incident_kind); task_id is a
-        # soft (no-FK) correlation key — reused here as the "run_id" slot so a repeat escalate for
-        # the SAME task never double-creates (mirrors specialist_return._enforce_escalate's use of
-        # the SAME incident_store seam, one tier further: to_tier=2 goes straight to VTR).
-        iid = create_incident(
-            tenant_id,
-            incident_kind="other",
-            run_id=task_id,
-            severity="warning",
-            detail={
-                "source": "manager_review",
-                "task_id": str(task_id),
-                "step_id": str(step_id),
-                "reason": ret.reason_code or decision.reason,
-            },
-        )
-        if iid is not None:
-            escalate_incident(tenant_id, iid, to_tier=2)
-            incident_id = iid
 
     emit_tm_audit(
         event_layer="decides",
