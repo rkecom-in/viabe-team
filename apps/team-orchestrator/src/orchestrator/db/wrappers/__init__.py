@@ -88,6 +88,11 @@ LIMIT %(limit)s
 """
 
 
+#: VT-754 scope 4 — the attribution window, imported from its single definition so the arm below and
+#: the join in ``billing/attribution_writer`` can never drift to two different sevens.
+from orchestrator.billing.attribution_writer import ATTRIBUTION_WINDOW_DAYS  # noqa: E402
+
+
 class CustomersWrapper(TenantScopedTable):
     _table = "customers"
 
@@ -507,6 +512,48 @@ class CustomersWrapper(TenantScopedTable):
             return None
         return dict(row).get("display_name")
 
+    def recipient_phone_tokens(
+        self,
+        tenant_id: UUID | str,
+        campaign_id: UUID | str,
+        *,
+        salt: str,
+        conn: Any = None,
+    ) -> list[str]:
+        """VT-754 / ruling D-C — the ``wa_conversations.phone_token`` values for one campaign's
+        recipients, so attribution can ask "did this recipient REPLY to us before they purchased".
+
+        It lives here rather than in ``billing/attribution_writer`` for two reasons, both hard:
+
+        1. ``customers`` is in the ``no-direct-tenant-db-access`` watched set (VT-72/306). The
+           writer's own docstring notes its other tables are NOT watched, and joining ``customers``
+           there would trip the gate — correctly.
+        2. The token is a SALTED SHA-256 keyed on the phone, and ``wa_conversations`` stores only
+           the token. The salt rides as a BOUND PARAMETER (never interpolated), exactly as
+           ``lapsed_candidates`` and ``agent_optout_attribution`` already do — drift between those
+           three expressions fails CLOSED (no match), never open.
+
+        Returns [] when the campaign has no recipients with phones, which makes the reply half of
+        attribution find nothing. That is the ruling's direction: err UNDER.
+        """
+        tid = self._uuid(tenant_id)
+        with self._conn(tid, conn) as c:
+            rows = c.execute(
+                """
+                SELECT DISTINCT 'phone_tok_' || encode(
+                           sha256(convert_to(%(salt)s || ':' || c.phone_e164, 'UTF8')), 'hex'
+                       ) AS phone_token
+                  FROM campaign_recipients cr
+                  JOIN customers c
+                    ON c.tenant_id = cr.tenant_id AND c.id = cr.customer_id
+                 WHERE cr.tenant_id = %(tenant_id)s
+                   AND cr.campaign_id = %(campaign_id)s
+                   AND c.phone_e164 IS NOT NULL
+                """,
+                {"tenant_id": str(tid), "campaign_id": str(campaign_id), "salt": salt},
+            ).fetchall()
+        return [dict(r)["phone_token"] for r in rows]
+
     def agent_optout_attribution(
         self,
         tenant_id: UUID | str,
@@ -760,13 +807,36 @@ class CampaignsWrapper(TenantScopedTable):
     def set_status(
         self, tenant_id: UUID | str, campaign_id: str, status: str, *, conn: Any = None
     ) -> int:
-        """Set a campaign's status (tenant-predicated). Returns rows updated."""
+        """Set a campaign's status (tenant-predicated). Returns rows updated.
+
+        VT-754 scope 4 — **arming ``attribution_close_at`` on the flip to ``sent``.** The
+        attribution sweep scans ``WHERE attribution_close_at IS NOT NULL AND <= now()``
+        (``scheduled_triggers``), and NOTHING in ``src/`` ever set that column: 1 of 34 campaigns on
+        dev had it. So even a perfectly correct attribution join would never have run on schedule —
+        the fix to the join alone would have left the number at zero for a second, independent
+        reason, and it would have looked like the join was still wrong.
+
+        ``send_at + 7d`` is the ``campaign_plan`` schema's own documented validator
+        (``attribution_close_at == send_at + 7d``) and matches
+        ``attribution_writer.ATTRIBUTION_WINDOW_DAYS``, so no new number enters the system. Set ONLY
+        on the transition to ``sent`` and only when NULL, so a re-send or a status correction never
+        moves a window that is already running.
+        """
         tid = self._uuid(tenant_id)
         with self._conn(tid, conn) as c:
-            cur = c.execute(
-                "UPDATE campaigns SET status = %s WHERE tenant_id = %s AND id = %s",
-                (status, str(tid), str(campaign_id)),
-            )
+            if status == "sent":
+                cur = c.execute(
+                    "UPDATE campaigns SET status = %s, "
+                    "       attribution_close_at = COALESCE("
+                    "           attribution_close_at, now() + make_interval(days => %s)) "
+                    " WHERE tenant_id = %s AND id = %s",
+                    (status, ATTRIBUTION_WINDOW_DAYS, str(tid), str(campaign_id)),
+                )
+            else:
+                cur = c.execute(
+                    "UPDATE campaigns SET status = %s WHERE tenant_id = %s AND id = %s",
+                    (status, str(tid), str(campaign_id)),
+                )
             return cur.rowcount if cur.rowcount is not None else 0
 
     def get_status(

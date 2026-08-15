@@ -119,6 +119,24 @@ def _seed_campaign(
     return caid
 
 
+def _seed_click_signal(pool, tid: str, customer_id: str, *, clicked_at) -> None:
+    """VT-754 / D-C — an ATTRIBUTABLE SIGNAL. Since the ruling, a coincident sale earns nothing: the
+    recipient must have clicked a tracked link (or replied) BEFORE the purchase. Seeds the
+    customer_hook_links binding a real mint would write."""
+    token = f"tok-{uuid.uuid4().hex[:16]}"
+    with pool.connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO hook_links (token, tenant_id, source) VALUES (%s, %s, 'test')",
+            (token, tid),
+        )
+        cur.execute(
+            "INSERT INTO customer_hook_links "
+            "(tenant_id, customer_id, token, source, click_count, first_clicked_at, last_clicked_at) "
+            "VALUES (%s, %s, %s, 'test', 1, %s, %s)",
+            (tid, customer_id, token, clicked_at, clicked_at),
+        )
+
+
 def _seed_ledger_payment(
     pool, tid: str, customer_id: str, *, amount_paise: int, entry_date, entry_type: str,
     source_confidence: float = 0.9,
@@ -189,8 +207,15 @@ def _run_meta(pool, run_id: str) -> dict:
 
 @pytest.mark.integration
 def test_writer_produces_rows_and_filters_window_and_type(_dbpool) -> None:
-    """Producer writes one attributions row per in-window PAYMENT recipient;
-    'sale' entries + out-of-window payments are excluded."""
+    """VT-754 / D-C: one attributions row per in-window purchase THAT FOLLOWS AN ATTRIBUTABLE
+    SIGNAL. Out-of-window purchases are excluded, and so is a purchase that PRECEDES the signal —
+    a sale before the click is a coincidence with better timing, not a cause.
+
+    The old version of this test seeded a bare `entry_type='payment'` and asserted it was
+    attributed. That is precisely the over-claim the ruling rejects (a shop's sales continue whether
+    or not we messaged anyone), and it is also why the test never caught that no producer writes
+    'payment' at all — it supplied the value under test.
+    """
     tid = str(uuid.uuid4())
     cust = str(uuid.uuid4())
     _RECIPIENT[tid] = cust
@@ -201,23 +226,28 @@ def test_writer_produces_rows_and_filters_window_and_type(_dbpool) -> None:
         run_id = _seed_completed_run(_dbpool, tid)
         caid = _seed_campaign(_dbpool, tid, run_id, close_at=close_at, baseline_low_paise=10000)
 
-        # In-window payment → attributed.
+        # The signal: the recipient clicked, 3 days before the close.
+        _seed_click_signal(_dbpool, tid, cust, clicked_at=close_at - timedelta(days=3))
+
+        # In-window purchase AFTER the click → attributed. `sale` is what every production producer
+        # actually writes (ingest / upi_export / _image_adapter / imported_transactions).
         _seed_ledger_payment(_dbpool, tid, cust, amount_paise=50000,
-                             entry_date=close_at.date(), entry_type="payment")
-        # Out-of-window payment (30d before close) → NOT attributed.
+                             entry_date=close_at.date(), entry_type="sale")
+        # Out-of-window purchase (30d before close) → NOT attributed.
         _seed_ledger_payment(_dbpool, tid, cust, amount_paise=99999,
                              entry_date=(close_at - timedelta(days=30)).date(),
-                             entry_type="payment")
-        # In-window SALE (not a payment) → NOT attributed.
+                             entry_type="sale")
+        # In-window but BEFORE the click → NOT attributed (the purchase must follow the signal).
         _seed_ledger_payment(_dbpool, tid, cust, amount_paise=77777,
-                             entry_date=close_at.date(), entry_type="sale")
+                             entry_date=(close_at - timedelta(days=5)).date(),
+                             entry_type="sale")
 
         result = close_attribution(caid)
 
         rows = _attributions(_dbpool, caid)
         assert len(rows) == 1, rows
         assert rows[0]["attributed_paise"] == 50000
-        assert rows[0]["attribution_method"] == "window_match"
+        assert rows[0]["attribution_method"] == "tracked_link"
         assert abs(float(rows[0]["attribution_confidence"]) - 0.9) < 1e-4
         assert rows[0]["customer_id"] == cust
         assert result.total_arrr_paise == 50000
@@ -240,8 +270,10 @@ def test_back_annotation_and_sweep_end_to_end_thumbs_up(_dbpool) -> None:
         _seed_customer(_dbpool, tid, cust)
         run_id = _seed_completed_run(_dbpool, tid)
         caid = _seed_campaign(_dbpool, tid, run_id, close_at=close_at, baseline_low_paise=10000)
+        # VT-754 / D-C: a purchase earns credit only BEHIND an attributable signal.
+        _seed_click_signal(_dbpool, tid, cust, clicked_at=close_at - timedelta(days=2))
         _seed_ledger_payment(_dbpool, tid, cust, amount_paise=50000,
-                             entry_date=close_at.date(), entry_type="payment")
+                             entry_date=close_at.date(), entry_type="sale")
 
         close_attribution(caid)
 
@@ -298,8 +330,10 @@ def test_sweep_thumbs_down_when_outcome_below_baseline(_dbpool) -> None:
         _seed_customer(_dbpool, tid, cust)
         run_id = _seed_completed_run(_dbpool, tid)
         caid = _seed_campaign(_dbpool, tid, run_id, close_at=close_at, baseline_low_paise=100000)
+        # VT-754 / D-C: a purchase earns credit only BEHIND an attributable signal.
+        _seed_click_signal(_dbpool, tid, cust, clicked_at=close_at - timedelta(days=2))
         _seed_ledger_payment(_dbpool, tid, cust, amount_paise=20000,
-                             entry_date=close_at.date(), entry_type="payment")
+                             entry_date=close_at.date(), entry_type="sale")
 
         close_attribution(caid)
         from orchestrator.feedback.implicit_attribution import (
@@ -333,8 +367,10 @@ def test_context_builder_reads_real_recovered_paise(_dbpool) -> None:
         _seed_customer(_dbpool, tid, cust)
         run_id = _seed_completed_run(_dbpool, tid)
         caid = _seed_campaign(_dbpool, tid, run_id, close_at=close_at, baseline_low_paise=10000)
+        # VT-754 / D-C: a purchase earns credit only BEHIND an attributable signal.
+        _seed_click_signal(_dbpool, tid, cust, clicked_at=close_at - timedelta(days=2))
         _seed_ledger_payment(_dbpool, tid, cust, amount_paise=50000,
-                             entry_date=close_at.date(), entry_type="payment")
+                             entry_date=close_at.date(), entry_type="sale")
         close_attribution(caid)
 
         from orchestrator.context_builder import _build_recent_campaigns

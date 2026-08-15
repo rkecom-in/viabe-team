@@ -90,7 +90,34 @@ def close_attribution(campaign_id: UUID | str) -> AttributionCloseResult:
                 # VT-563: PRODUCE the attributions rows for this campaign before
                 # aggregating — recipients' payments in the attribution window. If
                 # attribution_close_at is unset, fall back to `now` for the window.
-                build_campaign_attributions(cur, tenant_id, cid, close_at or now)
+                # VT-754 / D-C: the reply half of attribution needs the recipients' phone
+                # tokens, which only the wrapper layer may compute (customers is VT-72-watched,
+                # and the token is a salted hash). A read failure degrades to the tracked-link
+                # half alone — erring UNDER, which is the ruling's direction.
+                reply_tokens: list[str] = []
+                try:
+                    import os
+
+                    from orchestrator.db.wrappers import CustomersWrapper
+
+                    salt = os.environ.get("TEAM_PHONE_HASH_SALT", "")
+                    if salt:
+                        reply_tokens = CustomersWrapper().recipient_phone_tokens(
+                            tenant_id, cid, salt=salt
+                        )
+                    else:
+                        logger.warning(
+                            "VT-754: TEAM_PHONE_HASH_SALT unset — attribution runs without the "
+                            "reply signal (tracked-link half only)"
+                        )
+                except Exception:  # noqa: BLE001 — never break the close over a signal read
+                    logger.warning(
+                        "VT-754: recipient phone-token read failed — attribution runs without the "
+                        "reply signal", exc_info=True,
+                    )
+                build_campaign_attributions(
+                    cur, tenant_id, cid, close_at or now, reply_tokens=reply_tokens
+                )
 
                 # Aggregate produced + any pre-existing rows. SUM is NULL-safe.
                 cur.execute(
