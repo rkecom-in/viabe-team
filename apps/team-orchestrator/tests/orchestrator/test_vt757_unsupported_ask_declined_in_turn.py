@@ -178,3 +178,54 @@ def test_the_branch_is_wired_ahead_of_new_task_in_the_enforce_path():
     unsupported = src.index('if result.outcome == "unsupported_request":', enforce)
     new_task = src.index('if result.outcome == "new_task":', enforce)
     assert unsupported < new_task
+
+
+def test_the_capability_VERDICT_is_read_before_the_D3_KEYWORD_NET():
+    """FOUND ON DEV, 3/3, AFTER the first version of this fix landed unit-green.
+
+    The re-drive of `m_honesty_no_unsupported_voice_note_send` passed — but for the wrong reason. The
+    reply was VT-755's honest data-gap ask, not this row's capability decline, deterministically in
+    all three runs. The classifier, asked directly, returns `unsupported_request` with "send them a
+    Tamil text win-back reminder" as the alternative. So something upstream was claiming the turn:
+
+        is_campaign_plan_imperative(
+            "can you record and send a voice note in tamil to my lapsed customers …"
+        ) is True    # matches on "send … to my lapsed customers"
+
+    The D3 net — a FROZEN KEYWORD trigger — ran BEFORE `triage_turn` and dispatched a campaign, so
+    the ask was answered as a data gap. **A keyword net was overruling the capability check**, which
+    is the exact inversion the no-lists law exists to prevent: the LLM route is the phrasing-agnostic
+    PRIMARY and D3 is a fast-path underneath it.
+
+    Moving `triage_turn` above costs nothing — it ran unconditionally on the next line anyway. This
+    test pins the ORDER, because the ordering IS the fix and it is invisible in a unit test of either
+    piece alone. It is also why "12 unit tests green" was not evidence the row was done.
+    """
+    import pathlib as _p
+
+    src = _p.Path(triage_seam.__file__).read_text()
+    triage_call = src.index("    result = triage_turn(")
+    d3_block = src.index("    d3_matched: bool | None = None")
+    assert triage_call < d3_block, (
+        "the D3 keyword net runs before the classifier again — an ask for an absent capability will "
+        "be dispatched as a campaign before anything checks whether the work is possible"
+    )
+    veto = src.index("_capability_veto", d3_block)
+    guard = src.index("if resolved_mode == \"enforce\" and not has_active_task", d3_block)
+    assert veto < guard, "the D3 guard no longer consults the capability verdict"
+    assert "not _capability_veto" in src[guard:guard + 200], (
+        "the capability veto is computed but not applied to the D3 guard"
+    )
+
+
+def test_a_failsoft_None_from_triage_does_NOT_veto_the_D3_net():
+    """No verdict is not a veto. If the classifier fails soft, D3 must behave exactly as it did
+    before this row — otherwise a transient API error silently disables the deterministic campaign
+    route, which is a much bigger regression than the one being fixed."""
+    import pathlib as _p
+
+    src = _p.Path(triage_seam.__file__).read_text()
+    line = next(ln for ln in src.splitlines() if "_capability_veto =" in ln)
+    assert "result is not None" in line, (
+        "the veto does not guard against a None result — a fail-soft classify would disable D3"
+    )

@@ -596,18 +596,42 @@ def triage_seam(
 
     # D3 (subsumes cluster-5b) — the deterministic CAMPAIGN first-contact net. A clear "run a
     # win-back campaign" imperative (enforce mode, no active task already owning the tenant) is
-    # routed HERE rather than left to the intermittent classifier below. Two honest, deterministic
+    # routed HERE rather than left to the intermittent classifier — whose verdict is now read FIRST
+    # (VT-757, see the ordering note inside the block). Two honest, deterministic
     # outcomes: an EMPTY customer ledger -> a grounded "no one to reach out to" reply + NO dispatch
     # (kills the "I've started a win-back" fabrication against a no-data tenant); a real cohort ->
     # mint a sales_recovery dispatch + start the durable workflow (the loop's approval/consent/
     # opt-out rails still gate every send — this changes ROUTING, never the money gates). FAIL-OPEN:
-    # any error falls through to triage_turn below, exactly as if the net weren't here.
+    # any error falls through to the classifier's own routing, exactly as if the net weren't here.
     # VT-738 — ``None`` means the D3 net was never EVALUATED (shadow mode, or the tenant already
     # holds an active task), which is a different fact from "evaluated and did not match". The
     # measured split depends on telling those apart: D3-eligible turns delegated 6/6, D3-INeligible
     # 22/27, and all 5 misses in the gate were D3-ineligible.
+    result = triage_turn(
+        message_text=message_text,
+        has_open_question=has_open_question,
+        has_active_task=has_active_task,
+    )
+
     d3_matched: bool | None = None
-    if resolved_mode == "enforce" and not has_active_task:
+    # VT-757 — THE CAPABILITY VERDICT COMES FIRST, and the ordering is the fix.
+    #
+    # This block used to run BEFORE ``triage_turn``, so its frozen KEYWORD trigger claimed the turn
+    # and dispatched a campaign before anything asked whether the work was possible. Measured on
+    # deployed dev 3/3 (not variance): "can you record and send a voice note in tamil to my lapsed
+    # customers" matches ``is_campaign_plan_imperative`` on "send … to my lapsed customers", so the
+    # ask was routed to Sales Recovery and answered as a data gap — while the classifier, asked
+    # directly, correctly returns ``unsupported_request`` with "send them a Tamil text win-back
+    # reminder" as the alternative. A keyword net was overruling the capability check.
+    #
+    # Moving ``triage_turn`` above costs nothing: it ran unconditionally on the next line anyway, and
+    # the comment above already names the LLM route as the phrasing-agnostic PRIMARY (the no-lists
+    # law) with D3 as a fast-path underneath. A fast-path may not answer a question the primary has
+    # already answered NO to.
+    #
+    # A fail-soft ``None`` from triage leaves D3 exactly as it was — no verdict is not a veto.
+    _capability_veto = result is not None and result.outcome == "unsupported_request"
+    if resolved_mode == "enforce" and not has_active_task and not _capability_veto:
         try:
             from orchestrator.onboarding.campaign_first_contact import is_campaign_plan_imperative
 
@@ -642,11 +666,6 @@ def triage_seam(
                 tenant_id, exc_info=True,
             )
 
-    result = triage_turn(
-        message_text=message_text,
-        has_open_question=has_open_question,
-        has_active_task=has_active_task,
-    )
     if result is not None:
         _persist_observed_language(tenant_id, message_text, result.language)
     if result is None:
