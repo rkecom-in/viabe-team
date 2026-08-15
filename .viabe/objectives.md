@@ -10,37 +10,35 @@
 > newest CL/VT touching it is STALE and must be reconciled BEFORE any status claim is made from
 > this file. The scoreboard exists so Fazal can see the war in one page; a stale scoreboard is
 > worse than none — it launders drift as status.
-> Last updated: **2026-08-14, CC (measurement-integrity + stall-class pass)** — CURRENT STATE:
-> **The instrument that produced every "delegation miss" number was wrong, and fixing it found the
-> defect underneath.** VT-753 CLOSED: the harness claimed ROUTING verdicts from a 150s settle budget
-> against ~390s of measured work, so latency was reported as delegation failure; it now settles to
-> TERMINAL and an unmeasured run reports INDETERMINATE instead of counting as a miss. Gate (c)
-> re-driven on the fixed instrument, same deployed build: **TIMEOUTs 4 -> 0, two of seven scenarios
-> were pure latency and are now CLEAN** (that 2-of-7 is the size of the historical error, stated
-> conservatively), five failures survive a settle-to-terminal — **and FOUR OF THOSE FIVE ARE ONE
-> DEFECT.** The retracted 24%/33%/40% figures were very likely this artifact. Gate (c) is still not
-> closable AS A RATE, for a better reason than before: the instrument now works and says the dominant
-> term is VT-755, so a rate measured today would be measuring VT-755 and calling it delegation.
-> **VT-755 (Critical, n=4): `pending_questions` has NO EMITTER.** The Manager parks `waiting_owner`
-> on a question it never sends, `correlate_reply` then consumes the owner's real instruction ("haan
-> theek hai, bhej do unhe" — SEND IT) as that invisible question's answer, and because
-> `waiting_owner` counts as TASK_ACTIVE while the reaper excludes it, **one undelivered question
-> queues every later objective behind it forever — the tenant's Manager ends, not degrades.** Dev
-> census: 4 of 7 parked tasks un-wakeable, 3 of 4 open questions stored as an unsendable hash, 1
-> tenant already wedged. THREE of its seven defects closed (text survives redaction · an undelivered
-> question can no longer be answered, mig 204 · a wedge now pages `critical`, mig 205); the EMITTER
-> needs one Fazal call (it is the Manager's voice and must route through the single emission choke).
-> Also CLOSED today: **VT-747** (an ack could silently ROLL BACK an owner approval — the row named 1
-> un-savepointed statement, the audit found 4; a try/except cannot make a statement fail-soft on a
-> shared transaction), **VT-746** (VT-735's Fast-budget tripwire could never fire — the CHECK refused
-> the kind; closed with a test that enumerates every declared kind against the database, which then
-> caught VT-755's own new kind), **VT-748** (a trial could expire with the owner told nothing and
-> nobody paged; and the capture audit's "BUSINESS RESULT: CAPTURED" was FALSE), **VT-745** (`clicked`
-> is UNOBTAINABLE, not unwired — no customer template can carry a link). ROSTERED: **VT-754** —
-> attribution joins `entry_type='payment'` and every producer writes `'sale'`, so **revenue
-> attribution has never recorded anything for any tenant**; needs a Fazal semantics call. Gate (d)
-> (full pack x3) RUNNING on the fixed instrument. Safety throughout: `sends=0` on every no-send
-> scenario, and all campaign recipients are real customers of the correct tenant. Prior header
+> Last updated: **2026-08-15, CC (M2 batch — nine rows built, pack x3 running)** — CURRENT STATE:
+> **M1 closed on measurement; M2 closed on the defects that measurement found.** Gate (d) ran the full
+> pack x3 on the VT-753-fixed instrument: 390 runs, 86.9/86.2/86.9% clean, **0 TIMEOUT and 0
+> INDETERMINATE across 870 steps**, all domain floors clean, 88.5% three-way consistency (vs gate
+> (c)'s 58%). That number is honest — NOT, as VT-759 originally claimed, an undercount caused by bad
+> asserts: of 33 English-literal asserts in code-mixed scenarios, exactly ONE was an instrument error.
+> **Nine rows built and pushed to dev this session** (`6b27ba89`, hook green at 6039 tests; migration
+> 206 applied on dev): **VT-758** a no-send safety assert now QUERIES instead of defaulting to zero
+> (11 scenarios declared it, 8 unguarded — every one could pass without touching the DB) · **VT-759**
+> enforce mode had no DEFER beat and no PROFILE-ACK beat, so a decline and a card acknowledgement both
+> fell to the brain (**the asserts were right; the row's own diagnosis was wrong**) · **VT-756** a
+> count is only honest when its source is known present, plus two more of the same shape the row had
+> not named (an empty CSV announced as "I've sent your customer list") · **VT-761** "Can we get this
+> connected?" is a request in the participle, and the mis-route stranded the NEXT turn too · **VT-752
+> item 1** stage boundaries across the run handoff (the row asked for `duration_ms` on existing steps;
+> that table structurally cannot span runs) · **VT-757** the capability check now runs BEFORE the ack —
+> and then had to run before a KEYWORD net that was overruling it · **VT-755 scopes 0+1** `ask()`
+> finally delivers through the single choke, the park is conditional on delivery, and raw model
+> remediation no longer reaches an owner (D-A) · **VT-754** attribution requires an attributable
+> signal, and scope 4 turned out to be a SECOND independent zero — nothing ever armed
+> `attribution_close_at` (D-C) · **VT-745** D-B part 2 verified already-satisfied and pinned; part 1
+> NOT built, deliberately (no production surface composes a customer-facing link at all, so a mint
+> caller would be the sixth built-and-called-by-nothing this fortnight — Fazal's call which surface
+> earns it). Four fixed scenarios re-driven on dev and proven AT THE MECHANISM, not just the exit
+> code; **VT-757 passed for the WRONG REASON first** (a different fix in the same batch produced the
+> passing text), now a standing evidence rule. **Full pack x3 RUNNING** on the post-M2 build; one
+> report when it lands. Open and unblocked-but-unbuilt: VT-755 scope 2 (no-progress re-ask), VT-752
+> items 2-5, VT-754 scope 5 (18 stale dev rows), VT-745 part 1.
+> Prior header
 > (2026-08-06, superseded): **VT-734 — CURRENT STATE: **VT-734
 > approval-breach FIXED + DEV-PROVEN** (mig 190; ordering invariant + repeat-refusal; breach repro
 > ×3 → pending/proposed/0-sent; the Manager's send claim was TRUE — CC's "fabricated claim" was its
