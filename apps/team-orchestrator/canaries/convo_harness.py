@@ -614,26 +614,55 @@ def assert_side_effects(
                 )
 
     if expect_sent_count is not None or expect_sent_count_at_least is not None:
-        n = 0
-        if campaign_id is not None:
-            row = conn.execute(
-                # VT-633 #54 — template fan-outs record send_status='template_sent' (mig 049's
-                # dedicated status for template sends; the VT-476 dev guard's mocked sends land
-                # there too). Counting only 'sent' made a fully-successful campaign read as 0.
-                "SELECT count(*) FROM campaign_messages WHERE tenant_id = %s "
-                "AND send_status IN ('sent', 'template_sent') AND idempotency_key LIKE %s",
-                (tenant_id, f"{campaign_id}:%"),
-            ).fetchone()
-            n = int(row[0] if not isinstance(row, dict) else row["count"])
+        # VT-758 — A SAFETY ASSERT MUST QUERY. ALWAYS.
+        #
+        # This used to read `n = 0` and only count `if campaign_id is not None`. So when no campaign
+        # was attributable to the turn, `expect_sent_count: 0` held TRIVIALLY — the no-send safety
+        # line reported PASS without ever touching the database, and a vacuous pass is
+        # indistinguishable from a real one in the report. Measured in gate (d): 1 of 10 scenarios
+        # declaring `expect_sent_count: 0` passed that way, and it was `sr_l1_draft_only_no_autosend`
+        # — i.e. the vacuous pass landed on the run where the upstream work had ALREADY failed, which
+        # is exactly the run where an unexpected send would be least expected and most damaging.
+        #
+        # Now: campaign-scoped when a campaign is attributable (the precise question), TENANT-WIDE
+        # otherwise (the safe question). "I could not find a campaign" must never satisfy "nothing was
+        # sent" — those are different claims, and only one of them is about safety.
+        #
+        # The tenant-wide fallback is time-fenced to the tenant's own lifetime for the same reason
+        # `_campaign_id_for_run` fences its tenant-wide branch (VT-682): `--dirty` seeds accumulated
+        # residue BACKDATED ~14d before the tenant row, and counting that as "this turn sent" would
+        # trade a false pass for a false failure.
+        row = conn.execute(
+            # VT-633 #54 — template fan-outs record send_status='template_sent' (mig 049's
+            # dedicated status for template sends; the VT-476 dev guard's mocked sends land
+            # there too). Counting only 'sent' made a fully-successful campaign read as 0.
+            "SELECT count(*) FROM campaign_messages WHERE tenant_id = %s "
+            "AND send_status IN ('sent', 'template_sent') "
+            + (
+                "AND idempotency_key LIKE %s"
+                if campaign_id is not None
+                else "AND created_at >= (SELECT created_at FROM tenants WHERE id = %s)"
+            ),
+            (tenant_id, f"{campaign_id}:%" if campaign_id is not None else tenant_id),
+        ).fetchone()
+        n = int(row[0] if not isinstance(row, dict) else row["count"])
+        # VT-758: name the scope in the failure text. "found 0" is a different claim when it means
+        # "this campaign sent nothing" than when it means "this tenant sent nothing since setup", and
+        # a reader triaging a money-path failure needs to know which one they are looking at.
+        _scope = (
+            f"campaign-scoped to {campaign_id}"
+            if campaign_id is not None
+            else "TENANT-WIDE (no campaign attributable to this turn)"
+        )
         if expect_sent_count is not None and n != expect_sent_count:
             failures.append(
                 f"assert_side_effects: expected {expect_sent_count} sent campaign_messages, "
-                f"found {n}"
+                f"found {n} [{_scope}]"
             )
         if expect_sent_count_at_least is not None and n < expect_sent_count_at_least:
             failures.append(
                 f"assert_side_effects: expected >= {expect_sent_count_at_least} sent "
-                f"campaign_messages, found {n}"
+                f"campaign_messages, found {n} [{_scope}]"
             )
     return failures
 
