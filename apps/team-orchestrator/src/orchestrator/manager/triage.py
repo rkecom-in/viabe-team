@@ -46,6 +46,28 @@ _MAX_TOKENS = 200
 _PROMPT_PATH = Path(__file__).parent / "prompts" / "manager_triage.md"
 _TRIAGE_SYSTEM_PROMPT = _PROMPT_PATH.read_text(encoding="utf-8")
 
+
+def _system_prompt() -> str:
+    """The triage prompt with the DECLARED CAPABILITY SURFACE appended (VT-757).
+
+    Appended at call time, generated from ``CAPABILITY_REGISTRY``, rather than pasted into the
+    prompt file: a capability added, retired, or flipped to ``disabled`` must not leave the
+    classifier judging against a stale surface. A stale surface here produces a CONFIDENT wrong
+    answer in the worst direction — declining something we can do — which nobody reports, because
+    owners do not complain about work they were told was impossible.
+
+    Fail-soft: if the surface cannot be rendered, fall back to the base prompt. The classifier then
+    has no basis for ``unsupported_request`` and simply will not use it — the pre-VT-757 behaviour,
+    which is the right thing to degrade to.
+    """
+    try:
+        from orchestrator.capability.surface import render_capability_surface
+
+        return f"{_TRIAGE_SYSTEM_PROMPT}\n\n{render_capability_surface()}\n"
+    except Exception:  # noqa: BLE001
+        logger.warning("VT-757: capability surface render failed — triage runs without it")
+        return _TRIAGE_SYSTEM_PROMPT
+
 _CODE_FENCE_RE = re.compile(
     r"^\s*```(?:json)?[ \t]*\n?(?P<body>.*?)\n?```\s*$", re.DOTALL | re.IGNORECASE
 )
@@ -56,7 +78,13 @@ def _strip_code_fence(raw: str) -> str:
     return match.group("body").strip() if match is not None else raw
 
 
-TriageOutcome = Literal["direct_reply", "answer_pending", "new_task", "task_status", "cancel_task"]
+TriageOutcome = Literal[
+    "direct_reply", "answer_pending", "new_task", "task_status", "cancel_task",
+    # VT-757 — the ask requires a capability the Manager does not have. Answered IN-TURN with an
+    # honest decline; never dispatched, because dispatching is what put "Got it — I'm on it" in
+    # front of an owner who had asked for something impossible.
+    "unsupported_request",
+]
 
 # VT-657 (option C) — a sub-classification of a ``new_task`` turn. The LLM (not a keyword list —
 # Fazal no-lists STANDING 2026-07-15) decides whether a new task is a win-back / customer-recovery
@@ -85,6 +113,12 @@ class TriageResult(BaseModel):
     reasoning: str = ""
     task_kind: TaskKind = "general"
     language: TurnLanguage = "en"
+    # VT-757 — owner-facing phrases, meaningful ONLY when outcome == "unsupported_request". Both
+    # default empty so an older prompt (or any other outcome) parses unchanged. The decline SENTENCE
+    # is assembled deterministically by the seam; these are the two slots that must be in the
+    # owner's own terms, which is a language judgment and therefore the model's.
+    unsupported_ask: str = ""
+    nearest_supported: str = ""
 
 
 def triage_turn(
@@ -107,7 +141,7 @@ def triage_turn(
     try:
         raw = _call(
             _TRIAGE_TIER,
-            system=_TRIAGE_SYSTEM_PROMPT,
+            system=_system_prompt(),
             user=user_content,
             max_tokens=_MAX_TOKENS,
             agent="triage",

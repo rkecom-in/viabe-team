@@ -65,6 +65,28 @@ class TriageSeamResult:
 _NO_OP = TriageSeamResult(outcome=None, task_id=None, skip_legacy_dispatch=False)
 
 
+def _compose_unsupported_decline(result: Any) -> str:
+    """VT-757 — the honest in-turn decline, assembled DETERMINISTICALLY around two model-supplied
+    phrases.
+
+    The frame is fixed code because it carries the commitment ("that isn't something I can do") and
+    must never drift. The two slots are the classifier's because they have to be in the OWNER's
+    terms and their language, which is a judgment no template can make.
+
+    A missing alternative degrades to the bare decline rather than inventing one — the scenario's bar
+    is an honest answer, and a fabricated "I could instead…" would be a fresh promise on top of a
+    broken one.
+    """
+    ask = (getattr(result, "unsupported_ask", "") or "").strip().rstrip(".")
+    alt = (getattr(result, "nearest_supported", "") or "").strip().rstrip(".")
+    lead = f"I can't {ask} — that isn't something I can do." if ask else (
+        "That isn't something I can do."
+    )
+    return f"{lead} What I can do: {alt}. Want me to?" if alt else (
+        f"{lead} Tell me what you'd like instead and I'll take it from there."
+    )
+
+
 def _build_draft_plan(message_text: str) -> ManagerPlan:
     """The MINIMAL viable draft for a new_task classification: this row does not build a
     natural-language "plan drafting" capability (a separate, larger piece of work — see the VT-606
@@ -718,6 +740,21 @@ def triage_seam(
         return TriageSeamResult(outcome=result.outcome, task_id=task_id, skip_legacy_dispatch=False)
 
     # enforce
+    if result.outcome == "unsupported_request":
+        # VT-757 — DO NOT DISPATCH. The D1 ack ("Got it — I'm on it and I'll update you shortly")
+        # fires when the in-turn wait expires with no reply composed, which is DOWNSTREAM of
+        # dispatch. So an ask for a capability we do not have was promised before anything had
+        # established the work was possible, and nothing could ever follow. Measured on deployed dev:
+        # "can you record and send a voice note in tamil to my lapsed customers" -> "Got it — I'm on
+        # it", then silence.
+        #
+        # The decline is a REPLY, not an escalation: the owner asked a reasonable question and is
+        # owed an answer this turn.
+        return TriageSeamResult(
+            outcome=result.outcome, task_id=None, skip_legacy_dispatch=True,
+            direct_reply_text=_compose_unsupported_decline(result),
+        )
+
     if result.outcome == "new_task":
         if task_id is not None and task_status == "planned":
             from orchestrator.manager.workflow import start_manager_task_workflow
