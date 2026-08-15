@@ -60,6 +60,34 @@ _CONNECT_STATE_RE = re.compile(
     r"\b(connect(ed|ion)|linked|synced|hooked\s*up)\b",
     re.IGNORECASE,
 )
+# VT-761 — A REQUEST WRITTEN IN THE PARTICIPLE IS STILL A REQUEST.
+#
+# The STATUS/IMPERATIVE split keys on verb FORM, so "can we get this connected?" — a request to
+# connect — matched only _CONNECT_STATE_RE and was answered as a status QUESTION: *"No — your Google
+# Sheet isn't connected yet. Want me to set it up?"*. This module's own docstring lists that exact
+# phrasing as one it exists to catch, and the split then routed it to the branch that cannot mint.
+#
+# Measured deterministic 3/3 in gate (d) (i_sheets_mapping_confirm_happy_path), and the cost was not
+# one bad turn: with no mint, no phase_2_auth was armed, so the owner's NEXT message — "Done, I've
+# connected it" — never reached the resume gate that would have re-read the state. It fell to this
+# same status branch and got the SAME sentence back, byte-identical. The owner answered and nothing
+# changed.
+#
+# This is the ENGLISH CAUSATIVE construction (get/make/have + object + past participle), not a list
+# of phrasings: a REQUEST FRAME (modal / let's / please / a want-need verb) followed by a causative
+# verb governing the connect participle. The request frame is what keeps a genuine status question
+# out — "did you get it connected?" and "have you connected it?" carry a causative but no request
+# frame, so they stay with the status branch where they belong.
+_CONNECT_REQUEST_PARTICIPLE_RE = re.compile(
+    r"\b(?:can|could|will|would|shall|should|let'?s|lets|please|pls|help\s+me|"
+    r"want(?:\s+to)?|need(?:\s+to)?|karo|kar\s*do|karwa\s*do)\b"
+    r"[^.?!]{0,40}?"
+    r"\b(?:get|getting|got|make|making|have|having)\b\s+"
+    r"(?:this|it|that|these|those|them|my|our|the)\b"
+    r"[^.?!]{0,30}?"
+    r"\b(?:connect(?:ed)?|link(?:ed)?|sync(?:ed)?|hooked\s*up|set\s*up|setup)\b",
+    re.IGNORECASE,
+)
 _SHEETS_RE = re.compile(r"\b(google\s*sheet|sheets?|spreadsheet)\b", re.IGNORECASE)
 _SHOPIFY_RE = re.compile(r"\bshopify\b", re.IGNORECASE)
 
@@ -393,7 +421,11 @@ def maybe_start_connector_onboarding(
                 "routed": "connector_third_party_declined",
             }
 
-        is_imperative = bool(_CONNECT_IMPERATIVE_RE.search(text))
+        # VT-761: a request framed with a causative participle ("can we get this connected?") is an
+        # IMPERATIVE, not a status question — see _CONNECT_REQUEST_PARTICIPLE_RE.
+        is_imperative = bool(
+            _CONNECT_IMPERATIVE_RE.search(text) or _CONNECT_REQUEST_PARTICIPLE_RE.search(text)
+        )
         is_state = bool(_CONNECT_STATE_RE.search(text))
         is_data_pull = bool(_OWNER_DATA_PULL_RE.search(text))  # DF1(a)
         if not (is_imperative or is_state or is_data_pull):
