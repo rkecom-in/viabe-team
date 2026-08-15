@@ -1,21 +1,26 @@
-"""VT-745 — the click signal is unobtainable, and this test keeps that statement honest.
+"""VT-745 — the click signal has no feed yet, and this test keeps that statement honest.
 
-WHY THIS FILE EXISTS INSTEAD OF A FIX. VT-745 was rostered as "mint the customer hook link wherever a
-customer-facing link goes out". Investigation 2026-08-14 found that premise is false in two independent
-ways:
+**RETRACTION, 2026-08-15.** This file previously said the signal was *"unobtainable through any channel
+this product has"*. Fazal's question — "isn't that exchange inside the 24h window?" — showed that was
+too absolute (ruling D-B, CL-2026-08-15-three-m2b-rulings): an IN-SESSION exchange has an open window,
+so a free-form message needs no template and could carry a tracked link today. "Unobtainable" was
+wrong. What is true is narrower and worse-sounding than a channel limitation:
 
-  1. No customer-audience template declares a URL/link variable, so there is nowhere in an approved
-     customer message to put a tracked link. (`trial_subscribe_link`, the only link-bearing template,
-     is audience=owner.) Free-form is not an escape — it needs an open 24h window and a win-back
-     targets lapsed customers by definition.
-  2. `GET /r/{token}` redirects to the tenant's own `wa.me`. It is an inbound-acquisition primitive for
-     surfaces OUTSIDE WhatsApp; sending it to a customer already in WhatsApp redirects them to where
-     they already are.
+  1. No customer-audience template declares a URL/link variable, so the COLD win-back — the case the
+     tier rule is actually about — has nowhere to put a link. (`trial_subscribe_link`, the only
+     link-bearing template, is audience=owner.) That template is Fazal-side, off the critical path.
+  2. **No production surface composes a customer-facing link at all.** Both customer send paths send
+     TEMPLATES, and the in-session replies in `integrations.customer_inbound` are three fixed
+     sentences. The in-session capability D-B identified is real; no feature uses it.
+  3. **The link-bearing CHANNELS are themselves unwired.** `/r/<token>` is an EMAIL/SMS acquisition
+     primitive (`integrations/hook_channels.py`, VT-288) and nothing calls those either. Sent to a
+     customer already in WhatsApp it redirects them to where they already are.
 
-So `clicked` is not un-wired, it is unobtainable through any channel this product has, and closing it
-is a Fazal/Meta decision (a new customer template with a URL variable, or amending the ratified tier
-rule to the two signals that exist). The honest deliverable is therefore the shortfall note at the point
-of the read — plus this test, so the note cannot rot.
+So the mint has no honest caller today, and manufacturing one would be the SIXTH
+built-exported-and-called-by-nothing this fortnight — the defect class this row was opened to prevent.
+The infrastructure is complete and waiting; what is missing is a customer-facing link worth sending,
+which is a product feature rather than a wiring gap. The honest deliverable is therefore the shortfall
+note at the point of the read — plus this test, so the note cannot rot.
 
 THE SHAPE, and why it is not a permanently-red test. A test that just asserted "the gap is open" would
 poison the green baseline and put an unearned failure in front of the promotion gate. This follows the
@@ -92,7 +97,10 @@ def test_the_shortfall_note_is_still_at_the_point_of_the_read():
         "the click-signal shortfall note was removed from send_frequency.py while the gap is still "
         "open — a reader now sees a three-signal tier rule that evaluates two"
     )
-    for evidence in ("audience=owner", "wa.me", "unobtainable"):
+    # D-B 2026-08-15: "unobtainable" is retracted, so the evidence tokens move with the claim. Each
+    # of these is one of the three findings a future reader needs in order NOT to re-roster "just
+    # wire the mint" — which is still the thing that does not work, for a more specific reason.
+    for evidence in ("audience=owner", "hook_channels", "no honest caller"):
         assert evidence in text, (
             f"the note lost its {evidence!r} evidence — without it the next reader will re-roster "
             "'just wire the mint', which is the thing that does not work"
@@ -138,3 +146,31 @@ def test_the_tier_definitions_still_declare_clicked_so_the_gap_is_a_gap():
         "two signals that exist, record that decision in the ledger and retire this test with it — "
         "do not let the ratified rule change by deletion."
     )
+
+
+def test_clicked_is_never_a_PRECONDITION_so_the_rule_counts_it_the_moment_it_appears():
+    """D-B part 2, asserted behaviourally rather than assumed.
+
+    The ruling asks that `clicked` count WHENEVER OBSERVED but never gate a tier. That needs no code
+    change today — `clicked` is one signal among several in a FIRST-MATCH test — but "needs no change"
+    is exactly the kind of claim that quietly stops being true. So: a customer with ONLY a click, no
+    reply and no read, must reach Tier A; and a customer with only a reply must still reach Tier A
+    with the click absent.
+    """
+    from orchestrator.agents.send_frequency import _TIER_ORDER, EngagementSignals
+
+    def _first_match(sig: EngagementSignals) -> str:
+        return next(t.name for t in _TIER_ORDER if t.matches(sig))
+
+    assert _first_match(EngagementSignals(clicked_age_days=3.0)) == "A", (
+        "a click alone no longer reaches Tier A — the signal has become a second-class citizen, "
+        "which is what D-B forbids"
+    )
+    assert _first_match(EngagementSignals(replied_age_days=3.0)) == "A", (
+        "a reply alone no longer reaches Tier A — clicked has become a PRECONDITION, the exact "
+        "inversion D-B rules out"
+    )
+    assert _first_match(EngagementSignals(clicked_age_days=60.0)) == "B", (
+        "a click outside 30d but inside 90d must still count, at Tier B"
+    )
+    assert _first_match(EngagementSignals()) == "C", "no signal must still resolve to the safe rung"

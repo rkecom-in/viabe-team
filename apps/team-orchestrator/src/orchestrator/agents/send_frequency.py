@@ -224,30 +224,51 @@ _assert_tier_order_invariants()
 #: interval and the most suppression — but it is NOT the rule Fazal ratified, so it must not be
 #: reported as if it were. Any analysis of tier distribution is analysing two signals, not three.
 #:
-#: **VT-745 INVESTIGATED 2026-08-14: "wire the mint into the send path" IS NOT AVAILABLE, and the
-#: reason is deeper than a missing caller.** Two independent findings:
+#: **VT-745, RE-RULED D-B 2026-08-15 (Fazal, CL-2026-08-15-three-m2b-rulings).** The earlier note
+#: here said the click signal was *"unobtainable through any channel this product has"*. Fazal's
+#: question — "isn't that exchange inside the 24h window?" — showed that was too absolute: an
+#: IN-SESSION exchange (the customer has messaged us) has an open window, so a free-form message
+#: needs no template and could carry a tracked link today. Only the COLD win-back case is blocked by
+#: the missing URL-variable template. The word "unobtainable" was wrong and is retracted.
+#:
+#: **What is true as of 2026-08-15, checked rather than reasoned about:**
 #:
 #:   1. **No customer-audience template can carry a link.** Every customer template in
 #:      ``config/twilio_templates.yaml`` (``team_winback_simple``, ``team_winback_offer``,
-#:      ``team_opt_out_confirmation``, …) declares only text positionals — none has a URL/link
-#:      variable. The one link-bearing template, ``trial_subscribe_link``, is audience=owner. So
-#:      there is nowhere in an approved customer message to PUT a tracked link. Free-form is not an
-#:      escape: it needs an open 24h window, and a win-back targets lapsed customers by definition.
-#:   2. **A hook link would not make sense in a WhatsApp message anyway.** ``GET /r/{token}``
-#:      redirects to the tenant's ``wa.me`` (``api/hook_links.py:68``) — it exists to pull someone
-#:      from OUTSIDE WhatsApp into a chat. Sending it to a customer already in WhatsApp redirects
-#:      them to where they already are.
+#:      ``team_opt_out_confirmation``, …) declares only text positionals; the one link-bearing
+#:      template, ``trial_subscribe_link``, is audience=owner. So the COLD send — the case the tier
+#:      rule is actually about — still has nowhere to put a link. That template is Fazal-side, at
+#:      leisure, off the critical path (D-B part 3).
+#:   2. **No production surface composes a customer-facing link at all**, in-session or otherwise.
+#:      Both customer send paths (``customer_send.agent_send_draft`` and the campaign executor) send
+#:      TEMPLATES; the in-session replies in ``integrations.customer_inbound`` are three fixed
+#:      sentences with no link. So the in-session capability D-B correctly identified has no feature
+#:      using it yet.
+#:   3. **The link-bearing CHANNELS are themselves unwired.** ``/r/<token>`` is an EMAIL/SMS
+#:      acquisition primitive (``integrations/hook_channels.py``, VT-288) that pulls someone from
+#:      outside WhatsApp into a chat — and nothing calls those channel functions either. Sending the
+#:      link to a customer already in WhatsApp redirects them to where they already are.
 #:
-#: So ``clicked`` is not "unwired", it is **unobtainable through any channel this product has**.
-#: Closing it needs a Fazal/Meta decision — either a new customer template carrying a URL variable,
-#: or amending the ratified rule to the two signals that exist. Until one of those happens this note
-#: IS the deliverable, and ``test_vt745_click_signal_honesty.py`` fails the moment reality changes and
-#: this text does not (a production mint caller appears, or a customer template gains a link
-#: variable), so the note cannot rot into the next stale-status defect.
+#: **So the mint has no honest caller today, and manufacturing one would be the sixth
+#: built-exported-and-called-by-nothing this fortnight** — the exact defect class this row was opened
+#: to prevent. The infrastructure (mint + click recorder + RLS + purge registration) is complete and
+#: waiting; what is missing is a customer-facing link worth sending, which is a product feature, not
+#: a wiring gap.
 #:
-#: This is the fifth thing this week found built, exported and called by nothing (the O8 retrieval
-#: engine, ``prod_workflow_diagnosis``, two reverted wake gates). Writing the shortfall down here,
-#: at the point of the read, is the cheapest defence against the sixth.
+#: **D-B part 2 needs no code change, and that is deliberate rather than lucky.** ``clicked`` is one
+#: signal among several in a FIRST-MATCH tier test, never a precondition: the SQL selects
+#: ``clicked_age_s`` unconditionally and ``TierSpec.matches`` treats a NULL as simply not matching.
+#: The moment a click lands, Tier A starts counting it with no code change — asserted behaviourally
+#: in ``test_vt745_click_signal_honesty.py`` so it cannot regress into a precondition.
+#:
+#: Until a link-carrying surface exists the tiers still evaluate TWO signals, not three, and any
+#: analysis of tier distribution must say so. ``test_vt745_click_signal_honesty.py`` AUTO-REDS the
+#: moment reality changes and this text does not (a production mint caller appears, or a customer
+#: template gains a link variable), so the note cannot rot into the next stale-status defect.
+#:
+#: This was the fifth thing this week found built, exported and called by nothing (the O8 retrieval
+#: engine, ``prod_workflow_diagnosis``, two reverted wake gates). Writing the shortfall down here, at
+#: the point of the read, is the cheapest defence against the sixth.
 _ENGAGEMENT_SQL = f"""
 SELECT
     EXTRACT(EPOCH FROM (now() - (
