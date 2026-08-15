@@ -251,6 +251,11 @@ def _dispatch_specialist_step(
     outer loop's revise_step branch calls ``plan_store.replace_step`` with it), never silently
     discarded.
 
+    VT-752 item 1 — the boundary that closes the measurement: everything before this mark is
+    orchestration overhead, everything after it is the specialist actually working. The 11-18s model
+    call measured inside the SR agent sits on the far side of this line, which is how ~185s of
+    pre-specialist time stayed unattributed.
+
     Amendment A4 — thread_id + EVERY injected message id is scoped to ``(task_id, step_id,
     attempt)``: a revise_step re-dispatch increments ``attempt`` (see the workflow loop below), so
     it ALWAYS gets a fresh thread — never reused across attempts (the VT-602 class). A DBOS retry
@@ -287,6 +292,14 @@ def _dispatch_specialist_step(
 
     run_id = loop_run_id(task_id, step_id, attempt)
     thread_id = str(run_id)
+
+    from orchestrator.observability.stage_timing import mark_stage
+
+    mark_stage(
+        tenant_id, "specialist_dispatch", task_id=task_id, run_id=run_id,
+        detail={"specialist": specialist, "step_id": step_id, "attempt": attempt},
+    )
+
     specialist_hint = f" (targets the {specialist} specialist)" if specialist else ""
     messages = [
         SystemMessage(
@@ -1235,6 +1248,14 @@ def manager_task_workflow(tenant_id: str, task_id: str) -> str:
     rebuilds the same counter values by re-walking the same steps, never by re-deriving
     non-deterministic state itself.
     """
+    # VT-752 item 1 — the FIRST boundary the durable side can record. The gap between
+    # `workflow_start_requested` (written by triage, in the webhook process) and this mark IS the
+    # queue/handoff delay, and it was invisible: the two live in different runs, and pipeline_steps
+    # cannot span runs.
+    from orchestrator.observability.stage_timing import mark_stage
+
+    mark_stage(tenant_id, "workflow_picked_up", task_id=task_id)
+
     cycles = 0
     # Keyed by step_seq (NOT step_id): a revise_step application (round-3 MAJOR #4) replaces the
     # step on a BRAND NEW step_id every time (the old one is superseded, real history) — step_seq

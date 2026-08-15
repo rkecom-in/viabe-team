@@ -721,7 +721,18 @@ def triage_seam(
     if result.outcome == "new_task":
         if task_id is not None and task_status == "planned":
             from orchestrator.manager.workflow import start_manager_task_workflow
+            from orchestrator.observability.stage_timing import mark_stage
 
+            # VT-752 item 1 — the two boundaries on the WEBHOOK side of the handoff. `task_minted`
+            # is the first mark for this correlation, so every later stage's total_ms is measured
+            # from the moment the owner's ask became a durable task; the interval between this and
+            # `workflow_picked_up` (written by the DBOS workflow, in another process and another
+            # run) is the queue delay that pipeline_steps structurally cannot see.
+            mark_stage(
+                tenant_id, "task_minted", task_id=task_id, message_sid=message_sid,
+                detail={"task_kind": result.task_kind, "outcome": result.outcome},
+            )
+            mark_stage(tenant_id, "workflow_start_requested", task_id=task_id)
             start_manager_task_workflow(tenant_id, task_id)
             return TriageSeamResult(outcome=result.outcome, task_id=task_id, skip_legacy_dispatch=True)
         # 'queued' (an already-active task holds the slot) or plan-validation failed (task_id is
