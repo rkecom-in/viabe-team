@@ -48,12 +48,29 @@ def _plan_insufficient(*, remediation: str | None):
 
 
 def test_owner_actionable_gap_asks_the_owner_instead_of_revising() -> None:
+    """VT-755 / ruling D-A UPDATED THIS ASSERTION. It used to require the model's own
+    `suggested_remediation` to appear in the owner's question:
+
+        assert "connect your sales sheet" in ret.owner_question
+
+    D-A (Fazal 2026-08-15) rules the opposite — raw model remediation NEVER reaches an owner, because
+    `suggested_remediation` is free text written for an ENGINEERING audience ("backfill the customer
+    table"). The branch still ASKS rather than revising, which is what this row was about; what
+    changed is where the words come from.
+    """
     ret = adapt_campaign_plan_to_specialist_return(
         _TENANT, _plan_insufficient(remediation="connect your sales sheet")
     )
     assert ret.status == "needs_owner_input"
     assert ret.owner_question, "needs_owner_input REQUIRES a question (plan_models enforces it)"
-    assert "connect your sales sheet" in ret.owner_question
+    assert "connect your sales sheet" not in ret.owner_question, (
+        "the model's remediation prose reached the owner — VT-755/D-A forbids it"
+    )
+    assert "I can't build this yet" in ret.owner_question, (
+        "the question is no longer coming from the closed vocabulary in manager.owner_ask"
+    )
+    # The model's words are still recorded — INTERNALLY, where they belong.
+    assert "connect your sales sheet" in (ret.outcome_summary or "")
     assert ret.proposed_outcome is None, (
         "a proposed_outcome is what routed this to REVISE — it must not come back"
     )

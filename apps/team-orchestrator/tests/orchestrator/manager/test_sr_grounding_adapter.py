@@ -262,7 +262,15 @@ def test_adapt_insufficient_data_plan_asks_the_owner():
     ret = adapt_campaign_plan_to_specialist_return(str(uuid4()), plan)
     assert ret.status == "needs_owner_input"
     assert ret.reason_code == "insufficient_data"
-    assert ret.owner_question and "connect a POS/ledger integration" in ret.owner_question
+    # VT-755 / ruling D-A: the question must NOT carry the model's remediation prose — that field is
+    # written for an engineering audience. It comes from the closed vocabulary in manager.owner_ask,
+    # composed from the tenant's verifiable state. The diagnostic still reaches an operator via
+    # outcome_summary (asserted below), which is exactly the split D-A asks for.
+    assert ret.owner_question, "needs_owner_input still requires a question"
+    assert "connect a POS/ledger integration" not in ret.owner_question, (
+        "model remediation prose reached the owner — VT-755/D-A forbids it"
+    )
+    assert "I can't build this yet" in ret.owner_question
     # The fake proposal is what routed this to REVISE in the first place. It must not return.
     assert ret.proposed_outcome is None
     # The diagnostic detail still has to reach an operator, just not as a "proposed outcome".
