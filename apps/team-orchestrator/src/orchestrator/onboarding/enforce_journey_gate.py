@@ -422,6 +422,117 @@ def _maybe_post_profile_connect(
     return {"done": False, "routed_kind": "journey_connect_offer"}
 
 
+def _owner_lang(tenant_id: UUID | str) -> str:
+    """"hi" | "en" for the journey beats' two-variant templates, from the same locale source DF4 uses."""
+    try:
+        from orchestrator.owner_surface.freeform_acks import resolve_owner_locale
+
+        return "hi" if resolve_owner_locale(tenant_id) == "hi" else "en"
+    except Exception:  # noqa: BLE001 — locale is a courtesy; English is the safe default
+        logger.warning("enforce_journey_gate: locale read failed (fail-soft) tenant=%s", tenant_id)
+        return "en"
+
+
+def _maybe_post_profile_defer(
+    tenant_id: UUID | str, text: str, message_sid: str | None, recipient: str | None,
+    g: dict[str, Any],
+) -> dict[str, Any] | None:
+    """VT-759 — THE DEFER BEAT, which enforce mode did not have.
+
+    DF4 gave enforce mode the AFFIRM half of the readiness ask (a clear connect signal → an honest
+    offer). The DECLINE half was never ported, so an owner who says "nahi abhi nahi, baad mein
+    karenge" at ``ready_asked`` fell through to the brain, which improvised a reply with no flow
+    context. Measured on deployed dev 2026-08-15: route ``none``, surface ``manager``, reply
+    "Theek hai, abhi pause kar dete hain…" — semantically close, but composed rather than the
+    deterministic template, and it did not set ``__flow__ = deferred``, so the flow never became
+    RESUMABLE. The owner's decline was answered and then forgotten.
+
+    This is the half of the beat that carries the honesty obligation: ``_flow_defer`` states what is
+    still missing from the registry's ``plan_blocked_reason`` (the single source of truth,
+    CL-2026-07-03-plan-governance) instead of letting the brain guess, and it arms the resume.
+
+    Narrow, like DF4: the DETERMINISTIC decline floor only (``_is_decline and not _is_affirm``) —
+    never ``_resolve_readiness_intent``, whose ambiguous→affirm mapping is the wrong default here and
+    whose classifier call would put an LLM inside a deterministic beat. Anything ambiguous → None →
+    the brain.
+    """
+    from orchestrator.onboarding.journey import (
+        _FLOW_INTRO_SENT,
+        _FLOW_KEY,
+        _FLOW_READY_ASKED,
+        _FLOW_TRIAL_SENT,
+        _flow_defer,
+        _is_affirm,
+        _is_decline,
+    )
+
+    flow = (g.get("answers") or {}).get(_FLOW_KEY)
+    if flow not in (_FLOW_READY_ASKED, _FLOW_INTRO_SENT, _FLOW_TRIAL_SENT):
+        return None  # not a beat where "later" means defer → brain
+    if not (_is_decline(text) and not _is_affirm(text)):
+        return None  # ambiguous or affirmative → not ours (DF4 owns the affirm; the brain owns doubt)
+
+    # Opt-out/DSR ALWAYS wins — a STOP is not a "later".
+    from orchestrator.pre_filter_gate import matches_opt_out_or_dsr
+
+    if matches_opt_out_or_dsr(text):
+        return None
+    if not recipient:
+        return None  # nothing to answer to → fall through rather than go silent
+
+    result = _flow_defer(tenant_id, recipient, message_sid, _owner_lang(tenant_id))
+    logger.info("enforce_journey_gate: post-profile defer beat sent tenant=%s flow=%s", tenant_id, flow)
+    return result
+
+
+def _maybe_post_profile_ack_advance(
+    tenant_id: UUID | str, text: str, message_sid: str | None, recipient: str | None,
+    g: dict[str, Any],
+) -> dict[str, Any] | None:
+    """VT-759 — the PROFILE-CARD ACKNOWLEDGEMENT beat, also absent in enforce mode.
+
+    ``__flow__ = profile_previewed`` is reached in EVERY loop mode (the walker completes the journey
+    through rule C above), but DF4 explicitly excludes ``previewed``, so the owner's acknowledgement
+    of the profile card fell to the brain. Measured on deployed dev 2026-08-15: "haan bilkul, yehi
+    sahi hai" → *"Is approval ka exact plan ya option mujhe yahan dikh nahi raha; uska naam ya ek
+    line dobara bhej dijiye"* — the Manager answered a profile acknowledgement as though an APPROVAL
+    were pending and asked the owner to re-send something they never sent. A fabricated context and a
+    re-ask, on the turn right after the owner said yes.
+
+    The beat advances to the readiness ask ONLY — deliberately NOT the legacy
+    intro → trial-terms → offer chain, which is the machine DF4 declined (its single-pick Shopify
+    pitch is the measured fabrication). The trial terms themselves are NOT lost by skipping
+    ``_flow_agent_trial``: VT-722 states them at the ``data_inputs_enable`` chooser and records the
+    ``trial_terms`` assertion there, deterministically and mode-independently.
+
+    Guard: a non-interrogative AFFIRM floor hit. A QUESTION after the card stays the brain's (rule D
+    already routed it away before this runs); a decline is the defer beat's; anything ambiguous → None.
+    """
+    from orchestrator.onboarding.journey import (
+        _FLOW_KEY,
+        _FLOW_PREVIEWED,
+        _flow_ask_readiness,
+        _is_affirm,
+        _is_decline,
+    )
+
+    if (g.get("answers") or {}).get(_FLOW_KEY) != _FLOW_PREVIEWED:
+        return None
+    if not (_is_affirm(text) and not _is_decline(text)):
+        return None
+
+    from orchestrator.pre_filter_gate import matches_opt_out_or_dsr
+
+    if matches_opt_out_or_dsr(text):
+        return None
+    if not recipient:
+        return None
+
+    result = _flow_ask_readiness(tenant_id, recipient, message_sid, _owner_lang(tenant_id))
+    logger.info("enforce_journey_gate: profile-ack → readiness ask sent tenant=%s", tenant_id)
+    return result
+
+
 def maybe_handle_enforce_journey_turn(
     tenant_id: UUID | str, body: str, message_sid: str | None, recipient: str | None
 ) -> dict[str, Any] | None:
@@ -504,6 +615,16 @@ def maybe_handle_enforce_journey_turn(
         # anything else → None (the brain). This is the beat that, unhandled, fell to the async stall.
         if g is not None and g.get("status") == "complete":
             result = _maybe_post_profile_connect(tenant_id, text, recipient, g)
+            if result is not None:
+                return result
+
+            # VT-759 — the two beats DF4 left unported. DF4 owns the AFFIRM at ready_asked; these own
+            # the DECLINE (defer + arm the resume) and the profile-card ACKNOWLEDGEMENT (advance to
+            # the readiness ask). Both are deterministic-floor only; anything ambiguous → the brain.
+            result = _maybe_post_profile_defer(tenant_id, text, message_sid, recipient, g)
+            if result is not None:
+                return result
+            result = _maybe_post_profile_ack_advance(tenant_id, text, message_sid, recipient, g)
             if result is not None:
                 return result
 

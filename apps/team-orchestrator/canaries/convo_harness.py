@@ -59,6 +59,10 @@ VT-598 additions (the P3 exhaustive validation pack + hard-asserts confirmation 
     (substantively) JUST the D1 completed-no-reply fallback line — see ``is_d1_fallback_only``.
   - ``--json-report PATH`` on ``script``: appends a machine-readable transcript bundle (one entry
     per scenario run) to PATH, for ``canaries/transcript_judge.py`` to rubric-score.
+  - ``assert_is_question`` (VT-759, per-step flag, default False): fails when the assistant reply
+    asks the owner nothing (no '?' in the text). The language-agnostic way to assert a SPEECH ACT —
+    a re-confirm, a hand-back — where the alternative was an English literal that could only pass
+    when a code-mixed reply happened to drift English.
   - ``assert_run_reason`` / ``assert_run_reason_not`` (per-step flags, optional str): INVESTIGATED
     and found NOT SUPPORTED — see ``evaluate_assertions`` docstring. Wired as an explicit, always-
     failing assertion (never a silent no-op) so a scenario that sets either flag fails LOUDLY
@@ -228,6 +232,7 @@ def evaluate_assertions(
     assert_contains: list[str] | None = None,
     assert_not_contains: list[str] | None = None,
     assert_not_d1: bool = False,
+    assert_is_question: bool = False,
     assert_run_reason: str | None = None,
     assert_run_reason_not: str | None = None,
 ) -> list[str]:
@@ -268,6 +273,26 @@ def evaluate_assertions(
         failures.append(
             "assert_not_d1: reply is (substantively) just the D1 fallback line — no real answer "
             "was given"
+        )
+    if assert_is_question and "?" not in text and "？" not in text:
+        # VT-759 — the SPEECH ACT, asserted structurally instead of by vocabulary.
+        #
+        # The scenario that needed this asserted `assert_contains: ['sure']` to pin a re-confirm
+        # question ("are you sure you want this sent?"). That literal can only pass when the Manager
+        # happens to answer in English: these conversations are code-mixed on purpose (CL-443), so
+        # the assert was deciding on WHICH LANGUAGE the reply drifted into, not on what it did.
+        #
+        # A synonym list is not the fix — the standing no-lists rule is explicit that natural-language
+        # phrasing is infinite and enumerating it is the wrong shape. "Did the turn ASK something?" is
+        # finite, structural and language-agnostic: '?' is the same character in English, Hinglish and
+        # Devanagari (U+FF1F is the full-width form some IMEs emit).
+        #
+        # This is narrower than "asked the RIGHT question" on purpose. The rest of the requirement is
+        # already carried by observables that cannot drift with vocabulary: assert_not_contains for the
+        # false-send claim, and expect_sent_count for the send itself.
+        failures.append(
+            "assert_is_question: the reply asks the owner NOTHING — it neither re-confirms nor "
+            "hands the decision back (no '?' anywhere in the assistant text)"
         )
     if assert_run_reason is not None:
         failures.append(
@@ -1971,6 +1996,7 @@ def run_scenario_steps(
                 assert_contains=step.get("assert_contains"),
                 assert_not_contains=step.get("assert_not_contains"),
                 assert_not_d1=bool(step.get("assert_not_d1", False)),
+                assert_is_question=bool(step.get("assert_is_question", False)),
                 assert_run_reason=step.get("assert_run_reason"),
                 assert_run_reason_not=step.get("assert_run_reason_not"),
             )
@@ -2087,6 +2113,7 @@ def run_scenario_steps(
                 # confirmation is the loop's outcome report, which the sweep just recovered).
                 if _r.label != "FAIL" or not (
                     _step.get("assert_contains") or _step.get("assert_not_d1")
+                    or _step.get("assert_is_question")
                     or any(f.startswith("assert_no_silent") for f in _r.reasons)
                 ):
                     continue
@@ -2097,6 +2124,7 @@ def run_scenario_steps(
                     assert_contains=_step.get("assert_contains"),
                     assert_not_contains=_step.get("assert_not_contains"),
                     assert_not_d1=bool(_step.get("assert_not_d1", False)),
+                    assert_is_question=bool(_step.get("assert_is_question", False)),
                     assert_run_reason=_step.get("assert_run_reason"),
                     assert_run_reason_not=_step.get("assert_run_reason_not"),
                 )

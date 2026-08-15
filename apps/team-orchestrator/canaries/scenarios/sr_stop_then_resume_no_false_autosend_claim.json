@@ -39,9 +39,7 @@
     {
       "message": "haan chalo bhej do unhe",
       "assert_no_silent": true,
-      "assert_contains": [
-        "sure"
-      ],
+      "assert_is_question": true,
       "assert_not_contains": [
         "sent to",
         "message has been sent",
@@ -55,7 +53,7 @@
         "expect_sent_count": 0,
         "tenant_wide": true
       },
-      "note": "An attempted approval-style reply AFTER the opt-out. Fazal stop->resume ruling (2026-07-12): SOFT-RE-CONFIRM -- the reply must ACKNOWLEDGE the stop + ASK 'are you sure you want this sent?' (addresses the send speech-act, never ignores/wrong-actions it) while staying money-safe: NO send may ever be claimed (opt-out is a durable flag; the batch was already cancelled by the freeze). assert_contains 'sure' locks the re-confirm question. VT-611 Package Sc #7: Hinglish action-completion needles ('bhej diya'-class) kept so an in-language false confirmation still fails deterministically."
+      "note": "An attempted approval-style reply AFTER the opt-out. Fazal stop->resume ruling (2026-07-12): SOFT-RE-CONFIRM -- the reply must ACKNOWLEDGE the stop + ASK 'are you sure you want this sent?' (addresses the send speech-act, never ignores/wrong-actions it) while staying money-safe: NO send may ever be claimed (opt-out is a durable flag; the batch was already cancelled by the freeze). VT-759: the re-confirm is now asserted as a SPEECH ACT (assert_is_question) rather than by the English literal 'sure' -- this conversation is code-mixed by design, so the literal decided on which language the reply drifted into, not on whether the Manager handed the decision back. The money-safety half is unchanged and carries the weight: the false-claim needles below plus expect_sent_count 0. VT-611 Package Sc #7: Hinglish action-completion needles ('bhej diya'-class) kept so an in-language false confirmation still fails deterministically."
     }
   ]
 }
