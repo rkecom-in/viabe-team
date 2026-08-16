@@ -152,8 +152,12 @@ def test_generous_cap_is_left_alone(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_anthropic_and_google_and_glm_keep_the_callers_cap(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Only the Responses-API providers spend the cap on reasoning; everywhere else the caller's
-    hand-tuned number is the contract (a 16-token taxonomy key must stay 16 tokens)."""
+    """The Responses-API providers and (VT-762) the Anthropic models that THINK BY DEFAULT spend the
+    cap on reasoning; everywhere else the caller's hand-tuned number is the contract (a 16-token
+    taxonomy key must stay 16 tokens). The classifier tier defaults to a non-thinking model."""
+    monkeypatch.setenv("TEAM_MODEL_CLASSIFIER", "claude-haiku-4-5")
+    assert p.resolve_chat_model("classifier", agent="t", max_tokens=16).max_tokens == 16
+    monkeypatch.setenv("TEAM_MODEL_CLASSIFIER", "claude-opus-4-8")
     assert p.resolve_chat_model("classifier", agent="t", max_tokens=16).max_tokens == 16
     monkeypatch.setenv("TEAM_MODEL_CLASSIFIER", "gemini-3.5-flash")
     assert p.resolve_chat_model("classifier", agent="t", max_tokens=16).max_output_tokens == 16
@@ -329,3 +333,22 @@ def test_response_text_modes() -> None:
     resp = _StubResponse([{"type": "text", "text": "a"}, {"type": "text", "text": "b"}])
     assert s.response_text(resp) == "ab"
     assert s.response_text(resp, mode="last") == "b"
+
+
+def test_anthropic_thinking_by_default_models_get_the_reasoning_floor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """VT-762 — the VT-732 trap on the OTHER provider. claude-sonnet-5 emits thinking blocks without
+    being asked and they count against max_tokens; observed on dev: triage at 200 returned
+    blocks=['thinking'], stop_reason='max_tokens', no text, and fell soft to legacy dispatch. The
+    system looked fine and quietly ran without its classifier — the exact class the Responses-API
+    floor was built for. A cap is not a spend: the floor bills nothing unless the model emits more."""
+    # Only claude-sonnet-5 is in the supported-model set today; the marker list also carries the
+    # opus-5 / fable-5 names so the floor follows the family the day either is added.
+    for model in ("claude-sonnet-5",):
+        monkeypatch.setenv("TEAM_MODEL_COMPLEX", model)
+        assert p.resolve_chat_model("complex", agent="t", max_tokens=200).max_tokens == (
+            p._REASONING_MIN_MAX_TOKENS
+        ), f"{model} thinks by default and must get the floor"
+    monkeypatch.setenv("TEAM_MODEL_COMPLEX", "claude-sonnet-5")
+    assert p.resolve_chat_model("complex", agent="t", max_tokens=4096).max_tokens == 4096

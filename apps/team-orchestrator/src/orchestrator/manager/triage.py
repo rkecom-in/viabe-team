@@ -40,7 +40,11 @@ logger = logging.getLogger("orchestrator.manager.triage")
 _TRIAGE_TIER = "complex"
 # VT-657 — headroom for the added ``task_kind`` field so a verbose ``reasoning`` can never truncate
 # the JSON (a truncated envelope fails-soft to None -> legacy dispatch, which would silently
-# reintroduce the dither this fix removes). The model still emits ~35 tokens; this is only a cap.
+# reintroduce the dither this fix removes). VT-757 added two more fields; the JSON is now ~85
+# tokens. VT-762: on claude-sonnet-5 the model THINKS BY DEFAULT and the thinking counts against
+# this cap — 200 was spent entirely on a thinking block, no text came back, and the turn fell soft
+# to legacy dispatch. ``provider._effective_max_tokens`` now floors the cap to 1024 on the models
+# that think unprompted (a cap, not a spend), so this number is the non-thinking-model contract.
 _MAX_TOKENS = 200
 
 _PROMPT_PATH = Path(__file__).parent / "prompts" / "manager_triage.md"

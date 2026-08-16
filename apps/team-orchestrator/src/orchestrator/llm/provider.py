@@ -173,7 +173,27 @@ _DEFAULT_MAX_TOKENS = 4096
 # The floor is a CAP, not a spend: raising it bills nothing extra unless the model actually emits
 # more, whereas truncation bills the reasoning AND throws the answer away. Applied only to the
 # Responses-API providers (openai / xai); anthropic, google and GLM keep the caller's number.
-_REASONING_MIN_MAX_TOKENS = 1024
+# VT-762 raised this 1024 -> 2048: with the floor at 1024, claude-sonnet-5 still cut a dual-intent
+# triage JSON mid-field 1 time in 24 (thinking spent ~950 of it). A cap, not a spend — the model
+# emits what it emits; a floor that is too low bills the thinking and discards the answer.
+_REASONING_MIN_MAX_TOKENS = 2048
+# VT-762 — the SAME trap on Anthropic, found the same way. "Anthropic's max_tokens does not behave
+# this way" above was true of the models the caps were tuned on. The Claude 5 family THINKS BY
+# DEFAULT (adaptive thinking, no ``thinking`` param needed), and its thinking blocks count against
+# ``max_tokens``. Observed on dev 2026-08-17: triage on claude-sonnet-5 at max_tokens=200 returned
+# ``blocks=['thinking']``, ``stop_reason='max_tokens'``, no text — 2 of 8 win-back asks fell soft to
+# legacy dispatch and the SR lane lost 6 scenarios to flips in the M2 pack. Anthropic bills the
+# thinking and throws the answer away, exactly like the Responses providers. Only the family that
+# thinks unprompted gets the floor; the non-thinking models keep the caller's hand-tuned cap
+# (some sites use it as a length limiter — see test_anthropic_and_google_and_glm_keep_the_callers_cap).
+_ANTHROPIC_THINKS_BY_DEFAULT_MARKERS = ("claude-sonnet-5", "claude-opus-5", "claude-fable-5")
+
+
+def _thinks_by_default(provider: str, model_id: str) -> bool:
+    """True for a model that emits thinking blocks WITHOUT being asked, so a small ``max_tokens``
+    can be spent entirely on thinking. Anthropic Claude 5 family; the Responses-API providers are
+    handled by the provider check in ``_effective_max_tokens`` already."""
+    return provider == "anthropic" and any(m in model_id for m in _ANTHROPIC_THINKS_BY_DEFAULT_MARKERS)
 # GLM (Z.ai) OpenAI-compatible endpoint. GLM_BASE_URL is the SINGLE self-host switch (see
 # _build_glm_chat_model); this is only the managed-z.ai fallback when that env var is unset.
 _GLM_DEFAULT_BASE_URL = "https://api.z.ai/api/paas/v4/"
@@ -382,19 +402,24 @@ def assert_tier_vars_configured() -> dict[str, str]:
     return resolved
 
 
-def _effective_max_tokens(provider: str, max_tokens: int, *, call_site: str) -> int:
-    """Raise a too-small cap to the reasoning floor on the Responses-API providers.
+def _effective_max_tokens(
+    provider: str, max_tokens: int, *, call_site: str, model_id: str = ""
+) -> int:
+    """Raise a too-small cap to the reasoning floor where the cap covers reasoning/thinking tokens:
+    the Responses-API providers, and (VT-762) the Anthropic models that think by default.
 
     See ``_REASONING_MIN_MAX_TOKENS``. Logged when it fires so the adjustment is visible rather than
     magic — a site whose cap is routinely floored is a site whose cap was written for a different
     provider, which is worth knowing.
     """
-    if provider not in ("openai", "xai") or max_tokens >= _REASONING_MIN_MAX_TOKENS:
+    if max_tokens >= _REASONING_MIN_MAX_TOKENS:
+        return max_tokens
+    if provider not in ("openai", "xai") and not _thinks_by_default(provider, model_id):
         return max_tokens
     logger.info(
-        "raising max_tokens %d -> %d for call_site=%s on provider=%s: the cap covers REASONING "
-        "tokens there, and a cap this small returns no visible text at all",
-        max_tokens, _REASONING_MIN_MAX_TOKENS, call_site, provider,
+        "raising max_tokens %d -> %d for call_site=%s on provider=%s model=%s: the cap covers "
+        "REASONING/THINKING tokens there, and a cap this small returns no visible text at all",
+        max_tokens, _REASONING_MIN_MAX_TOKENS, call_site, provider, model_id,
     )
     return _REASONING_MIN_MAX_TOKENS
 
@@ -489,7 +514,9 @@ def resolve_chat_model(
             "betas %s requested for provider %r — Anthropic-only; building without them", betas, provider
         )
 
-    max_tokens = _effective_max_tokens(provider, max_tokens, call_site=call_site or tier)
+    max_tokens = _effective_max_tokens(
+        provider, max_tokens, call_site=call_site or tier, model_id=model_id
+    )
 
     if provider == "anthropic":
         from langchain_anthropic import ChatAnthropic
