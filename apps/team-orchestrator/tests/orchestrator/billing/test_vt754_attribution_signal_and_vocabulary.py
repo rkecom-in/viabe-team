@@ -192,10 +192,12 @@ def test_a_reply_then_a_sale_IS_attributed_when_the_caller_supplies_the_token(_d
     with psycopg.connect(dsn, autocommit=True, row_factory=psycopg.rows.dict_row) as conn:
         tid = _tenant(conn)
         cust, camp = _seed_recipient_and_campaign(conn, tid)
+        from datetime import timedelta
+
         conn.execute(
             "INSERT INTO wa_conversations (tenant_id, phone_token, last_inbound_at) "
-            "VALUES (%s, %s, now() - interval '3 days')",
-            (tid, token),
+            "VALUES (%s, %s, %s)",
+            (tid, token, _close_at() - timedelta(days=3)),
         )
         _seed_sale(conn, tid, cust, 30000)
         with conn.cursor() as cur:
@@ -250,16 +252,27 @@ def _seed_recipient_and_campaign(conn, tid: str) -> tuple[str, str]:
 
 
 def _seed_sale(conn, tid: str, cust: str, paise: int, *, days_ago: int = 0) -> None:
+    """Dates are computed in PYTHON from the same UTC clock `_close_at()` uses — never DB `now()`.
+    The writer's window is `close_at.date()` in UTC; a DB session in IST puts `now()::date` one day
+    ahead between 00:00 and 05:30 IST, and the pre-push hook found exactly that (a sale dated
+    "tomorrow" fell outside the window at 02:46 IST). A test that passes only in daylight is worse
+    than one that fails honestly."""
+    from datetime import timedelta
+
+    day = (_close_at() - timedelta(days=days_ago)).date()
     conn.execute(
         "INSERT INTO customer_ledger_entries "
         "(tenant_id, customer_id, amount_paise, entry_type, entry_date, acquired_via, "
         " source_confidence, entry_key) "
-        "VALUES (%s, %s, %s, 'sale', (now() - make_interval(days => %s))::date, 'upi_gpay', 0.9, %s)",
-        (tid, cust, paise, days_ago, str(uuid.uuid4())),
+        "VALUES (%s, %s, %s, 'sale', %s, 'upi_gpay', 0.9, %s)",
+        (tid, cust, paise, day, str(uuid.uuid4())),
     )
 
 
 def _seed_click(conn, tid: str, cust: str, *, days_ago: int) -> None:
+    from datetime import timedelta
+
+    at = _close_at() - timedelta(days=days_ago)
     token = f"tok-{uuid.uuid4().hex[:16]}"
     conn.execute(
         "INSERT INTO hook_links (token, tenant_id, source) VALUES (%s, %s, 'test')", (token, tid)
@@ -267,9 +280,8 @@ def _seed_click(conn, tid: str, cust: str, *, days_ago: int) -> None:
     conn.execute(
         "INSERT INTO customer_hook_links "
         "(tenant_id, customer_id, token, source, click_count, first_clicked_at, last_clicked_at) "
-        "VALUES (%s, %s, %s, 'test', 1, now() - make_interval(days => %s), "
-        "        now() - make_interval(days => %s))",
-        (tid, cust, token, days_ago, days_ago),
+        "VALUES (%s, %s, %s, 'test', 1, %s, %s)",
+        (tid, cust, token, at, at),
     )
 
 
