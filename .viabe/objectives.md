@@ -10,34 +10,38 @@
 > newest CL/VT touching it is STALE and must be reconciled BEFORE any status claim is made from
 > this file. The scoreboard exists so Fazal can see the war in one page; a stale scoreboard is
 > worse than none — it launders drift as status.
-> Last updated: **2026-08-15, CC (M2 batch — nine rows built, pack x3 running)** — CURRENT STATE:
-> **M1 closed on measurement; M2 closed on the defects that measurement found.** Gate (d) ran the full
-> pack x3 on the VT-753-fixed instrument: 390 runs, 86.9/86.2/86.9% clean, **0 TIMEOUT and 0
-> INDETERMINATE across 870 steps**, all domain floors clean, 88.5% three-way consistency (vs gate
-> (c)'s 58%). That number is honest — NOT, as VT-759 originally claimed, an undercount caused by bad
-> asserts: of 33 English-literal asserts in code-mixed scenarios, exactly ONE was an instrument error.
-> **Nine rows built and pushed to dev this session** (`6b27ba89`, hook green at 6039 tests; migration
-> 206 applied on dev): **VT-758** a no-send safety assert now QUERIES instead of defaulting to zero
-> (11 scenarios declared it, 8 unguarded — every one could pass without touching the DB) · **VT-759**
-> enforce mode had no DEFER beat and no PROFILE-ACK beat, so a decline and a card acknowledgement both
-> fell to the brain (**the asserts were right; the row's own diagnosis was wrong**) · **VT-756** a
-> count is only honest when its source is known present, plus two more of the same shape the row had
-> not named (an empty CSV announced as "I've sent your customer list") · **VT-761** "Can we get this
-> connected?" is a request in the participle, and the mis-route stranded the NEXT turn too · **VT-752
-> item 1** stage boundaries across the run handoff (the row asked for `duration_ms` on existing steps;
-> that table structurally cannot span runs) · **VT-757** the capability check now runs BEFORE the ack —
-> and then had to run before a KEYWORD net that was overruling it · **VT-755 scopes 0+1** `ask()`
-> finally delivers through the single choke, the park is conditional on delivery, and raw model
-> remediation no longer reaches an owner (D-A) · **VT-754** attribution requires an attributable
-> signal, and scope 4 turned out to be a SECOND independent zero — nothing ever armed
-> `attribution_close_at` (D-C) · **VT-745** D-B part 2 verified already-satisfied and pinned; part 1
-> NOT built, deliberately (no production surface composes a customer-facing link at all, so a mint
-> caller would be the sixth built-and-called-by-nothing this fortnight — Fazal's call which surface
-> earns it). Four fixed scenarios re-driven on dev and proven AT THE MECHANISM, not just the exit
-> code; **VT-757 passed for the WRONG REASON first** (a different fix in the same batch produced the
-> passing text), now a standing evidence rule. **Full pack x3 RUNNING** on the post-M2 build; one
-> report when it lands. Open and unblocked-but-unbuilt: VT-755 scope 2 (no-progress re-ask), VT-752
-> items 2-5, VT-754 scope 5 (18 stale dev rows), VT-745 part 1.
+> Last updated: **2026-08-17, CC (M2 CLOSED)** — CURRENT STATE: **M2 closed on eleven rows and a
+> measured pack number.** Full pack ×3 on the post-M2 build: **353/390 = 90.5% clean** vs gate (d)'s
+> 338/390 = 86.7%, **0 TIMEOUT and 0 INDETERMINATE across 870 steps**, all domain floors clean;
+> stable-fails 10 → 4. **integration 100%** (96.2), **onboarding 100%** (89.7), manager 86.8% (79.8),
+> sr_autonomy_rails 80.4% (85.3 — a regression, found and fixed, see below). All six targeted rows
+> landed CCC. With the two in-batch regressions verified fixed the projection is 362/390 = 92.8%, but
+> the MEASURED number is 90.5% and that is the one to quote.
+> **Built:** VT-758 (a no-send safety assert now QUERIES instead of defaulting to zero — 11 scenarios
+> declared it, 8 unguarded) · VT-759 (enforce mode had no DEFER beat and no PROFILE-ACK beat; **the
+> row's own diagnosis was wrong** — of 33 English-literal asserts exactly ONE was an instrument error)
+> · VT-756 (a count is honest only when its source is known present; two more of the shape found,
+> including an empty CSV announced as "I've sent your customer list") · VT-761 (a connect request
+> written in the participle; the mis-route stranded the NEXT turn too — reverses a deliberate
+> 2026-07-10 trade, stated in the row) · VT-752 item 1 (stage boundaries across the run handoff; the
+> row asked for `duration_ms` on `pipeline_steps`, which structurally cannot span runs) · VT-757 (the
+> capability check now runs before the ack — and then had to run before a KEYWORD net that was
+> overruling it) · VT-755 scopes 0+1 (D-A: `ask()` delivers through the single choke, the park is
+> conditional on delivery, raw model remediation never reaches an owner) · VT-754 (D-C: attribution
+> requires an attributable signal; scope 4 was a SECOND independent zero — nothing ever armed
+> `attribution_close_at`) · VT-745 (D-B part 2 verified already-satisfied and pinned; part 1 NOT built
+> — no production surface composes a customer-facing link, so a mint caller would be the sixth
+> built-and-called-by-nothing this fortnight; Fazal's call which surface earns it) · **VT-762**
+> (claude-sonnet-5 thinks by default and the thinking counts against `max_tokens`: triage at 200
+> returned a thinking block and no text, 8/24 → 0/24 after the floor) · **VT-763** (the SR evidence
+> enum named three sources the `tools=[]` specialist cannot always have and NONE for the context
+> bundle it always has, so the model refused to plan on a cohort it could see — **verified 18/18 on
+> dev** against a 3/8 pre-fix baseline; the corrective retry fired twice in those 18 and recovered
+> both, so the deterministic net carries it, not the prompt).
+> **Open, mechanisms named:** VT-764 (a token guard that trips every run and is swallowed by the
+> callback manager — a guard that cannot fire), 4 stable-fails (down from 10), VT-755 scope 2,
+> VT-752 items 2–5, VT-754 scope 5, VT-745 part 1. **M3 starts now** — VT-742 §1 + the VT-725 control
+> plane.
 > Prior header
 > (2026-08-06, superseded): **VT-734 — CURRENT STATE: **VT-734
 > approval-breach FIXED + DEV-PROVEN** (mig 190; ordering invariant + repeat-refusal; breach repro
