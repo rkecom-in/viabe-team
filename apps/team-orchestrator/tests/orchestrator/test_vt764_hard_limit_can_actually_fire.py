@@ -5,8 +5,11 @@ Two defects, and they had to be fixed together:
 1. The token axis counted `tokens_input + tokens_output` against 10,000 while the brain's prompt
    alone measures ~17k, so the check was TRUE on the first call of EVERY run.
 2. The raise happened inside a langchain callback whose exceptions the callback manager catches and
-   logs, so nothing aborted — `dispatch_brain`'s `except HardLimitExceeded` branch and its
-   `aborted_hard_limit` envelope had never once executed.
+   logs, so a breach detected at an LLM or tool boundary aborted nothing.
+
+   Scoped precisely (my first version of this overclaimed): `dispatch_brain`'s
+   `except HardLimitExceeded` branch is NOT dead — 74 dev runs carry `status='aborted_hard_limit'`
+   from some non-callback raiser. What was dead is the callback-originated abort.
 
 Fixing (2) alone would have aborted every brain run. So the tests below pin BOTH halves: the real
 measured prompt size passes, a runaway output aborts, and a limit breach genuinely escapes the
@@ -137,8 +140,9 @@ def _callback(driver, usage: OrchestratorUsage | None = None):
 
 
 def test_the_callback_declares_raise_error():
-    """Without this, langchain's callback manager catches every HardLimitExceeded and logs
-    `Error in ... callback:` — which is exactly what happened on every run for months."""
+    """Without this, langchain's callback manager catches every HardLimitExceeded raised at an LLM or
+    tool boundary and logs `Error in ... callback:` — which is exactly what happened on every run for
+    months, while the non-callback raisers could still abort."""
     assert OrchestratorReasoningCallback.raise_error is True
 
 

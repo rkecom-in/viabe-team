@@ -71,9 +71,14 @@ class OrchestratorReasoningCallback(BaseCallbackHandler):
     # langchain's callback manager catches handler exceptions and logs
     # `Error in <handler> callback:` unless the handler declares raise_error. So every
     # `HardLimitExceeded` this class raised was swallowed — an ERROR line per LLM/tool boundary per
-    # run, and no abort, while `dispatch_brain`'s `except HardLimitExceeded` branch (and its
-    # `aborted_hard_limit` envelope) had never once executed. A guard whose only effect is a log line
-    # is not a guard.
+    # run, and no abort. A guard whose only effect is a log line is not a guard.
+    #
+    # Scoped precisely, because the first version of this comment overclaimed: `dispatch_brain`'s
+    # `except HardLimitExceeded` branch is NOT dead — 74 runs on dev carry
+    # `status='aborted_hard_limit'` (May-August), reached by some non-callback raiser. What was dead
+    # is the CALLBACK-originated abort, which is every token/tool-call/cost breach detected at an
+    # LLM or tool boundary. (Separately: the `aborted_hard_limit` STEP envelope has 0 rows ever, so
+    # which axis fired has never been recorded — VT-764's own follow-on.)
     #
     # This flag makes ANY exception from a handler propagate, so the observability work in each
     # handler is individually wrapped below and only HardLimitExceeded escapes — the same shape
