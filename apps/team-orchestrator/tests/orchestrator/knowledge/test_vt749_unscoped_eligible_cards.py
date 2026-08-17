@@ -23,6 +23,14 @@ already holds these rows, so the validator would take the serving path down the 
 **Enforcement cannot precede the data.** So this file measures and pins; VT-749 scope 2 adds the
 invariant once the 63 cards carry honest scopes.
 
+**SCOPE 1 LANDED 2026-08-17 and the pin is INVERTED.** `registry_scoping` applies Clau's 63-card
+delta through the plan builder, and the count this file exists to watch is now **ZERO** unscoped
+eligible cards with **42** declaring `universal=true`. Both facts are pinned: the raw plan still
+measures 63 (the defect is historical fact, not something to erase) and the SCOPED plan must measure
+0. The inversion is the row's real product — after it, "applies everywhere" is a declared decision
+rather than an absence, and a card that scopes nothing again is a test failure instead of a silent
+addition to a corpus that matches every tenant.
+
 WHY IT MATTERS BEYOND TIDINESS: VT-725 wires the retrieval call site. The moment retrieval serves this
 corpus, these cards are eligible for every tenant — and the `o11` recall figure of **0.229 was measured
 under exactly that condition**, so the recall number is itself partly an artifact of cards that match
@@ -59,8 +67,14 @@ _SCOPING_DIMENSIONS = ("jurisdictions", "size_bands", "industries", "maturity_st
 # Measured 2026-08-14 from the committed v3 artifacts. Exact, so drift is loud.
 _EXPECTED_MEMBERS = 118
 _EXPECTED_ELIGIBLE = 100
-_EXPECTED_UNSCOPED_ELIGIBLE = 63
-_EXPECTED_UNIVERSAL_ELIGIBLE = 0
+#: The defect as first measured, kept because the historical fact is what justified the row.
+_EXPECTED_UNSCOPED_ELIGIBLE_RAW = 63
+_EXPECTED_UNIVERSAL_ELIGIBLE_RAW = 0
+#: After VT-749 scope 1. These are the numbers that now govern.
+_EXPECTED_UNSCOPED_ELIGIBLE_SCOPED = 0
+_EXPECTED_UNIVERSAL_ELIGIBLE_SCOPED = 42
+#: Clau's classing, 2026-08-17. Pinned so a re-class is a deliberate edit with a reason.
+_EXPECTED_CLASS_COUNTS = {"U": 42, "ST": 11, "OP": 6, "B2B": 2, "SUB": 1, "SCALE": 1}
 
 
 def _jsonl(name: str) -> list[dict[str, Any]]:
@@ -82,6 +96,21 @@ def v3_cards() -> list[Any]:
     # ResolutionPlan exposes .members as KnowledgeCard objects directly (not wrappers with .card) —
     # verified against the model rather than assumed from the sibling VT-727 tests, which read .promotions.
     return list(plan.members)
+
+
+@pytest.fixture(scope="module")
+def scoping_rows() -> Any:
+    from orchestrator.knowledge.registry_scoping import load_applicability_scoping
+
+    return load_applicability_scoping(_jsonl("vt749_applicability_scoping.jsonl"))
+
+
+@pytest.fixture(scope="module")
+def scoped_cards(v3_cards, scoping_rows) -> list[Any]:
+    """The v3 plan with VT-749 scope 1 applied — what the corpus MEANS now."""
+    from orchestrator.knowledge.registry_scoping import apply_applicability_scoping
+
+    return list(apply_applicability_scoping(v3_cards, scoping_rows))
 
 
 def _applicability(card: Any) -> Any:
@@ -125,8 +154,8 @@ def test_exactly_63_retrieval_eligible_cards_SCOPE_NOTHING(v3_cards):
         c for c in v3_cards
         if _is_eligible(c) and _scoped_dimension_count(c) == 0 and not _is_universal(c)
     ]
-    assert len(unscoped) == _EXPECTED_UNSCOPED_ELIGIBLE, (
-        f"expected {_EXPECTED_UNSCOPED_ELIGIBLE} unscoped-but-eligible cards, found {len(unscoped)}. "
+    assert len(unscoped) == _EXPECTED_UNSCOPED_ELIGIBLE_RAW, (
+        f"expected {_EXPECTED_UNSCOPED_ELIGIBLE_RAW} unscoped-but-eligible cards, found {len(unscoped)}. "
         "These match EVERY context. If the corpus was intentionally rescoped, update the constant in "
         "the same change and say which cards were scoped and on what judgment (VT-749 scope 1)."
     )
@@ -137,7 +166,7 @@ def test_no_eligible_card_claims_universal_so_the_63_are_not_deliberate(v3_cards
     way to say "this applies everywhere" — and NOT ONE eligible card uses it. So the 63 are not cards
     declaring universality; they are cards that declare nothing and get universality by default."""
     universal_eligible = [c for c in v3_cards if _is_eligible(c) and _is_universal(c)]
-    assert len(universal_eligible) == _EXPECTED_UNIVERSAL_ELIGIBLE, (
+    assert len(universal_eligible) == _EXPECTED_UNIVERSAL_ELIGIBLE_RAW, (
         "an eligible card now declares universal=true — if that is the intended fix for part of the 63, "
         "this constant moves and the unscoped count must fall by the same amount"
     )
@@ -166,10 +195,10 @@ def test_the_hedge_is_still_worth_less_than_the_retrieval_floor():
     )
 
 
-def test_the_unscoped_cards_are_named_so_the_fix_has_a_worklist(v3_cards):
-    """Emits the legacy ids as a stable, sorted worklist. Not an assertion about content — the point is
-    that VT-749 scope 1 needs a LIST to scope, and deriving it by hand from artifacts is how the count
-    got re-derived three times already."""
+def test_the_worklist_the_scoping_delta_had_to_cover(v3_cards, scoping_rows):
+    """The worklist scope 1 was built against — kept as the JOIN that proves the delta covered exactly
+    the measured set, rather than 63 cards of its own choosing. Deriving this by hand from the
+    artifacts is how the count got re-derived three times before it was a test."""
     # Keyed on card_id: the plan's KnowledgeCard carries no legacy_id at this stage (provenance holds
     # source_ids / publisher / retrieved_at / tainted), and card_id is the stable identifier the
     # scoping work will address them by.
@@ -178,7 +207,90 @@ def test_the_unscoped_cards_are_named_so_the_fix_has_a_worklist(v3_cards):
         for c in v3_cards
         if _is_eligible(c) and _scoped_dimension_count(c) == 0 and not _is_universal(c)
     )
-    assert len(unscoped) == _EXPECTED_UNSCOPED_ELIGIBLE
+    assert len(unscoped) == _EXPECTED_UNSCOPED_ELIGIBLE_RAW
     assert all(unscoped), "every unscoped card must be identifiable — an unnamed one cannot be fixed"
-    # Printed on failure only; kept out of the assertion message to avoid a 63-item wall of text.
-    print(f"VT-749 worklist ({len(unscoped)} unscoped-but-eligible): {unscoped}")
+    assert sorted(row.card_id for row in scoping_rows) == unscoped, (
+        "the scoping delta must target EXACTLY the measured unscoped set — not a superset (scoping a "
+        "card nobody reviewed as unscoped) and not a subset (leaving match-everything cards behind)"
+    )
+
+
+# --- VT-749 scope 1: the inverted pin, which is what now governs -----------------------------
+
+
+def test_after_scoping_NO_eligible_card_scopes_nothing(scoped_cards):
+    """THE INVERSION, and the row's real product.
+
+    Before: 63 eligible cards declared nothing and matched every tenant in every context. After: zero.
+    If this rises, an unscoped card has been added to a corpus that VT-725 serves — which is the
+    condition the `o11` recall figure of 0.229 was measured under, so it also silently invalidates any
+    recall comparison made across it.
+    """
+    unscoped = [
+        c for c in scoped_cards
+        if _is_eligible(c) and _scoped_dimension_count(c) == 0 and not _is_universal(c)
+    ]
+    assert len(unscoped) == _EXPECTED_UNSCOPED_ELIGIBLE_SCOPED, (
+        f"{len(unscoped)} eligible card(s) still scope nothing: "
+        f"{[getattr(c, 'card_id', '?') for c in unscoped][:8]}. Every eligible card must declare its "
+        "applicability or declare `universal=true` deliberately (VT-749 scope 1)."
+    )
+
+
+def test_after_scoping_universal_is_declared_by_exactly_the_42_judgment_cards(scoped_cards):
+    """`universal=true` is now a DECISION, which is the whole difference from the defect. 42 cards
+    claim it — the pure judgment-process ones (decision triage, arbitration, pre-mortems, cadence,
+    negotiation discipline, cash and payment controls) that genuinely apply to every tenant we serve.
+    """
+    universal_eligible = [c for c in scoped_cards if _is_eligible(c) and _is_universal(c)]
+    assert len(universal_eligible) == _EXPECTED_UNIVERSAL_ELIGIBLE_SCOPED
+
+
+def test_scoping_preserves_the_corpus_shape(scoped_cards, v3_cards):
+    """Scoping is a scope change and nothing else: same members, same eligibility, same claims. If a
+    card count moved, the delta did more than it was reviewed to do."""
+    assert len(scoped_cards) == len(v3_cards) == _EXPECTED_MEMBERS
+    assert sum(1 for c in scoped_cards if _is_eligible(c)) == _EXPECTED_ELIGIBLE
+    before = {c.card_id: c.claim for c in v3_cards}
+    assert {c.card_id: c.claim for c in scoped_cards} == before
+
+
+def test_the_delta_classes_are_pinned(scoping_rows):
+    """A re-class must be a deliberate edit with a reason, not a quiet reshuffle."""
+    import collections
+
+    counts = collections.Counter(row.scoping_class for row in scoping_rows)
+    assert dict(counts) == _EXPECTED_CLASS_COUNTS
+
+
+def test_scoping_cannot_be_applied_twice(scoped_cards, scoping_rows):
+    """Applying a scoping judgment onto already-scoped cards would overwrite a decision this delta was
+    never reviewed against. It must refuse rather than win."""
+    from orchestrator.knowledge.registry_scoping import ScopingError, apply_applicability_scoping
+
+    with pytest.raises(ScopingError):
+        apply_applicability_scoping(scoped_cards, scoping_rows)
+
+
+def test_a_patch_that_scopes_nothing_is_refused():
+    """The failure mode worth guarding: a patch with a typo'd or empty dimension set would leave the
+    card exactly as universal-by-default as before, while the delta reports 63 cards 'scoped'."""
+    from orchestrator.knowledge.registry_scoping import ScopingError, load_applicability_scoping
+
+    rows = _jsonl("vt749_applicability_scoping.jsonl")
+    rows[0] = {**rows[0], "applicability_patch": {}}
+    with pytest.raises(ScopingError):
+        load_applicability_scoping(rows)
+
+
+def test_the_effective_window_survives_scoping(v3_cards, scoped_cards):
+    """A card's time bound is not a scoping dimension. Dropping it while 'scoping' the card would
+    widen exactly what this row narrows."""
+    before = {
+        c.card_id: (c.applicability.effective_from, c.applicability.effective_to) for c in v3_cards
+    }
+    after = {
+        c.card_id: (c.applicability.effective_from, c.applicability.effective_to)
+        for c in scoped_cards
+    }
+    assert after == before
