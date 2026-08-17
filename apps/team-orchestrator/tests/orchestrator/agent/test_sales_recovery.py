@@ -1391,7 +1391,9 @@ def test_vt501_empty_evidence_refs_with_prose_markers_healed_and_parses():
     # Exactly the cited marker (E1) is backed; honest bundle-sourced ref.
     assert [r.claim_id for r in plan.evidence_refs] == ["E1"]
     ref = plan.evidence_refs[0]
-    assert ref.source_kind is EvidenceSourceKind.L2_EPISODIC_MEMORY
+    # VT-763: the healed ref now carries the HONEST kind — the server always sourced it from the
+    # context bundle (source_id said so); l2_episodic_memory was a mislabel.
+    assert ref.source_kind is EvidenceSourceKind.CONTEXT_BUNDLE
     assert ref.source_id == "context_bundle"
     assert ref.note and "VT-501" in ref.note
 
@@ -2108,3 +2110,133 @@ def test_vt661_cohort_label_grounded_to_real_lapsed_window():
 
     # The grounded label is DERIVED from the constant — not a hard-coded 45.
     assert str(LAPSED_WINDOW_DAYS) in grounded
+
+
+# ---------------------------------------------------------------------------
+# VT-763 — insufficient_data on a NON-EMPTY dormant cohort gets ONE corrective retry
+# ---------------------------------------------------------------------------
+
+
+def _vt763_cohort(n: int):
+    from uuid import uuid4
+
+    from orchestrator.agents.sales_recovery_executor import CustomerFactBundle
+
+    return [
+        CustomerFactBundle(
+            customer_id=uuid4(), display_name=f"c{i}", days_since_last_sale=61,
+            last_sale_amount_paise=10_000, lifetime_spend_paise=50_000, business_name="Shop",
+        )
+        for i in range(n)
+    ]
+
+
+def test_vt763_insufficient_data_on_a_real_cohort_gets_one_corrective_retry(monkeypatch):
+    """Measured on kept dev tenants 2026-08-17: the dormant cohort was BUILT (3 candidates, 3
+    bundles — audited) and the model still returned insufficient_data, category "evidence": "No
+    registered tool result, L4 skill-corpus document, or L2 episodic-memory record is available".
+    The evidence enum named three sources the tools=[] specialist could not have and none for the
+    context it always has, so a strict reading of the enum beat the plan ~40% of runs.
+
+    The retry names the contradiction and the honest source kind; a corrected emission proceeds.
+    """
+    import json
+    from uuid import uuid4
+
+    from orchestrator.agent.self_evaluate import FakeSelfEvaluator
+
+    refused = _fake_response(text=json.dumps({
+        "status": "insufficient_data",
+        "missing_data": [{"category": "evidence",
+                          "description": "No registered tool result is available",
+                          "suggested_remediation": "provide a tool result"}],
+    }))
+    corrected = _fake_response(text=json.dumps({"status": "out_of_scope",
+                                                "out_of_scope_reason": "test-corrected emission"}))
+    fake = MagicMock()
+    fake.messages.create.side_effect = [refused, corrected]
+    monkeypatch.setenv("VIABE_ENV", "test")
+    monkeypatch.setattr("orchestrator.agent.sales_recovery._model_client", lambda: fake)
+    monkeypatch.setattr("orchestrator.agent.sales_recovery.route_failure", MagicMock())
+
+    result = run_sales_recovery_agent(
+        SalesRecoveryContext(
+            tenant_id=uuid4(), run_id=uuid4(), user_request="Recover dormant customers",
+            dormant_cohort=_vt763_cohort(3),
+        ),
+        evaluator=FakeSelfEvaluator(verdicts=[]),
+    )
+
+    assert fake.messages.create.call_count == 2, "no corrective retry fired on a 3-member cohort"
+    correction = fake.messages.create.call_args_list[1].kwargs["messages"][-1]
+    assert correction["role"] == "user"
+    assert "3 eligible customer" in correction["content"]
+    assert "context_bundle" in correction["content"], "the correction must name the honest source kind"
+    assert result.status != "invalid"
+
+
+def test_vt763_insufficient_data_on_an_EMPTY_cohort_is_NOT_retried(monkeypatch):
+    """An honest no stays a no. With no cohort in the context the model's insufficient_data is
+    correct, and retrying it would be the fabrication pressure this row must not add."""
+    import json
+    from uuid import uuid4
+
+    from orchestrator.agent.self_evaluate import FakeSelfEvaluator
+
+    refused = _fake_response(text=json.dumps({
+        "status": "insufficient_data",
+        "missing_data": [{"category": "cohort", "description": "no dormant rows",
+                          "suggested_remediation": "ingest the ledger"}],
+    }))
+    fake = MagicMock()
+    fake.messages.create.side_effect = [refused]
+    monkeypatch.setenv("VIABE_ENV", "test")
+    monkeypatch.setattr("orchestrator.agent.sales_recovery._model_client", lambda: fake)
+    monkeypatch.setattr("orchestrator.agent.sales_recovery.route_failure", MagicMock())
+
+    run_sales_recovery_agent(
+        SalesRecoveryContext(tenant_id=uuid4(), run_id=uuid4(), user_request="Recover dormant customers"),
+        evaluator=FakeSelfEvaluator(verdicts=[]),
+    )
+    assert fake.messages.create.call_count == 1
+
+
+def test_vt763_a_second_insufficient_data_STANDS(monkeypatch):
+    """Bounded: exactly one retry. If the model refuses twice on a real cohort, the second answer is
+    the run's answer — the loop must not turn into a coercion."""
+    import json
+    from uuid import uuid4
+
+    from orchestrator.agent.self_evaluate import FakeSelfEvaluator
+
+    refused = _fake_response(text=json.dumps({
+        "status": "insufficient_data",
+        "missing_data": [{"category": "evidence", "description": "still no tool result",
+                          "suggested_remediation": "provide a tool result"}],
+    }))
+    fake = MagicMock()
+    fake.messages.create.side_effect = [refused, refused, refused]
+    monkeypatch.setenv("VIABE_ENV", "test")
+    monkeypatch.setattr("orchestrator.agent.sales_recovery._model_client", lambda: fake)
+    monkeypatch.setattr("orchestrator.agent.sales_recovery.route_failure", MagicMock())
+
+    run_sales_recovery_agent(
+        SalesRecoveryContext(
+            tenant_id=uuid4(), run_id=uuid4(), user_request="Recover dormant customers",
+            dormant_cohort=_vt763_cohort(2),
+        ),
+        evaluator=FakeSelfEvaluator(verdicts=[]),
+    )
+    assert fake.messages.create.call_count == 2, "the retry is bounded to ONE"
+
+
+def test_vt763_the_prompt_names_the_context_bundle_as_evidence():
+    """The enum in the prompt must include the source the specialist always has, and say the
+    listed cohort is evidence — the sentence that removes the contradiction."""
+    import pathlib
+
+    from orchestrator.agent import sales_recovery as sr
+
+    prompt = (pathlib.Path(sr.__file__).parent / "prompts" / "sales_recovery_v1.md").read_text()
+    assert "`context_bundle`" in prompt
+    assert "never return `insufficient_data` because you" in prompt

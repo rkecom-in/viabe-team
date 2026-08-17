@@ -702,7 +702,9 @@ def _synthesize_evidence_ref(claim_id: str) -> dict[str, Any]:
     server heal for auditability."""
     return {
         "claim_id": claim_id,
-        "source_kind": EvidenceSourceKind.L2_EPISODIC_MEMORY.value,
+        # VT-763: the honest kind — this WAS labelled l2_episodic_memory with source_id
+        # "context_bundle", i.e. the server already knew the context bundle was the evidence.
+        "source_kind": EvidenceSourceKind.CONTEXT_BUNDLE.value,
         "source_id": "context_bundle",
         "note": "evidence_refs structure healed server-side from the model's prose citation (VT-501)",
     }
@@ -988,6 +990,14 @@ def run_sales_recovery_agent(
     # VT-596 #3 — one corrective retry when the terminal JSON fails the
     # CampaignPlan schema (field-path feedback; see the parse except below).
     schema_retry_used = False
+    # VT-763 — ONE corrective retry when the model returns insufficient_data on a NON-EMPTY dormant
+    # cohort. Measured on kept dev tenants: cohort built with 3 candidates, model returned
+    # ``category="evidence"``, "No registered tool result, L4 skill-corpus document, or L2
+    # episodic-memory record is available" — a strict reading of an evidence enum that had no value
+    # for the context it was actually given. The retry names the contradiction and the honest source
+    # kind; a second insufficient_data stands (an honest no is still allowed — this only removes the
+    # case where the model's own input refutes it).
+    evidence_retry_used = False
     output_retry_used = False
 
     # VT-182/VT-514 — stage the per-turn reasoning input envelope so the
@@ -1220,6 +1230,37 @@ def run_sales_recovery_agent(
         if gate is None:
             status = "completed"
             break
+
+        # VT-763 — the contradiction retry (see evidence_retry_used above). Placed BEFORE parse:
+        # insufficient_data parses fine, so nothing downstream would ever question it.
+        if (
+            not evidence_retry_used
+            and str(output.get("status", "")) == CampaignStatus.INSUFFICIENT_DATA.value
+            and getattr(context, "dormant_cohort", None)
+        ):
+            evidence_retry_used = True
+            terminal_text_parts = []
+            messages.append(
+                {"role": "assistant", "content": [{"type": "text", "text": text}]}
+            )
+            n = len(context.dormant_cohort)
+            correction = (
+                f"You returned insufficient_data, but your input context contains a dormant cohort "
+                f"of {n} eligible customer(s) built from the tenant's own ledger — that context IS "
+                "your evidence. Cite it: evidence_refs entries with source_kind \"context_bundle\" and "
+                "source_id \"dormant_cohort\" (or \"ledger_summary\"), and put the matching [E1]-style "
+                "markers in target_cohort.selection_reason / expected_arrr.basis. Re-emit the COMPLETE "
+                "JSON as a proposed plan for the full cohort. If a genuinely different fact is missing, "
+                "say WHICH ONE in missing_data — 'no tool result' is not a missing fact here. Output "
+                "ONLY the JSON."
+            )
+            messages.append({"role": "user", "content": correction})
+            raw_messages.append({"role": "user", "content": correction})
+            _logger.warning(
+                "VT-763: insufficient_data on a %d-member cohort — one corrective retry tenant=%s",
+                n, context.tenant_id,
+            )
+            continue
 
         try:
             draft_plan = parse_campaign_plan(output)
