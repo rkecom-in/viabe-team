@@ -75,6 +75,7 @@ from orchestrator.agent.orchestrator_agent_driver import (
     OrchestratorAgentDriver,
     OrchestratorUsage,
 )
+from orchestrator.knowledge.turn_retrieval import retrieve_for_manager_turn
 from orchestrator.observability.decorators import observability_context
 from orchestrator.observability.langchain_callback import (
     OrchestratorReasoningCallback,
@@ -838,6 +839,27 @@ def dispatch_brain(
                 content=lessons_block, id=_initial_turn_msg_id(run_id, "lessons_block")
             ),
         )
+
+    # VT-725 scope 1: the O8 retrieval step at the Manager's framing-context assembly — the first
+    # caller the card engine has ever had in src/ (it was complete and unreachable; the Manager
+    # could not read a single card). **Nothing is injected**: shadow retrieves, scores and records
+    # attribution, and the result object carries card refs and scores, never claim text
+    # (`CardServingResult.INJECTS_INTO_PROMPT` is a ClassVar False, and turn_retrieval asserts it).
+    # No system block is built here and none may be until the D3 flip.
+    #
+    # Lands DARK: `TEAM_KNOWLEDGE_SERVING` is unset, so this is one env read per turn and no DB
+    # work at all. It stays that way until VT-749 scope 1 scopes the 63 of 100 eligible cards that
+    # currently scope nothing — populating `decision_evidence_links` before then would make our
+    # first causality evidence evidence about an indiscriminate corpus.
+    #
+    # Deliberately NOT wrapped in try/except here: turn_retrieval never raises, by contract, and a
+    # second belt would hide the day that stops being true.
+    retrieve_for_manager_turn(
+        tenant_id=tenant_id,
+        run_id=run_id,
+        objective=event.body or "",
+        message_ref=getattr(event, "twilio_message_sid", None),
+    )
 
     # VT-461: inject the Manager-intent signal as a separate system block so the
     # Team-Manager brain reads it as a prior (the prompt's "## Manager intent signal"

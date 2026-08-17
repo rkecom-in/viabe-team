@@ -173,6 +173,37 @@ SPECIALIST_RETRIEVAL_PROFILES: dict[str, RetrievalProfile] = {
 
 MANAGER_IDENTITY = MANAGER_RETRIEVAL_PROFILE.identity
 
+#: VT-725 scope 1 — the ONE domain a turn declares when it asks for cards.
+#:
+#: `domain` does NOT filter the candidate pool (`card_retrieval` line ~281): it gates the
+#: source-AUTHORITY component, which a card earns only when its own domain matches the query domain
+#: AND its claim key is comparable to the objective. So this is a SCORING declaration, not a lane
+#: filter — declaring the wrong one costs a card its authority credit, it does not hide the card.
+#:
+#: A frozenset has no order, so the profile's declared domains cannot tell us which is primary
+#: (`onboarding_conductor` declares {ONBOARDING, COMPLIANCE}; sorted() would name compliance).
+#: Hence an explicit map — a finite enum→enum table, which is the one case the no-lists rule allows
+#: (Fazal STANDING 2026-07-15: lists for finite exact-match outcomes, never for natural-language
+#: intent). Validated below against each profile's declared domains so it cannot drift from them.
+MANAGER_PRIMARY_DOMAIN = KnowledgeDomain.MANAGEMENT
+SPECIALIST_PRIMARY_DOMAIN: dict[str, KnowledgeDomain] = {
+    "onboarding_conductor": KnowledgeDomain.ONBOARDING,
+    "integration_agent": KnowledgeDomain.INTEGRATION,
+    "sales_recovery_agent": KnowledgeDomain.SALES,
+}
+
+
+def primary_domain_for(identity: str) -> KnowledgeDomain:
+    """The domain an identity declares when retrieving. Raises for an undeclared identity, for the
+    same reason ``retrieval_profile_for`` does: a silent default is a capability nobody granted."""
+
+    if identity == MANAGER_IDENTITY:
+        return MANAGER_PRIMARY_DOMAIN
+    try:
+        return SPECIALIST_PRIMARY_DOMAIN[identity]
+    except KeyError as exc:
+        raise KeyError(f"no declared O8 primary domain for identity {identity!r}") from exc
+
 
 def retrieval_profile_for(identity: str) -> RetrievalProfile:
     """Resolve one declared profile, or raise.  An undeclared identity retrieves NOTHING rather
@@ -190,11 +221,26 @@ MANAGER_RETRIEVAL_PROFILE.validate()
 for _profile in SPECIALIST_RETRIEVAL_PROFILES.values():
     _profile.validate()
 
+# The primary domain must be one the identity actually declares, and every declared identity must
+# have one. Checked at import so a new specialist profile cannot land without its domain — the
+# alternative is discovering the gap as a KeyError inside a live turn.
+assert MANAGER_PRIMARY_DOMAIN in MANAGER_RETRIEVAL_PROFILE.domains
+assert set(SPECIALIST_PRIMARY_DOMAIN) == set(SPECIALIST_RETRIEVAL_PROFILES), (
+    "every declared specialist retrieval profile needs a primary domain (VT-725)"
+)
+for _identity, _domain in SPECIALIST_PRIMARY_DOMAIN.items():
+    assert _domain in SPECIALIST_RETRIEVAL_PROFILES[_identity].domains, (
+        f"{_identity}'s primary domain {_domain.value!r} is not one it declares"
+    )
+
 
 __all__ = [
     "MANAGER_IDENTITY",
+    "MANAGER_PRIMARY_DOMAIN",
     "MANAGER_RETRIEVAL_PROFILE",
+    "SPECIALIST_PRIMARY_DOMAIN",
     "SPECIALIST_RETRIEVAL_PROFILES",
+    "primary_domain_for",
     "retrieval_profile_for",
     "specialist_retrieval_profile",
 ]

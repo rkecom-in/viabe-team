@@ -300,6 +300,24 @@ def _dispatch_specialist_step(
         detail={"specialist": specialist, "step_id": step_id, "attempt": attempt},
     )
 
+    # VT-725 scope 5 — a specialist's retrieval is NARROW BY CONSTRUCTION, and the narrowness is the
+    # profile's, not this call's: `retrieval_profile_for` raises for an undeclared identity rather
+    # than inheriting the Manager's breadth, and each specialist's declared assignment scope is its
+    # own lane and nothing else. Shadow-only and injects nothing (see knowledge/turn_retrieval).
+    # `specialist` here is the same string the retrieval profiles key on — plan_models._SPECIALISTS
+    # and SPECIALIST_RETRIEVAL_PROFILES are pinned to one set by a test, because a name in one and
+    # not the other would make this silently retrieve nothing for that lane.
+    if specialist:
+        from orchestrator.knowledge.turn_retrieval import retrieve_for_specialist
+
+        retrieve_for_specialist(
+            tenant_id=tenant_id,
+            run_id=run_id,
+            identity=specialist,
+            objective=desired_outcome or situation or "",
+            task_ref=step_id,
+        )
+
     specialist_hint = f" (targets the {specialist} specialist)" if specialist else ""
     messages = [
         SystemMessage(
