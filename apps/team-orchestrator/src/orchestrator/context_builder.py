@@ -673,12 +673,15 @@ def _build_dormant_cohort(tenant_id: UUID) -> tuple[list[CustomerFactBundle], bo
         from orchestrator.memory.l0_writer import _owner_inputs_enabled
 
         if not _owner_inputs_enabled(tenant_id):
+            # VT-763: this return was SILENT — indistinguishable from an empty cohort from outside.
+            _audit_cohort(tenant_id, "consent_gate_closed", candidates=0, bundles=0)
             return [], False
     except Exception:  # noqa: BLE001 — never surface PII on an unknown consent state
         logger.warning(
             "VT-490: owner_inputs consent check failed (tenant=%s); fail-closed",
             tenant_id,
         )
+        _audit_cohort(tenant_id, "consent_check_failed", candidates=0, bundles=0)
         return [], False
 
     # VT-755 scope 4 — INSTRUMENT THE COUNT. Three very different outcomes are otherwise
@@ -734,7 +737,30 @@ def _build_dormant_cohort(tenant_id: UUID) -> tuple[list[CustomerFactBundle], bo
             "VT-755: dormant cohort built for tenant=%s — %d candidate(s), %d bundle(s)",
             tenant_id, len(candidates), len(bundles),
         )
+    _audit_cohort(tenant_id, "built", candidates=len(candidates), bundles=len(bundles))
     return bundles, bool(bundles)
+
+
+def _audit_cohort(tenant_id: UUID, outcome: str, *, candidates: int, bundles: int) -> None:
+    """VT-763 — the dormant-cohort outcome as a DURABLE tm_audit row (counts only, CL-390).
+
+    The INFO line in ``_build_dormant_cohort`` is INVISIBLE on deployed dev (the log stream carries
+    WARNING+ only), the consent-gate return was silent, and the empty-cohort WARNING did not fire on a
+    kept tenant whose specialist still returned ``insufficient_data``. So the one fact that decides
+    where to look — "was the cohort empty, or full and the model refused?" — could be read from
+    neither the logs nor the row. Fail-soft: audit is a courtesy, never a break in the context build.
+    """
+    try:
+        from orchestrator.observability.tm_audit import emit_tm_audit
+
+        emit_tm_audit(
+            event_layer="knows", event_kind="dormant_cohort_built", actor="team_manager",
+            tenant_id=tenant_id,
+            summary=f"dormant cohort {outcome}: {candidates} candidate(s), {bundles} bundle(s)",
+            result={"outcome": outcome, "candidates": candidates, "bundles": bundles},
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("VT-763: dormant-cohort audit emit failed (fail-soft) tenant=%s", tenant_id)
 
 
 # --- the bundle constructor --------------------------------------------------
