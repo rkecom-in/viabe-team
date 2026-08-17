@@ -41,6 +41,8 @@ from twilio.rest import Client
 
 from orchestrator.db import tenant_connection
 from orchestrator.integrations.sender_resolution import (
+    AUDIENCE_CUSTOMER,
+    AUDIENCE_OWNER,
     SenderUnresolvable,
     resolve_sender,
 )
@@ -736,7 +738,7 @@ def send_template_message(
     # raising — this is a @DBOS.step, a raise would be RETRIED, and a sender does not become
     # resolvable on a retry.
     try:
-        sender = resolve_sender(tenant_id, require_own_waba=is_customer_send)
+        sender = resolve_sender(tenant_id, audience=AUDIENCE_CUSTOMER if is_customer_send else AUDIENCE_OWNER)
     except SenderUnresolvable as exc:
         logger.error(
             "twilio-send: no sender resolved for tenant=%s template='%s' -> refusing the send: %s",
@@ -937,7 +939,10 @@ def send_freeform_message(
     create_kwargs: dict[str, Any] = {
         "body": body,
         "from_": _wa(
-            resolve_sender(tenant_id, require_own_waba=is_customer_session).phone_number,
+            resolve_sender(
+                tenant_id,
+                audience=AUDIENCE_CUSTOMER if is_customer_session else AUDIENCE_OWNER,
+            ).phone_number,
             role="sender",
         ),
         "to": _wa(recipient_phone),
@@ -1021,7 +1026,10 @@ def send_interactive_message(
     create_kwargs: dict[str, Any] = {
         "content_sid": content_sid,
         "from_": _wa(
-            resolve_sender(tenant_id, require_own_waba=is_customer_session).phone_number,
+            resolve_sender(
+                tenant_id,
+                audience=AUDIENCE_CUSTOMER if is_customer_session else AUDIENCE_OWNER,
+            ).phone_number,
             role="sender",
         ),
         "to": _wa(recipient_phone),

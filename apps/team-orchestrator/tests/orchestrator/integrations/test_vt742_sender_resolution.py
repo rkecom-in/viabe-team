@@ -1,13 +1,18 @@
-"""VT-742 §1 — resolve_sender precedence against real Postgres, plus migration 207's two invariants.
+"""VT-742 §1 — resolve_sender against real Postgres, plus migration 207's two invariants.
+
+The AUDIENCE split is the thing to read first. `audience="customer"` resolves ONLY the tenant's own
+live WABA and refuses otherwise, because the customer's reply routes by the number they answered TO.
+`audience="owner"` (the default) resolves within the shared Viabe estate and never touches the
+tenant's WABA — the owner's relationship is with Viabe, and moving owner messages onto the shop's own
+number is a product change for Fazal to make, not a side effect of this refactor.
 
 Exit gate (b) wants "a tenant with a provisioned WABA demonstrably sends from their own number and
-another tenant does not" proven, not asserted; gate (c) wants the unresolvable case forced; gate (g)
-wants the pin provable with ONE number. All three are here.
+another tenant does not" proven rather than asserted; gate (c) wants the unresolvable case forced;
+gate (g) wants the pin provable with ONE number in the estate. All three are here.
 
-The precedence reads run on an injected connection (mirroring ``wa_send_allowed``'s VT-460 contract),
-EXCEPT ``test_own_waba_resolves_through_tenant_connection`` which deliberately takes the no-conn
-path so the RLS-scoped read is exercised too — an injected superuser connection would let a broken
-RLS path pass.
+Most reads run on an injected connection (mirroring `wa_send_allowed`'s VT-460 contract), EXCEPT
+`test_own_waba_resolves_through_tenant_connection`, which deliberately takes the no-conn path so the
+RLS-scoped read is exercised too — an injected superuser connection would let a broken RLS path pass.
 """
 
 from __future__ import annotations
@@ -29,7 +34,8 @@ pytestmark = pytest.mark.skipif(
 )
 
 _DEFAULT_SHARED = "+910000000000"
-_PIN = "+910000000009"
+_SECOND_SHARED = "+910000000009"
+_PIN = _SECOND_SHARED
 
 
 @pytest.fixture(scope="module")
@@ -44,12 +50,23 @@ def substrate():  # type: ignore[no-untyped-def]
 
 @pytest.fixture(autouse=True)
 def _shared_env(monkeypatch):
+    """A ONE-number estate, which is production today."""
     monkeypatch.setenv("TEAM_TWILIO_FROM_NUMBER", _DEFAULT_SHARED)
     monkeypatch.delenv("TEAM_TWILIO_SHARED_SENDER_NUMBERS", raising=False)
 
 
+@pytest.fixture
+def two_number_estate(monkeypatch):
+    """Declare a second shared number, which is what activates the pin."""
+    monkeypatch.setenv("TEAM_TWILIO_SHARED_SENDER_NUMBERS", _SECOND_SHARED)
+
+
 def _unique_number(prefix: str = "+9199") -> str:
     return f"{prefix}{uuid4().int % 10**8:08d}"
+
+
+def _conn(dsn):
+    return psycopg.connect(dsn, autocommit=True, row_factory=psycopg.rows.dict_row)
 
 
 def _tenant(conn, *, pin: str | None = None) -> str:
@@ -72,162 +89,220 @@ def _waba(conn, tenant_id: str, *, status: str, number: str | None) -> None:
     )
 
 
-# --- precedence ---------------------------------------------------------------------------
+# --- the customer audience: the tenant's own number, or nothing ----------------------------
 
 
-def test_own_live_waba_wins_over_pin_and_default(substrate):
+def test_a_customer_send_leaves_from_the_tenants_own_live_waba(substrate):
     from orchestrator.integrations.sender_resolution import KIND_OWN_WABA, resolve_sender
 
     own = _unique_number()
-    with psycopg.connect(substrate.dsn, autocommit=True, row_factory=psycopg.rows.dict_row) as conn:
+    with _conn(substrate.dsn) as conn:
         tid = _tenant(conn, pin=_PIN)
         _waba(conn, tid, status="live", number=own)
 
-        sender = resolve_sender(tid, conn=conn)
+        sender = resolve_sender(tid, conn=conn, audience="customer")
 
-    assert sender.phone_number == own, "step 1 — the tenant's own live WABA outranks everything"
+    assert sender.phone_number == own, "the tenant's own live WABA, not the shared estate"
     assert sender.kind == KIND_OWN_WABA
     assert sender.is_shared is False
 
 
-def test_a_second_tenant_without_a_waba_does_not_get_the_first_tenants_number(substrate):
-    """Exit gate (b)'s second half: the tenants must be distinguishable, not merely resolvable."""
-    from orchestrator.integrations.sender_resolution import KIND_DEFAULT_SHARED, resolve_sender
+def test_gate_b_two_tenants_are_distinguishable(substrate):
+    """Gate (b): one tenant demonstrably sends from their own number and another does not.
+
+    The second half is the point — 'another tenant does not' has to be checked, or the gate passes on
+    a resolver that returns the same number for everyone.
+    """
+    from orchestrator.integrations.sender_resolution import SenderUnresolvable, resolve_sender
 
     own = _unique_number()
-    with psycopg.connect(substrate.dsn, autocommit=True, row_factory=psycopg.rows.dict_row) as conn:
+    with _conn(substrate.dsn) as conn:
         with_waba = _tenant(conn)
         _waba(conn, with_waba, status="live", number=own)
         without_waba = _tenant(conn)
 
-        a = resolve_sender(with_waba, conn=conn)
-        b = resolve_sender(without_waba, conn=conn)
+        a = resolve_sender(with_waba, conn=conn, audience="customer")
+        assert a.phone_number == own
 
-    assert a.phone_number == own
-    assert b.phone_number == _DEFAULT_SHARED
-    assert b.kind == KIND_DEFAULT_SHARED
-    assert a.phone_number != b.phone_number
+        with pytest.raises(SenderUnresolvable):
+            resolve_sender(without_waba, conn=conn, audience="customer")
 
 
-def test_pin_wins_when_the_waba_is_not_live(substrate):
-    """Gate (g): precedence step 2 is provable with ONE number in the estate — no second number
-    has to be bought for the pin to be testable."""
-    from orchestrator.integrations.sender_resolution import KIND_PINNED_SHARED, resolve_sender
-
-    with psycopg.connect(substrate.dsn, autocommit=True, row_factory=psycopg.rows.dict_row) as conn:
-        tid = _tenant(conn, pin=_PIN)
-        _waba(conn, tid, status="verifying", number=_unique_number())
-
-        sender = resolve_sender(tid, conn=conn)
-
-    assert sender.phone_number == _PIN, "a non-live WABA must not be used as a sender"
-    assert sender.kind == KIND_PINNED_SHARED
-    assert sender.is_shared is True
-
-
-def test_default_shared_when_there_is_no_waba_and_no_pin(substrate):
-    from orchestrator.integrations.sender_resolution import KIND_DEFAULT_SHARED, resolve_sender
-
-    with psycopg.connect(substrate.dsn, autocommit=True, row_factory=psycopg.rows.dict_row) as conn:
-        tid = _tenant(conn)
-        sender = resolve_sender(tid, conn=conn)
-
-    assert sender.phone_number == _DEFAULT_SHARED
-    assert sender.kind == KIND_DEFAULT_SHARED
-
-
-def test_live_waba_with_a_null_number_falls_through_to_shared(substrate):
-    """`wa_send_allowed` only checks the STATUS, so a live row with no number exists as far as the
-    send gate is concerned. The resolver must not return None as a sender."""
-    from orchestrator.integrations.sender_resolution import KIND_DEFAULT_SHARED, resolve_sender
-
-    with psycopg.connect(substrate.dsn, autocommit=True, row_factory=psycopg.rows.dict_row) as conn:
-        tid = _tenant(conn)
-        _waba(conn, tid, status="live", number=None)
-
-        sender = resolve_sender(tid, conn=conn)
-
-    assert sender.kind == KIND_DEFAULT_SHARED
-
-
-# --- fail-closed (gate (c)) ---------------------------------------------------------------
-
-
-def test_customer_send_refuses_when_the_tenant_has_no_live_waba(substrate):
-    """The reframe: a customer messaged from the shared number cannot reply to us, because customer
-    inbound routes by the number they messaged TO. So a customer send with no own WABA is refused,
-    not downgraded."""
+def test_a_non_live_waba_is_not_a_sender(substrate):
     from orchestrator.integrations.sender_resolution import SenderUnresolvable, resolve_sender
 
-    with psycopg.connect(substrate.dsn, autocommit=True, row_factory=psycopg.rows.dict_row) as conn:
-        tid = _tenant(conn, pin=_PIN)
+    with _conn(substrate.dsn) as conn:
+        tid = _tenant(conn)
         _waba(conn, tid, status="verifying", number=_unique_number())
 
         with pytest.raises(SenderUnresolvable):
-            resolve_sender(tid, conn=conn, require_own_waba=True)
-
-        # …and the same tenant's OWNER sends are unaffected.
-        assert resolve_sender(tid, conn=conn).phone_number == _PIN
+            resolve_sender(tid, conn=conn, audience="customer")
 
 
-def test_customer_send_with_no_tenant_is_refused(substrate):
+def test_a_live_waba_with_a_null_number_is_refused_for_a_customer_send(substrate):
+    """`wa_send_allowed` checks only the STATUS, so a live row with NO number passes the send gate.
+    The resolver must not treat that as a sender."""
     from orchestrator.integrations.sender_resolution import SenderUnresolvable, resolve_sender
 
-    with pytest.raises(SenderUnresolvable):
-        resolve_sender(None, require_own_waba=True)
+    with _conn(substrate.dsn) as conn:
+        tid = _tenant(conn)
+        _waba(conn, tid, status="live", number=None)
+
+        with pytest.raises(SenderUnresolvable):
+            resolve_sender(tid, conn=conn, audience="customer")
 
 
-def test_malformed_live_waba_number_is_refused_as_a_sender(substrate):
-    """A live WABA carrying a non-E.164 number: refused outright for a customer send, and never
-    used as a sender for an owner send either. Migration 069 put no CHECK on that column, and the
-    harness itself wrote `+1555<uuid-hex>` into it for months."""
-    from orchestrator.integrations.sender_resolution import (
-        KIND_DEFAULT_SHARED,
-        SenderUnresolvable,
-        resolve_sender,
-    )
+def test_a_malformed_live_waba_number_is_refused_not_downgraded(substrate):
+    """Migration 069 put no CHECK on that column and the harness itself wrote `+1555<uuid-hex>` into
+    it for months. Falling through to shared would look like a tenant who never onboarded, which is
+    how VT-286's output stayed invisible for two months."""
+    from orchestrator.integrations.sender_resolution import SenderUnresolvable, resolve_sender
 
     # Unique per run: mig 207's live-phone UNIQUE is real, and a constant here collided with the
     # ACTUAL leftover harness row on dev (`+1555470fea5` — the one non-E.164 live number of 134).
     # The 'e' form is the VT-487 float-corruption artifact, so this is malformed by construction.
     malformed = f"+1555{uuid4().int % 10**6:06d}e11"
-    with psycopg.connect(substrate.dsn, autocommit=True, row_factory=psycopg.rows.dict_row) as conn:
+    with _conn(substrate.dsn) as conn:
         tid = _tenant(conn)
         _waba(conn, tid, status="live", number=malformed)
 
         with pytest.raises(SenderUnresolvable):
-            resolve_sender(tid, conn=conn, require_own_waba=True)
-
-        owner = resolve_sender(tid, conn=conn)
-
-    assert owner.phone_number == _DEFAULT_SHARED
-    assert owner.kind == KIND_DEFAULT_SHARED, "a malformed WABA number is never dispatched"
+            resolve_sender(tid, conn=conn, audience="customer")
 
 
-def test_unresolvable_when_the_default_sender_is_absent(substrate, monkeypatch):
+def test_a_customer_send_with_no_tenant_is_refused():
+    """The production customer-inbound path was calling the transport with no tenant at all. A
+    customer send that cannot name whose customer it is has no sender."""
+    from orchestrator.integrations.sender_resolution import SenderUnresolvable, resolve_sender
+
+    with pytest.raises(SenderUnresolvable):
+        resolve_sender(None, audience="customer")
+
+
+def test_an_unknown_audience_is_refused():
+    from orchestrator.integrations.sender_resolution import SenderUnresolvable, resolve_sender
+
+    with pytest.raises(SenderUnresolvable):
+        resolve_sender(uuid4(), audience="marketing")
+
+
+# --- the owner audience: the shared estate, and today no DB read at all -------------------
+
+
+def test_an_owner_send_uses_the_shared_default_and_never_the_tenants_waba(substrate):
+    """The tenant HAS a live WABA here and the owner send must still not use it: the owner's
+    relationship is with Viabe, and moving owner messages onto the shop's own number is Fazal's
+    product call."""
+    from orchestrator.integrations.sender_resolution import KIND_DEFAULT_SHARED, resolve_sender
+
+    own = _unique_number()
+    with _conn(substrate.dsn) as conn:
+        tid = _tenant(conn)
+        _waba(conn, tid, status="live", number=own)
+
+        sender = resolve_sender(tid, conn=conn)
+
+    assert sender.phone_number == _DEFAULT_SHARED
+    assert sender.kind == KIND_DEFAULT_SHARED
+    assert sender.phone_number != own
+
+
+def test_an_owner_send_reads_no_database_while_the_estate_holds_one_number():
+    """With one shared number a pin can only point at that same number, so the read cannot change
+    the answer — and paying a per-send tenant query to confirm a column that is NULL everywhere is
+    cost for nothing. The connection here RAISES if touched, which is the only way to prove a read
+    did not happen."""
+    from orchestrator.integrations.sender_resolution import KIND_DEFAULT_SHARED, resolve_sender
+
+    class _Forbidden:
+        def execute(self, *a, **k):
+            raise AssertionError("an owner send must not query the tenant with a 1-number estate")
+
+    sender = resolve_sender(uuid4(), conn=_Forbidden())
+
+    assert sender.kind == KIND_DEFAULT_SHARED
+    assert sender.phone_number == _DEFAULT_SHARED
+
+
+def test_the_pin_activates_when_a_second_number_is_declared(substrate, two_number_estate):
+    """Gate (g): the pin is provable with the ONE number already owned — declaring a second in
+    TEAM_TWILIO_SHARED_SENDER_NUMBERS is what switches the read on, with no code change at that
+    moment. The design never required buying a number to be testable."""
+    from orchestrator.integrations.sender_resolution import KIND_PINNED_SHARED, resolve_sender
+
+    with _conn(substrate.dsn) as conn:
+        tid = _tenant(conn, pin=_PIN)
+
+        sender = resolve_sender(tid, conn=conn)
+
+    assert sender.phone_number == _PIN
+    assert sender.kind == KIND_PINNED_SHARED
+    assert sender.is_shared is True
+
+
+def test_an_unpinned_tenant_falls_to_the_default_even_with_a_larger_estate(
+    substrate, two_number_estate
+):
+    from orchestrator.integrations.sender_resolution import KIND_DEFAULT_SHARED, resolve_sender
+
+    with _conn(substrate.dsn) as conn:
+        tid = _tenant(conn)
+        sender = resolve_sender(tid, conn=conn)
+
+    assert sender.kind == KIND_DEFAULT_SHARED
+    assert sender.phone_number == _DEFAULT_SHARED
+
+
+def test_owner_send_with_no_tenant_is_legal():
+    """Some owner-facing helpers genuinely have no tenant in hand — they are addressed by phone."""
+    from orchestrator.integrations.sender_resolution import KIND_DEFAULT_SHARED, resolve_sender
+
+    assert resolve_sender(None).kind == KIND_DEFAULT_SHARED
+
+
+# --- fail-closed on the estate itself (gate (c)) -------------------------------------------
+
+
+def test_unresolvable_when_the_default_sender_is_absent(monkeypatch):
     from orchestrator.integrations.sender_resolution import SenderUnresolvable, resolve_sender
 
     monkeypatch.delenv("TEAM_TWILIO_FROM_NUMBER", raising=False)
-    with psycopg.connect(substrate.dsn, autocommit=True, row_factory=psycopg.rows.dict_row) as conn:
-        tid = _tenant(conn)
-        with pytest.raises(SenderUnresolvable):
-            resolve_sender(tid, conn=conn)
+    with pytest.raises(SenderUnresolvable):
+        resolve_sender(uuid4())
 
 
-def test_unresolvable_when_the_default_sender_is_malformed(substrate, monkeypatch):
+def test_unresolvable_when_the_default_sender_is_malformed(monkeypatch):
     from orchestrator.integrations.sender_resolution import SenderUnresolvable, resolve_sender
 
     monkeypatch.setenv("TEAM_TWILIO_FROM_NUMBER", "+91998886e+11")
-    with psycopg.connect(substrate.dsn, autocommit=True, row_factory=psycopg.rows.dict_row) as conn:
+    with pytest.raises(SenderUnresolvable):
+        resolve_sender(uuid4())
+
+
+# --- the RLS-scoped path and the other row factory ----------------------------------------
+
+
+def test_own_waba_resolves_through_tenant_connection(substrate):
+    """The no-conn path (`tenant_connection`, SET ROLE app_role + tenant GUC) must see the WABA row.
+    Not vacuous: the assertion is the seeded number, so an RLS-blocked read raises instead."""
+    from orchestrator import graph as graphmod
+    from orchestrator.integrations.sender_resolution import KIND_OWN_WABA, resolve_sender
+
+    graphmod.init_substrate(substrate.dsn)
+    own = _unique_number()
+    with _conn(substrate.dsn) as conn:
         tid = _tenant(conn)
-        with pytest.raises(SenderUnresolvable):
-            resolve_sender(tid, conn=conn)
+        _waba(conn, tid, status="live", number=own)
+
+    sender = resolve_sender(tid, audience="customer")
+
+    assert sender.phone_number == own
+    assert sender.kind == KIND_OWN_WABA
 
 
 def test_resolve_sender_reads_a_tuple_row_connection_too(substrate):
-    """``wa_send_allowed`` accepts either row factory and so must this — a caller's connection is
-    not ours to assume. Without the positional branch this returns the shared default and the
-    tenant's own WABA silently disappears, which is the exact class of bug this row fixes."""
+    """`wa_send_allowed` accepts either row factory and so must this — a caller's connection is not
+    ours to assume. Without the positional branch this would refuse a tenant that HAS a live WABA."""
     from orchestrator.integrations.sender_resolution import KIND_OWN_WABA, resolve_sender
 
     own = _unique_number()
@@ -235,44 +310,22 @@ def test_resolve_sender_reads_a_tuple_row_connection_too(substrate):
         tid = _tenant(conn)
         _waba(conn, tid, status="live", number=own)
 
-        sender = resolve_sender(tid, conn=conn)
+        sender = resolve_sender(tid, conn=conn, audience="customer")
 
     assert sender.phone_number == own
     assert sender.kind == KIND_OWN_WABA
 
 
-# --- the RLS-scoped path ------------------------------------------------------------------
-
-
-def test_own_waba_resolves_through_tenant_connection(substrate):
-    """The no-conn path (``tenant_connection``, SET ROLE app_role + tenant GUC) must see both
-    sources. Not vacuous: the assertion is the seeded number, so an RLS-blocked read returns the
-    shared default and fails."""
-    from orchestrator import graph as graphmod
-    from orchestrator.integrations.sender_resolution import KIND_OWN_WABA, resolve_sender
-
-    graphmod.init_substrate(substrate.dsn)
-    own = _unique_number()
-    with psycopg.connect(substrate.dsn, autocommit=True, row_factory=psycopg.rows.dict_row) as conn:
-        tid = _tenant(conn)
-        _waba(conn, tid, status="live", number=own)
-
-    sender = resolve_sender(tid)
-
-    assert sender.phone_number == own
-    assert sender.kind == KIND_OWN_WABA
-
-
-# --- the template send site ---------------------------------------------------------------
+# --- the template send site ----------------------------------------------------------------
 
 
 def test_template_customer_send_without_own_waba_returns_a_failed_result(substrate, monkeypatch):
-    """``send_template_message`` reports an unresolvable sender; it does not raise.
+    """`send_template_message` REPORTS an unresolvable sender; it does not raise.
 
-    It is a ``@DBOS.step``, so a raise would be RETRIED — and a sender does not become resolvable on
-    a retry. The refusal here is real, not stubbed: a live tenant with no WABA row, sent as a
-    customer send, which is precisely the case that used to leave from the shared number and produce
-    a message the customer could not answer.
+    It is a `@DBOS.step`, so a raise would be RETRIED — and a sender does not become resolvable on a
+    retry. The refusal here is real, not stubbed: a live tenant with no WABA row, sent as a customer
+    send, which is precisely the case that used to leave from the shared number and produce a message
+    the customer could not answer.
     """
     from types import SimpleNamespace as NS
 
@@ -288,12 +341,10 @@ def test_template_customer_send_without_own_waba_returns_a_failed_result(substra
     )
     sent: list[dict] = []
     monkeypatch.setattr(
-        twilio_send,
-        "_client",
-        lambda: NS(messages=NS(create=lambda **kw: sent.append(kw))),
+        twilio_send, "_client", lambda: NS(messages=NS(create=lambda **kw: sent.append(kw)))
     )
 
-    with psycopg.connect(substrate.dsn, autocommit=True, row_factory=psycopg.rows.dict_row) as conn:
+    with _conn(substrate.dsn) as conn:
         tid = _tenant(conn)
 
     with twilio_send.customer_send_context():
@@ -323,7 +374,7 @@ def test_migration_207_forbids_two_tenants_claiming_one_live_number(substrate):
     """The `LIMIT 1` in `_lookup_customer_inbound_tenant` turns a duplicate live number into one
     tenant silently receiving another tenant's customer replies."""
     shared = _unique_number()
-    with psycopg.connect(substrate.dsn, autocommit=True, row_factory=psycopg.rows.dict_row) as conn:
+    with _conn(substrate.dsn) as conn:
         a = _tenant(conn)
         b = _tenant(conn)
         _waba(conn, a, status="live", number=shared)
@@ -335,7 +386,7 @@ def test_migration_207_allows_a_duplicate_number_on_non_live_rows(substrate):
     """Partial index: a superseded/parked row keeping a historical number is legitimate, and the
     routing query only ever reads live rows."""
     historical = _unique_number()
-    with psycopg.connect(substrate.dsn, autocommit=True, row_factory=psycopg.rows.dict_row) as conn:
+    with _conn(substrate.dsn) as conn:
         a = _tenant(conn)
         b = _tenant(conn)
         _waba(conn, a, status="pending", number=historical)

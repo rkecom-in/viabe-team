@@ -51,7 +51,7 @@ def _stub_sender(monkeypatch, number: str = "+910000000000") -> None:
     monkeypatch.setattr(
         twilio_send,
         "resolve_sender",
-        lambda tenant_id, *, conn=None, require_own_waba=False: Sender(
+        lambda tenant_id, *, audience="owner", conn=None: Sender(
             number, KIND_DEFAULT_SHARED, str(tenant_id)
         ),
     )

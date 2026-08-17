@@ -60,8 +60,8 @@ def _resolver_spy(monkeypatch, sender: Sender | None = None, raises: bool = Fals
     """Replace twilio_send's bound resolve_sender and record how each site called it."""
     calls: list[dict] = []
 
-    def _fake(tenant_id, *, conn=None, require_own_waba=False):
-        calls.append({"tenant_id": tenant_id, "require_own_waba": require_own_waba})
+    def _fake(tenant_id, *, audience="owner", conn=None):
+        calls.append({"tenant_id": tenant_id, "audience": audience})
         if raises:
             raise SenderUnresolvable("no sender (test)")
         return sender or Sender(_OWN_WABA, KIND_OWN_WABA, str(tenant_id))
@@ -83,8 +83,8 @@ def test_freeform_from_is_the_resolved_sender_not_the_env(spy, monkeypatch):
         "the freeform site must send from the RESOLVED sender; "
         f"got {call['from_']!r} (the env sender is {_ENV_SENDER})"
     )
-    assert calls == [{"tenant_id": tid, "require_own_waba": False}], (
-        "an owner freeform send resolves for the tenant and does NOT require an own WABA"
+    assert calls == [{"tenant_id": tid, "audience": "owner"}], (
+        "an owner freeform send resolves within the shared Viabe estate, not the tenant's WABA"
     )
 
 
@@ -101,7 +101,7 @@ def test_interactive_from_is_the_resolved_sender_not_the_env(spy, monkeypatch):
     )
 
     assert spy.messages.calls[0]["from_"] == f"whatsapp:{_OWN_WABA}"
-    assert calls[0]["require_own_waba"] is False
+    assert calls[0]["audience"] == "owner"
 
 
 def test_customer_session_send_requires_the_tenants_own_waba(spy, monkeypatch):
@@ -123,8 +123,8 @@ def test_customer_session_send_requires_the_tenants_own_waba(spy, monkeypatch):
             tenant_id=tid,
         )
 
-    assert calls == [{"tenant_id": tid, "require_own_waba": True}], (
-        "is_customer_session=True must resolve with require_own_waba=True"
+    assert calls == [{"tenant_id": tid, "audience": "customer"}], (
+        "is_customer_session=True must resolve with audience=customer"
     )
     assert spy.messages.calls[0]["from_"] == f"whatsapp:{_OWN_WABA}"
 
