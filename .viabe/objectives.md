@@ -56,7 +56,18 @@
 > tests could only pass ONCE against a given database (one of them presented as a pooler error and
 > was a `UniqueViolation`); `tenant_whatsapp_accounts.phone_number` had no uniqueness while the
 > inbound lookup reads it with `LIMIT 1`; and `wa_send_allowed` passes a `live` row with a NULL
-> number. Next in M3: the VT-725 control plane.
+> number.
+> **VT-725 scope 1 + 5 WIRED, DELIBERATELY DARK.** `retrieve_cards_for_turn` has worked since VT-723
+> with ZERO callers in `src/` — twelve tables, 118 eligible cards, and the Manager could not read one
+> of them. It now has callers at the Manager's framing-context assembly and at specialist dispatch,
+> through ONE seam, with an injection tripwire (the seam asserts `INJECTS_INTO_PROMPT is False` before
+> serving), an undeclared-identity refusal, replay-stable attribution keys, and 13 tests.
+> `TEAM_KNOWLEDGE_SERVING` stays UNSET: flipping it would write `decision_evidence_links` while 63 of
+> 100 eligible cards scope nothing, manufacturing a causality baseline we would then have to distrust.
+> **Gates (a)-(f) remain OPEN** — blocked on VT-749 scope 1 (Clau, Aug 19); the flip is then one
+> variable, not a code change. One test in that batch passed with the serving gate FORCED OPEN (the
+> fail-soft `except` swallowed the tripwire's own AssertionError) — found by forcing it, rewritten to
+> record calls rather than raise.
 > Prior header
 > (2026-08-06, superseded): **VT-734 — CURRENT STATE: **VT-734
 > approval-breach FIXED + DEV-PROVEN** (mig 190; ordering invariant + repeat-refusal; breach repro
