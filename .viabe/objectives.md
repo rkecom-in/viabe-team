@@ -68,6 +68,23 @@
 > variable, not a code change. One test in that batch passed with the serving gate FORCED OPEN (the
 > fail-soft `except` swallowed the tripwire's own AssertionError) — found by forcing it, rewritten to
 > record calls rather than raise.
+> **2026-08-18 — VT-749 LANDED AND VT-725 SHADOW SERVING IS LIVE ON DEV.** Clau delivered the scoping
+> two days early; it is applied through the plan builder AND to the served corpus (migration 208 →
+> corpus v4): **63 unscoped-and-eligible cards → 0**, with 42 now declaring `universal` deliberately,
+> and the gate-(a) pin INVERTED so an unscoped card can never be added silently. A landing trap was
+> caught first: the delta's `card_version_id`s are not the rows serving reads (0 of 63 are members of
+> the served corpus), so keying on them would have reported "63 scoped" and changed nothing — resolved
+> by `card_key` against the served members instead. **VT-725 gates (a)-(e) CLOSED, canary PASS**:
+> manager 100 candidates / 8 selected, specialist 37 with ZERO out-of-lane against 102 decoys,
+> `decision_evidence_links` 200 rows, and both forced failure depths degraded rather than raised — so
+> the per-tenant flip Fazal ratified demonstrably works at runtime with no deploy. Gate (f) (full pack)
+> is running. Nothing is injected: shadow cannot reach a prompt, and the seam refuses to serve if that
+> ever changes. Also in the window: **VT-764** (the swallowed token guard — output-token axis sized from
+> a 7-day ledger query, `raise_error` on the callback) plus a correction to my own overclaim about it,
+> **VT-765** (a customer's reply to the shared number resolves to NO tenant — Critical, Fazal owns the
+> routing choice), **VT-766** (74 aborts, zero recorded reasons), and a sanctioned env SETTER closing
+> Rule #18's write-direction gap. Regression pack on the pre-shadow build: **128/130 = 98.5% clean,
+> 0 TIMEOUT, 0 INDETERMINATE, all floors clean** (single pass — not comparable to M2's run-level 90.5%).
 > Prior header
 > (2026-08-06, superseded): **VT-734 — CURRENT STATE: **VT-734
 > approval-breach FIXED + DEV-PROVEN** (mig 190; ordering invariant + repeat-refusal; breach repro
