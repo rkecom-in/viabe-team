@@ -4,7 +4,7 @@ Wraps the langchain `create_agent` runnable returned by
 `build_orchestrator_agent` so each invocation tracks:
 
 - **Tool calls:** 5 per invocation
-- **Cumulative tokens (input + output):** 10,000
+- **Output tokens:** 8,000 (VT-764 — input is prompt size, not a runaway signal)
 - **Wall clock:** 120 seconds
 - **Cost:** ₹5 (500 paise)
 - **Depth (specialist spawn nesting):** 3 — caller-supplied; driver enforces
@@ -44,11 +44,42 @@ logger = logging.getLogger(__name__)
 # message needs read_onboarding_state + record_answer x3 + next_required_question
 # (6 calls). At 5 the run truncated mid-save, the owner saw a "hiccup saving"
 # snag, and it then repeated (the multi_field stuck-loop the VT-611 gate flagged).
-# Runaway is still bounded by the token (10k), wall-clock (120s), cost (₹5), and
+# Runaway is still bounded by the output-token (8k, VT-764), wall-clock (120s), cost (₹5), and
 # depth (3) guards below — tool-call COUNT was the redundantly-tight axis for the
 # reframed role, not a real cost lever.
 ORCHESTRATOR_TOOL_CALL_HARD_LIMIT = 10
-ORCHESTRATOR_TOKEN_HARD_LIMIT = 10_000
+
+# VT-764: the token axis is OUTPUT-ONLY, and 10_000 combined is gone.
+#
+# The old limit counted ``tokens_input + tokens_output`` against 10_000. The brain's prompt alone
+# measures 16,780 tokens at p50 (17,656 max) on dev over 7 days, so the check was TRUE on the first
+# call of EVERY run — and it stopped nothing, because the raise happened inside a langchain callback
+# whose exceptions the callback manager caught and logged. A guard that fires every run and aborts
+# none is worse than no guard: it was the loudest line in the log window while the runs it "guarded"
+# completed at 86.8%.
+#
+# Input tokens are PROMPT SIZE — a deploy-time property, not a runaway signal. A brain that loops or
+# generates endlessly shows it in OUTPUT, tool calls, wall clock and cost. Prompt growth is a real
+# concern with its own gate (``gate-sr-agent-prompt-token-cap``); it does not belong on a runaway
+# axis.
+#
+# MEASURED on deployed dev, `llm_call_events`, 7 days to 2026-08-17 — output tokens per invocation
+# (tenant × call_site × minute), so the next reader does not have to trust an adjective:
+#
+#     call_site           n     out p50   out p95   out max    (in+out max)
+#     complex (brain)     432        42       359       728         68,184
+#     sr_draft_turn       338     1,140     2,995     4,946         24,575
+#     gap_compose         195     1,477     1,803     2,238          3,528
+#     self_evaluate_gate  190       547     1,137     1,732          6,138
+#     turn_brain_tools    202       351       702       904          9,248
+#     triage              980        72       214       490          4,667
+#
+# 8_000 sits ~11x above the brain's observed max (728) and ~1.6x above the largest observed
+# invocation output anywhere in the system (4,946), so a legitimate multi-tool turn cannot trip it
+# while a genuine runaway generation will. Note the in+out max of 68,184 for the brain: the retired
+# limit sat 6.8x UNDER real observed spend, which is the measurement that shows it was never a
+# runaway threshold at all. Raise this WITH a fresh query, never on a hunch.
+ORCHESTRATOR_OUTPUT_TOKEN_HARD_LIMIT = 8_000
 ORCHESTRATOR_WALL_CLOCK_HARD_LIMIT_S = 120.0
 ORCHESTRATOR_COST_HARD_LIMIT_PAISE = 500  # ₹5
 ORCHESTRATOR_DEPTH_HARD_LIMIT = 3
@@ -137,7 +168,7 @@ class OrchestratorAgentDriver:
         *,
         model_name: str,
         tool_call_limit: int = ORCHESTRATOR_TOOL_CALL_HARD_LIMIT,
-        token_limit: int = ORCHESTRATOR_TOKEN_HARD_LIMIT,
+        output_token_limit: int = ORCHESTRATOR_OUTPUT_TOKEN_HARD_LIMIT,
         wall_clock_limit_s: float = ORCHESTRATOR_WALL_CLOCK_HARD_LIMIT_S,
         cost_limit_paise: int = ORCHESTRATOR_COST_HARD_LIMIT_PAISE,
         depth_limit: int = ORCHESTRATOR_DEPTH_HARD_LIMIT,
@@ -145,7 +176,7 @@ class OrchestratorAgentDriver:
         self.agent = agent
         self.model_name = model_name
         self.tool_call_limit = tool_call_limit
-        self.token_limit = token_limit
+        self.output_token_limit = output_token_limit
         self.wall_clock_limit_s = wall_clock_limit_s
         self.cost_limit_paise = cost_limit_paise
         self.depth_limit = depth_limit
@@ -265,11 +296,11 @@ class OrchestratorAgentDriver:
                 run_id=run_id,
                 tenant_id=tenant_id,
             )
-        if usage.cumulative_tokens > self.token_limit:
+        if usage.tokens_output > self.output_token_limit:
             raise HardLimitExceeded(
-                axis="tokens",
-                observed=usage.cumulative_tokens,
-                limit=self.token_limit,
+                axis="tokens_output",
+                observed=usage.tokens_output,
+                limit=self.output_token_limit,
                 run_id=run_id,
                 tenant_id=tenant_id,
             )
@@ -296,7 +327,7 @@ __all__ = [
     "OrchestratorAgentDriver",
     "OrchestratorUsage",
     "ORCHESTRATOR_TOOL_CALL_HARD_LIMIT",
-    "ORCHESTRATOR_TOKEN_HARD_LIMIT",
+    "ORCHESTRATOR_OUTPUT_TOKEN_HARD_LIMIT",
     "ORCHESTRATOR_WALL_CLOCK_HARD_LIMIT_S",
     "ORCHESTRATOR_COST_HARD_LIMIT_PAISE",
     "ORCHESTRATOR_DEPTH_HARD_LIMIT",

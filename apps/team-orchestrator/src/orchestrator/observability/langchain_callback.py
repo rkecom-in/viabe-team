@@ -66,6 +66,20 @@ class OrchestratorReasoningCallback(BaseCallbackHandler):
         status='failed' if context permits.
     """
 
+    # VT-764: THE GUARD MUST BE ABLE TO ABORT.
+    #
+    # langchain's callback manager catches handler exceptions and logs
+    # `Error in <handler> callback:` unless the handler declares raise_error. So every
+    # `HardLimitExceeded` this class raised was swallowed — an ERROR line per LLM/tool boundary per
+    # run, and no abort, while `dispatch_brain`'s `except HardLimitExceeded` branch (and its
+    # `aborted_hard_limit` envelope) had never once executed. A guard whose only effect is a log line
+    # is not a guard.
+    #
+    # This flag makes ANY exception from a handler propagate, so the observability work in each
+    # handler is individually wrapped below and only HardLimitExceeded escapes — the same shape
+    # `llm/provider.py` uses. A write_step or metering failure must still never cost a turn.
+    raise_error = True
+
     def __init__(
         self,
         *,
@@ -102,10 +116,16 @@ class OrchestratorReasoningCallback(BaseCallbackHandler):
         # Mid-invocation pre-LLM check (catches the case where prior
         # boundary pushed us over a limit; we cancel before incurring
         # another LLM cost) + stash this run's graph node for VT-619 billing.
+        #
+        # VT-764: the check is OUTSIDE the guard below so HardLimitExceeded propagates (raise_error
+        # is True on this class); the node stash is best-effort and must never cost a turn.
         self.driver.check_mid_invocation(
             self.usage, run_id=self.run_id, tenant_id=self.tenant_id
         )
-        self._stash_node(**kwargs)
+        try:
+            self._stash_node(**kwargs)
+        except Exception:  # noqa: BLE001 — VT-764: only a limit breach may escape a handler
+            logger.warning("VT-619 node stash swallowed", exc_info=True)
 
     def on_llm_start(
         self,
@@ -127,6 +147,23 @@ class OrchestratorReasoningCallback(BaseCallbackHandler):
         self._on_start_common(**kwargs)
 
     def on_llm_end(self, response: Any, **kwargs: Any) -> None:
+        # VT-764: usage accounting + observability are best-effort (this class now declares
+        # raise_error, so an unguarded parse/write failure here would cost the turn). The
+        # check_mid_invocation call at the END is deliberately outside the guard — a limit breach is
+        # the ONE thing that must escape.
+        try:
+            self._account_and_record(response, **kwargs)
+        except Exception:  # noqa: BLE001
+            logger.warning("VT-125 callback accounting swallowed", exc_info=True)
+
+        # Post-LLM mid-invocation check (catches token/cost overshoot from the call we just
+        # completed). Propagates to dispatch_brain's `except HardLimitExceeded` -> the
+        # `aborted_hard_limit` envelope, which before VT-764 had never once executed.
+        self.driver.check_mid_invocation(
+            self.usage, run_id=self.run_id, tenant_id=self.tenant_id
+        )
+
+    def _account_and_record(self, response: Any, **kwargs: Any) -> None:
         usage_data = self._extract_usage(response)
         if usage_data:
             self.usage.tokens_input += usage_data.get("input_tokens", 0)
@@ -185,12 +222,6 @@ class OrchestratorReasoningCallback(BaseCallbackHandler):
         except Exception:  # noqa: BLE001 — CL-122: metering never breaks a turn
             logger.warning("VT-619 langchain-seam meter swallowed", exc_info=True)
 
-        # Post-LLM mid-invocation check (catches token/cost overshoot
-        # from the call we just completed).
-        self.driver.check_mid_invocation(
-            self.usage, run_id=self.run_id, tenant_id=self.tenant_id
-        )
-
     def on_llm_error(self, error: BaseException, **kwargs: Any) -> None:
         logger.warning(
             "OrchestratorReasoningCallback on_llm_error",
@@ -210,31 +241,47 @@ class OrchestratorReasoningCallback(BaseCallbackHandler):
         **kwargs: Any,
     ) -> None:
         self.usage.tool_calls += 1
+        # VT-764: the limit check is the ONE thing allowed to escape a handler (raise_error is True
+        # on this class) — it catches the (limit+1)-th call BEFORE the tool runs. The audit write is
+        # best-effort and is guarded so it can never cost a turn.
         self.driver.check_mid_invocation(
             self.usage, run_id=self.run_id, tenant_id=self.tenant_id
         )
-        emit_tm_audit(
-            event_layer="does",
-            event_kind="tool_invoked",
-            actor="team_manager",
-            tenant_id=self.tenant_id,
-            run_id=self.run_id,
-            summary=f"tool_invoked: {serialized.get('name', 'unknown')}",
-            action={"tool_name": serialized.get("name", "unknown"), "input_str": input_str[:500] or None},
-            conn=None,
-        )
+        try:
+            emit_tm_audit(
+                event_layer="does",
+                event_kind="tool_invoked",
+                actor="team_manager",
+                tenant_id=self.tenant_id,
+                run_id=self.run_id,
+                summary=f"tool_invoked: {serialized.get('name', 'unknown')}",
+                action={
+                    "tool_name": serialized.get("name", "unknown"),
+                    "input_str": input_str[:500] or None,
+                },
+                conn=None,
+            )
+        except Exception:  # noqa: BLE001 — audit never breaks a turn
+            logger.warning("tool_invoked audit swallowed", exc_info=True)
 
     def on_tool_end(self, output: str, **kwargs: Any) -> None:
-        emit_tm_audit(
-            event_layer="gets",
-            event_kind="tool_result",
-            actor="team_manager",
-            tenant_id=self.tenant_id,
-            run_id=self.run_id,
-            summary=f"tool_result: {kwargs.get('name', 'unknown')}",
-            result={"tool_name": kwargs.get("name", "unknown"), "output": str(output)[:1000] if output else None},
-            conn=None,
-        )
+        # VT-764: guarded — this handler has no limit check to propagate, so nothing here may escape.
+        try:
+            emit_tm_audit(
+                event_layer="gets",
+                event_kind="tool_result",
+                actor="team_manager",
+                tenant_id=self.tenant_id,
+                run_id=self.run_id,
+                summary=f"tool_result: {kwargs.get('name', 'unknown')}",
+                result={
+                    "tool_name": kwargs.get("name", "unknown"),
+                    "output": str(output)[:1000] if output else None,
+                },
+                conn=None,
+            )
+        except Exception:  # noqa: BLE001 — audit never breaks a turn
+            logger.warning("tool_result audit swallowed", exc_info=True)
 
     # -- helpers -----------------------------------------------------
 

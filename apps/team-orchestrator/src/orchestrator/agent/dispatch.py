@@ -68,7 +68,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from orchestrator.agent.orchestrator_agent_driver import (
     ORCHESTRATOR_COST_HARD_LIMIT_PAISE,
-    ORCHESTRATOR_TOKEN_HARD_LIMIT,
+    ORCHESTRATOR_OUTPUT_TOKEN_HARD_LIMIT,
     ORCHESTRATOR_TOOL_CALL_HARD_LIMIT,
     ORCHESTRATOR_WALL_CLOCK_HARD_LIMIT_S,
     HardLimitExceeded,
@@ -2239,8 +2239,12 @@ class _NullDriver:
     tool_call_limit: int = int(os.environ.get(
         "ORCHESTRATOR_TOOL_CALL_HARD_LIMIT", str(ORCHESTRATOR_TOOL_CALL_HARD_LIMIT)
     ))
-    token_limit: int = int(os.environ.get(
-        "ORCHESTRATOR_TOKEN_HARD_LIMIT", str(ORCHESTRATOR_TOKEN_HARD_LIMIT)
+    # VT-764: OUTPUT tokens only. The retired combined 10k limit was TRUE on the first call of
+    # every brain run (the prompt alone measures ~17k) and aborted nothing, because the raise was
+    # swallowed by langchain's callback manager. Both halves are fixed together on purpose: making
+    # the raise propagate while the limit stayed at 10k combined would abort EVERY run.
+    output_token_limit: int = int(os.environ.get(
+        "ORCHESTRATOR_OUTPUT_TOKEN_HARD_LIMIT", str(ORCHESTRATOR_OUTPUT_TOKEN_HARD_LIMIT)
     ))
     wall_clock_limit_s: float = float(os.environ.get(
         "ORCHESTRATOR_WALL_CLOCK_HARD_LIMIT_S", str(ORCHESTRATOR_WALL_CLOCK_HARD_LIMIT_S)
@@ -2264,11 +2268,11 @@ class _NullDriver:
                 run_id=run_id,
                 tenant_id=tenant_id,
             )
-        if usage.cumulative_tokens > self.token_limit:
+        if usage.tokens_output > self.output_token_limit:
             raise HardLimitExceeded(
-                axis="tokens",
-                observed=usage.cumulative_tokens,
-                limit=self.token_limit,
+                axis="tokens_output",
+                observed=usage.tokens_output,
+                limit=self.output_token_limit,
                 run_id=run_id,
                 tenant_id=tenant_id,
             )
