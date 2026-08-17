@@ -2,9 +2,9 @@
 """Dev-only canary for the VT-723 T4 corroboration delta.
 
 Dry run performs no database write, provider call, or other network egress. Authorized --execute
-belongs to CC: it writes the governed evidence state to dev Postgres and copies 16 unchanged
-vectors inside Postgres. It performs no Voyage embedding egress and grants no retrieval/effect
-authority.
+belongs to CC: it writes the governed evidence state to dev Postgres. The corrected plan performs
+no card transitions and therefore copies no vectors. It performs no Voyage embedding egress and
+grants no retrieval/effect authority.
 """
 
 from __future__ import annotations
@@ -97,7 +97,11 @@ def assert_registry(conn, plan, tenant_id: UUID) -> None:
         "AS disputed_count FROM public.knowledge_cards WHERE id = ANY(%s::uuid[])",
         ([item.resolved.card_version_id for item in plan.transitions],),
     ).fetchone()
-    if dict(counts) != {"candidate_count": 15, "disputed_count": 1}:
+    expected_counts = {
+        "candidate_count": plan.candidate_count,
+        "disputed_count": plan.disputed_count,
+    }
+    if dict(counts) != expected_counts:
         raise RuntimeError(f"T4 transition count mismatch: {dict(counts)}")
 
     members = conn.execute(
@@ -109,10 +113,12 @@ def assert_registry(conn, plan, tenant_id: UUID) -> None:
 
     events = conn.execute(
         "SELECT count(*) AS n FROM public.knowledge_lifecycle_events "
-        "WHERE actor_id = 'vt723-corroboration-validator'",
+        "WHERE actor_id = 'vt723-corroboration-validator' "
+        "AND card_version_ref = ANY(%s::uuid[])",
+        ([item.resolved.card_version_id for item in plan.transitions],),
     ).fetchone()["n"]
-    if events != 16:
-        raise RuntimeError(f"T4 lifecycle events={events}, expected 16")
+    if events != len(plan.transitions):
+        raise RuntimeError(f"T4 lifecycle events={events}, expected {len(plan.transitions)}")
 
     embeddings = conn.execute(
         "SELECT count(*) AS n FROM public.knowledge_card_embeddings e "
@@ -145,7 +151,10 @@ def main() -> int:
     print(
         json.dumps(
             {
-                "new_source_clusters": len(plan.sources),
+                "new_source_records": len(plan.sources),
+                "independent_source_clusters": len(
+                    {source.independence_cluster for source in plan.sources}
+                ),
                 "candidate_transitions": plan.candidate_count,
                 "disputed_transitions": plan.disputed_count,
                 "research_only_recorded_absence": len(plan.unresolved_legacy_ids),
@@ -169,14 +178,18 @@ def main() -> int:
         persist_corroboration_plan,
     )
 
-    # BEFORE the connection is even opened. Every card's tier is conditional on the citation being
-    # verifiable against its cited source (CL-2026-08-13-judgment-vs-citation), and reading all 33
-    # archived sources found most are not: claims absent from the cited locator, instructions the
-    # source never gives, a four-sentence portal page carrying an Act's tier, a US postal tariff
-    # scoped to India, and two cards whose recorded URL does not identify the archived bytes.
-    # The previous version of this file asserted that posture in a report. A report cannot stop a
-    # load; this can.
-    assert_corpus_verified(jsonl("t4_corroboration_verification.jsonl"))
+    # BEFORE the connection is even opened. Every card must be either a hash-bound citation that
+    # earns its recorded tier or explicitly disclosed T4 judgment. The record carries before/after
+    # verdicts and the gate has no waiver path.
+    candidate_rows = jsonl("t4_corroboration_candidates.jsonl")
+    expected_cards = {
+        row["card"]["card_version_id"]: (
+            row["card"]["source_class"],
+            row["card"]["provenance"]["source_ids"][0],
+        )
+        for row in candidate_rows
+    }
+    assert_corpus_verified(jsonl("t4_corroboration_verification.jsonl"), expected_cards)
     from scripts.apply_migrations import guard_environment
 
     dsn = database_url()

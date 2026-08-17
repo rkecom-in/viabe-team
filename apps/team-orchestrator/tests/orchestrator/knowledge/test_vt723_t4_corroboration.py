@@ -80,11 +80,10 @@ def artifacts():
 def test_unverified_cards_cannot_be_loaded_and_the_boolean_is_not_trusted() -> None:
     """The gate's MECHANISM, tested on synthetic rows so it stays true as the corpus is fixed.
 
-    Reading the 33 archived sources found that only 6 cards are verified against what their source
-    actually says. Under CL-2026-08-13 the other 27 carry tiers they have not earned, so the corpus
-    may not be loaded — and the enforcement has to be a gate rather than a sentence in a report,
-    because the previous version of this row asserted its posture in a report while `--execute`
-    would have written regardless.
+    Reading the 33 archived sources found that only 6 cards are faithful citations. Under
+    CL-2026-08-13 the other 27 may enter only as explicitly disclosed T4 judgment — and the
+    enforcement has to be a gate rather than a sentence in a report, because the previous version
+    asserted its posture in a report while `--execute` would have written regardless.
     """
     from orchestrator.knowledge.t4_corroboration import (
         EXPECTED_SOURCE_CARDS,
@@ -98,6 +97,7 @@ def test_unverified_cards_cannot_be_loaded_and_the_boolean_is_not_trusted() -> N
             "source_id": f"source-{index}",
             "source_title": "A governed primary source",
             "local_archive_path": "archives/business-knowledge/research/x/y.html",
+            "source_class_before_correction": "t2",
             "recorded_source_class": "t2",
             "recorded_confidence": "medium",
             "recorded_jurisdictions": (),
@@ -107,14 +107,42 @@ def test_unverified_cards_cannot_be_loaded_and_the_boolean_is_not_trusted() -> N
             "tier_verdict": "TIER_OK",
             "jurisdiction_verdict": "OK",
             "confidence_verdict": "OK",
+            "pre_claim_verdict": "SUPPORTED",
+            "pre_vanish_verdict": "CITATION",
+            "pre_action_in_source": "SOURCE_STATES_IT",
+            "pre_tier_verdict": "TIER_OK",
+            "pre_jurisdiction_verdict": "OK",
+            "pre_confidence_verdict": "OK",
+            "correction_action": "RETAINED_EARNED_CITATION_TIER",
+            "waiver": False,
             "landing_grade": True,
             "notes": "verified against the archived bytes",
         }
         base.update(overrides)
         return base
 
+    def expected(items: list[dict[str, Any]]) -> dict[str, tuple[str, str]]:
+        return {
+            item["card_version_id"]: (
+                item["recorded_source_class"],
+                item["source_id"],
+            )
+            for item in items
+        }
+
     clean = [row(index) for index in range(EXPECTED_SOURCE_CARDS)]
-    assert len(assert_corpus_verified(clean)) == EXPECTED_SOURCE_CARDS
+    assert len(assert_corpus_verified(clean, expected(clean))) == EXPECTED_SOURCE_CARDS
+
+    demoted = [row(index) for index in range(EXPECTED_SOURCE_CARDS)]
+    demoted[7] = row(
+        7,
+        recorded_source_class="t4",
+        claim_verdict="JUDGMENT_DISCLOSED",
+        vanish_verdict="JUDGMENT",
+        action_in_source="TIERED_ACTION_DROPPED",
+        correction_action="DEMOTED_TO_T4",
+    )
+    assert len(assert_corpus_verified(demoted, expected(demoted))) == EXPECTED_SOURCE_CARDS
 
     # Each verdict dimension independently blocks the load. A card whose claim is not in its source,
     # or that is really the author's judgment, or whose tier belongs to a different artifact, or
@@ -129,18 +157,36 @@ def test_unverified_cards_cannot_be_loaded_and_the_boolean_is_not_trusted() -> N
         broken = [row(index) for index in range(EXPECTED_SOURCE_CARDS)]
         broken[7] = row(7, **{field: value})
         with pytest.raises(CorroborationError, match="not verified against their sources"):
-            assert_corpus_verified(broken)
+            assert_corpus_verified(broken, expected(broken))
 
     # The stored `landing_grade` boolean is recomputed, never trusted — otherwise the cheapest way
     # past the gate would be to edit one word in a data file.
     forged = [row(index) for index in range(EXPECTED_SOURCE_CARDS)]
     forged[3] = row(3, claim_verdict="NOT_FOUND", landing_grade=True)
     with pytest.raises(CorroborationError, match="not verified against their sources"):
-        assert_corpus_verified(forged)
+        assert_corpus_verified(forged, expected(forged))
+
+    waived = [row(index) for index in range(EXPECTED_SOURCE_CARDS)]
+    waived[2] = row(2, waiver=True)
+    with pytest.raises(CorroborationError, match="not verified against their sources"):
+        assert_corpus_verified(waived, expected(waived))
+
+    # A verification row cannot self-declare T4 while the generated card still carries T2.
+    unbound = [row(index) for index in range(EXPECTED_SOURCE_CARDS)]
+    unbound[4] = row(
+        4,
+        recorded_source_class="t4",
+        claim_verdict="JUDGMENT_DISCLOSED",
+        vanish_verdict="JUDGMENT",
+        action_in_source="TIERED_ACTION_DROPPED",
+        correction_action="DEMOTED_TO_T4",
+    )
+    with pytest.raises(CorroborationError, match="not bound to the generated candidate corpus"):
+        assert_corpus_verified(unbound, expected(clean))
 
     # A truncated record cannot pass by omitting the cards that fail.
     with pytest.raises(CorroborationError, match="exactly 33 unique cards"):
-        assert_corpus_verified(clean[:6])
+        assert_corpus_verified(clean[:6], expected(clean))
 
 
 def test_the_committed_verification_record_reflects_the_real_corpus_state() -> None:
@@ -160,20 +206,23 @@ def test_the_committed_verification_record_reflects_the_real_corpus_state() -> N
     rows = jsonl("t4_corroboration_verification.jsonl")
     parsed = [SourceVerificationRow.model_validate(item) for item in rows]
     assert len(parsed) == EXPECTED_SOURCE_CARDS
-    cards = {
-        item["card"]["card_version_id"] for item in jsonl("t4_corroboration_candidates.jsonl")
-    }
+    cards = {item["card"]["card_version_id"] for item in jsonl("t4_corroboration_candidates.jsonl")}
     assert {item.card_version_id for item in parsed} == cards, (
         "every card must carry a verdict; a card with no verdict is an unverified card"
     )
     assert all(item.landing_grade == item.verified for item in parsed), (
         "the stored boolean must agree with the verdicts it is derived from"
     )
-    if all(item.verified for item in parsed):
-        assert_corpus_verified(rows)
-    else:
-        with pytest.raises(CorroborationError, match="not verified against their sources"):
-            assert_corpus_verified(rows)
+    assert all(item.verified for item in parsed)
+    assert all(item.waiver is False for item in parsed)
+    expected_cards = {
+        item["card"]["card_version_id"]: (
+            item["card"]["source_class"],
+            item["card"]["provenance"]["source_ids"][0],
+        )
+        for item in jsonl("t4_corroboration_candidates.jsonl")
+    }
+    assert_corpus_verified(rows, expected_cards)
 
 
 def _builder():
@@ -279,8 +328,8 @@ def test_local_source_bytes_verify_and_regeneration_is_deterministic(artifacts) 
 def test_all_sources_pass_real_vt710_pipeline_and_raw_stays_local(artifacts) -> None:
     parent, sources, candidates, _delta = artifacts
     assert len(sources) == len(candidates) == 33
-    assert len({source.independence_cluster for source in sources}) == 33
-    assert all(source.source_class in {"t1", "t1v", "t2", "t3"} for source in sources)
+    assert len({source.independence_cluster for source in sources}) == 32
+    assert Counter(source.source_class for source in sources)["t4"] == 27
     assert all(source.depends_on_original_forum is False for source in sources)
     assert all(source.paywall_access_circumvented is False for source in sources)
     assert all(source.local_archive_path.startswith("archives/") for source in sources)
@@ -298,9 +347,7 @@ def test_all_sources_pass_real_vt710_pipeline_and_raw_stays_local(artifacts) -> 
     parent_by_card_id = {card.card_id: card for card in parent.members}
     for source in sources:
         candidate = candidate_by_version[source.candidate_card_version_id].card
-        parent_id = str(
-            uuid5(NAMESPACE_URL, f"viabe:o8:card:{source.supports[0].legacy_id}")
-        )
+        parent_id = str(uuid5(NAMESPACE_URL, f"viabe:o8:card:{source.supports[0].legacy_id}"))
         target = parent_by_card_id[parent_id]
 
         # Provenance is complete per card: the source, acquisition date and source tier are bound
@@ -313,6 +360,16 @@ def test_all_sources_pass_real_vt710_pipeline_and_raw_stays_local(artifacts) -> 
         # Codex-authored distillation is never labelled owner/VTR/verified-human evidence. A fact
         # may retain its primary source's T1/T1v class; authorship authority remains seed.
         assert candidate.authority is EvidenceAuthority.SEED
+        assert any(
+            (
+                candidate.applicability.jurisdictions,
+                candidate.applicability.size_bands,
+                candidate.applicability.maturity_stages,
+                candidate.applicability.channels,
+            )
+        ), f"{source.source_id}: applicability must never be empty"
+        if candidate.source_class is SourceClass.T4_EXPERIENTIAL:
+            assert candidate.expires_at is not None
 
         # The card is a new source for an existing semantic claim, so it shares that claim's
         # SUBJECT — a topic dimension. It must NOT share the parent's PREDICATE: that predicate is
@@ -322,30 +379,20 @@ def test_all_sources_pass_real_vt710_pipeline_and_raw_stays_local(artifacts) -> 
         assert candidate.claim_key.subject == target.claim_key.subject
         assert candidate.claim_key.predicate != target.claim_key.predicate
         assert candidate.claim_key.predicate != "independent_evidence"
-        if candidate.source_class is not SourceClass.T1_REGULATORY:
-            assert candidate.applicability == target.applicability
+        assert source.source_class_before_correction in {"t1", "t1v", "t2", "t3"}
 
 
 def test_delta_accounts_for_every_t4_claim_and_real_negative_findings(artifacts) -> None:
     _parent, _sources, _candidates, delta = artifacts
     assert len(delta) == 18
-    assert Counter(row.resolved_status.value for row in delta) == {
-        "candidate": 15,
-        "disputed": 1,
-        "research_only": 2,
-    }
-    disputed = next(row for row in delta if row.resolved_status.value == "disputed")
-    assert disputed.legacy_id == "bk028-comment-sample-loop-for-service-demand"
-    assert {edge.stance.value for edge in disputed.evidence_edges} == {
-        "corroborates",
-        "refutes",
-    }
+    assert Counter(row.resolved_status.value for row in delta) == {"research_only": 18}
     unresolved = {row.legacy_id: row for row in delta if row.search.recorded_absence}
-    assert set(unresolved) == {
-        "bk025-high-trust-b2b-free-diagnostic-to-paid-pilot",
-        "bk113-good-glamm-integration-capacity",
-    }
-    assert all(row.search.skipped_paywalled_sources for row in unresolved.values())
+    assert len(unresolved) == 18
+    assert {
+        "bk019-bulky-product-shipping-unit-economics-local-first",
+        "bk031-partner-network-co-selling-borrows-trust",
+        "bk032-brand-building-memory-proof-and-promise",
+    } <= set(unresolved)
 
 
 def test_independence_threshold_excludes_forum_partial_and_semantic_retellings(artifacts) -> None:
@@ -362,29 +409,32 @@ def test_independence_threshold_excludes_forum_partial_and_semantic_retellings(a
             assert edge.independence_cluster == source.underlying_evidence_id
             assert source.depends_on_original_forum is False
 
+    cai_szeidl = [
+        source
+        for source in sources
+        if source.local_archive_path.endswith(
+            ("nber-firm-referrals-w33082.pdf", "nber-interfirm-w22951.pdf")
+        )
+    ]
+    assert len(cai_szeidl) == 2
+    assert len({source.independence_cluster for source in cai_szeidl}) == 1
+
+    # Two separately auditable source rows may share one underlying cluster. Loading both must not
+    # reject them; the delta's set-based threshold is where the retelling collapses to one.
     duplicate = deepcopy(jsonl("t4_corroboration_sources.jsonl"))
     duplicate[1]["independence_cluster"] = duplicate[0]["independence_cluster"]
     duplicate[1]["underlying_evidence_id"] = duplicate[0]["underlying_evidence_id"]
-    with pytest.raises(CorroborationError, match="retellings must collapse"):
-        load_source_manifest(duplicate)
-
-    weakened = deepcopy(jsonl("t4_corroboration_delta.jsonl"))
-    candidate = next(row for row in weakened if row["resolved_status"] == "candidate")
-    candidate["evidence_edges"] = candidate["evidence_edges"][:1]
-    candidate["qualifying_new_cluster_count"] = 1
-    candidate["total_independence_cluster_count"] = 2
-    with pytest.raises(CorroborationError, match="two new corroboration clusters"):
-        load_delta(weakened)
+    assert len(load_source_manifest(duplicate)) == 33
 
 
 def test_plan_changes_evidence_state_not_expression_or_serving(artifacts) -> None:
     parent, sources, candidates, delta = artifacts
     plan = build_corroboration_plan(parent, sources, candidates, delta)
     assert len(plan.members) == 118
-    assert len(plan.transitions) == 16
-    assert plan.candidate_count == 15
-    assert plan.disputed_count == 1
-    assert len(plan.unresolved_legacy_ids) == 2
+    assert len(plan.transitions) == 0
+    assert plan.candidate_count == 0
+    assert plan.disputed_count == 0
+    assert len(plan.unresolved_legacy_ids) == 18
     assert plan.corpus_status == "shadow"
     assert plan.admission_verdict == "pending"
     assert plan.AUTHORIZES_EFFECTS is False
@@ -424,7 +474,7 @@ def test_persistence_is_append_only_complete_and_uses_real_evidence_clusters(art
     assert not any(" DELETE " in f" {query.upper()} " for query in queries)
     assert sum("INSERT INTO public.knowledge_sources" in query for query in queries) == 33
     assert sum("INSERT INTO public.knowledge_corpus_versions" in query for query in queries) == 1
-    assert sum("INSERT INTO public.knowledge_lifecycle_events" in query for query in queries) == 16
+    assert sum("INSERT INTO public.knowledge_lifecycle_events" in query for query in queries) == 0
     assert sum("INSERT INTO public.knowledge_corpus_members" in query for query in queries) == 118
     source_edges = [
         params
@@ -434,16 +484,15 @@ def test_persistence_is_append_only_complete_and_uses_real_evidence_clusters(art
     manifest_clusters = {source.independence_cluster for source in sources}
     assert manifest_clusters <= {params[3] for params in source_edges}  # type: ignore[index]
 
-    source_by_id = {source.source_id: source for source in sources}
     refuting_ids = {
         source.source_id
         for source in sources
         if any(support.stance.value == "refutes" for support in source.supports)
     }
     assert refuting_ids
-    persisted_support = {
-        params[2]: params[4]  # type: ignore[index]
-        for params in source_edges
-        if params[2] in source_by_id  # type: ignore[index]
-    }
-    assert all(persisted_support[source_id] is False for source_id in refuting_ids)
+    assert all(
+        not support.qualifies_for_threshold
+        for source in sources
+        for support in source.supports
+        if source.source_id in refuting_ids
+    )

@@ -73,7 +73,8 @@ class CorroborationSource(_StrictModel):
     canonical_url: str = Field(min_length=1)
     title: str = Field(min_length=1)
     publisher: str = Field(min_length=1)
-    source_class: Literal["t1", "t1v", "t2", "t3"]
+    source_class: Literal["t1", "t1v", "t2", "t3", "t4"]
+    source_class_before_correction: Literal["t1", "t1v", "t2", "t3"]
     content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     acquired_at: datetime
     local_archive_path: str = Field(min_length=1)
@@ -213,6 +214,7 @@ class SourceVerificationRow(_StrictModel):
     source_id: str = Field(min_length=1)
     source_title: str = Field(min_length=1)
     local_archive_path: str = Field(min_length=1)
+    source_class_before_correction: str = Field(min_length=1)
     recorded_source_class: str = Field(min_length=1)
     recorded_confidence: str = Field(min_length=1)
     recorded_jurisdictions: tuple[str, ...] = ()
@@ -222,28 +224,49 @@ class SourceVerificationRow(_StrictModel):
     tier_verdict: str = Field(min_length=1)
     jurisdiction_verdict: str = Field(min_length=1)
     confidence_verdict: str = Field(min_length=1)
+    pre_claim_verdict: str = Field(min_length=1)
+    pre_vanish_verdict: str = Field(min_length=1)
+    pre_action_in_source: str = Field(min_length=1)
+    pre_tier_verdict: str = Field(min_length=1)
+    pre_jurisdiction_verdict: str = Field(min_length=1)
+    pre_confidence_verdict: str = Field(min_length=1)
+    correction_action: str = Field(min_length=1)
+    waiver: bool
     landing_grade: bool
     notes: str = Field(min_length=1)
 
     @property
     def verified(self) -> bool:
-        return (
+        earned_citation = (
             self.claim_verdict == "SUPPORTED"
             and self.vanish_verdict == "CITATION"
             and self.tier_verdict == "TIER_OK"
             and self.jurisdiction_verdict == "OK"
             and self.confidence_verdict == "OK"
         )
+        disclosed_judgment = (
+            self.recorded_source_class == "t4"
+            and self.claim_verdict == "JUDGMENT_DISCLOSED"
+            and self.vanish_verdict == "JUDGMENT"
+            and self.action_in_source == "TIERED_ACTION_DROPPED"
+            and self.tier_verdict == "TIER_OK"
+            and self.jurisdiction_verdict == "OK"
+            and self.confidence_verdict == "OK"
+            and self.correction_action == "DEMOTED_TO_T4"
+        )
+        return not self.waiver and (earned_citation or disclosed_judgment)
 
 
-def assert_corpus_verified(rows: Sequence[Mapping[str, Any]]) -> tuple[SourceVerificationRow, ...]:
+def assert_corpus_verified(
+    rows: Sequence[Mapping[str, Any]],
+    expected_cards: Mapping[str, tuple[str, str]],
+) -> tuple[SourceVerificationRow, ...]:
     """Refuse to load a corpus whose cards are not verified against their own sources.
 
     CL-2026-08-13-judgment-vs-citation makes a source tier conditional on the citation being
-    verifiable against the cited source. Reading the 33 archived sources established that most are
-    not: claims that are not at the cited locator, behavioural instructions the source never gives,
-    a portal page explaining an Act carrying the Act's tier, a US postal tariff carrying `IN`, and
-    two cards whose recorded URL does not identify the archived bytes at all.
+    verifiable against the cited source. A faithful, hash-bound citation may carry the class its
+    evidence earns. A finding that survives the source's disappearance is judgment and may enter
+    only as explicitly disclosed T4. There is deliberately no waiver posture.
 
     A report can assert compliance; a gate cannot. This one runs before any write, so the corpus
     physically cannot enter the registry while a single card's tier is unearned. It is not advice
@@ -257,6 +280,26 @@ def assert_corpus_verified(rows: Sequence[Mapping[str, Any]]) -> tuple[SourceVer
     if len(parsed) != EXPECTED_SOURCE_CARDS or len({row.index for row in parsed}) != len(parsed):
         raise CorroborationError(
             f"verification must cover exactly {EXPECTED_SOURCE_CARDS} unique cards"
+        )
+    row_ids = {row.card_version_id for row in parsed}
+    if row_ids != set(expected_cards):
+        raise CorroborationError(
+            "verification card IDs must exactly match the generated candidate corpus"
+        )
+    mismatched = [
+        row
+        for row in parsed
+        if expected_cards[row.card_version_id] != (row.recorded_source_class, row.source_id)
+    ]
+    if mismatched:
+        detail = "; ".join(
+            f"[{row.index}] {row.card_version_id}: verification says "
+            f"{row.recorded_source_class}/{row.source_id}, candidate says "
+            f"{expected_cards[row.card_version_id][0]}/{expected_cards[row.card_version_id][1]}"
+            for row in mismatched
+        )
+        raise CorroborationError(
+            f"verification is not bound to the generated candidate corpus: {detail}"
         )
     unverified = [row for row in parsed if not row.verified]
     if unverified:
@@ -280,11 +323,10 @@ def load_source_manifest(rows: Sequence[Mapping[str, Any]]) -> tuple[Corroborati
         raise CorroborationError(f"invalid corroboration source manifest: {exc}") from exc
     if len({item.source_id for item in parsed}) != len(parsed):
         raise CorroborationError("corroboration source IDs must be unique")
-    clusters = [item.independence_cluster for item in parsed]
-    if len(set(clusters)) != len(clusters):
-        raise CorroborationError(
-            "one row per underlying evidence cluster is required; retellings must collapse"
-        )
+    # Multiple source rows may legitimately belong to one underlying evidence cluster. Keeping
+    # each source individually auditable while counting the shared cluster once is the correction
+    # for bk031; rejecting duplicate cluster IDs forced semantic retellings to masquerade as
+    # independent evidence.
     return parsed
 
 
@@ -457,10 +499,10 @@ def build_corroboration_plan(
         members=tuple(member_by_id[key] for key in sorted(member_by_id)),
         unresolved_legacy_ids=tuple(unresolved),
     )
-    if len(plan.members) != 118 or len(plan.transitions) != 16:
-        raise CorroborationError("plan must retain 118 members and resolve exactly 16 T4 cards")
-    if plan.candidate_count != 15 or plan.disputed_count != 1 or len(unresolved) != 2:
-        raise CorroborationError("result drift from 15 candidate / 1 disputed / 2 unresolved")
+    if len(plan.members) != 118 or plan.transitions:
+        raise CorroborationError("corrected plan must retain 118 members with zero T4 transitions")
+    if plan.candidate_count or plan.disputed_count or len(unresolved) != 18:
+        raise CorroborationError("corrected result must leave all 18 claims research_only")
     if any(
         card.source_class is SourceClass.T4_EXPERIENTIAL and card.retrieval_eligible
         for card in plan.members
@@ -562,7 +604,7 @@ def persist_corroboration_plan(conn: ConnectionLike, plan: T4CorroborationPlan) 
 
 
 def copy_corroboration_embeddings(conn: ConnectionLike, plan: T4CorroborationPlan) -> None:
-    """Copy the 16 unchanged v1 vectors inside Postgres; this performs no provider egress."""
+    """Copy unchanged transition vectors inside Postgres; this performs no provider egress."""
 
     for item in plan.transitions:
         digest = card_content_digest(item.prior)

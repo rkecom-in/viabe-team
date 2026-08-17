@@ -18,7 +18,7 @@ import re
 import subprocess
 import sys
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Literal
@@ -798,6 +798,82 @@ SOURCES = [
     ),
 ]
 
+# VT-750 — byte verification found only these six source-distilled cards earn a citation tier as
+# currently written. Every other card is explicit T4 judgment. This is deliberately keyed by the
+# archived filename (the byte-bound identity), not array index or publisher reputation.
+VERIFIED_CITATION_FILES = frozenset(
+    {
+        "cbic-circular-92-11-2019.pdf",
+        "msme-odr-guidelines.pdf",
+        "nber-reviews-quality-w34934.pdf",
+        "arxiv-personalized-free-trials-2006.13420.pdf",
+        "nber-interfirm-w22951.pdf",
+        "nber-crowdfunding-w25881.pdf",
+    }
+)
+
+# A tiered card can be a faithful citation while still failing to corroborate the PARENT forum
+# claim it was acquired for. These five are real citations but not qualifying edges for the target
+# claim. The crowdfunding paper is the sole retained qualifying edge; one edge cannot promote.
+NONQUALIFYING_VERIFIED_FILES = VERIFIED_CITATION_FILES - {"nber-crowdfunding-w25881.pdf"}
+
+# Cai & Szeidl's two papers are one research program: same authors/region and one cites the other.
+# The source rows remain individually auditable, but independence counting sees ONE cluster.
+SHARED_INDEPENDENCE_CLUSTERS = {
+    "nber-firm-referrals-w33082.pdf": "research:cai-szeidl-china-network-program",
+    "nber-interfirm-w22951.pdf": "research:cai-szeidl-china-network-program",
+}
+
+TARGET_APPLICABILITY: dict[str, Applicability] = {
+    B1: Applicability(jurisdictions=("IN",), channels=("gst_compliance",)),
+    B2: Applicability(jurisdictions=("IN",), channels=("gst_compliance",)),
+    B4: Applicability(jurisdictions=("IN",), channels=("gst_compliance",)),
+    B5: Applicability(jurisdictions=("IN",), channels=("msme_b2b",)),
+    B6: Applicability(jurisdictions=("IN",), channels=("msme_dispute_resolution",)),
+    B18: Applicability(size_bands=("micro_small_business",), channels=("b2b_sales",)),
+    B19: Applicability(size_bands=("micro_small_business",), channels=("ecommerce",)),
+    B20: Applicability(size_bands=("micro_small_business",), channels=("online_community",)),
+    B24: Applicability(maturity_stages=("early_stage",), channels=("founder_led_sales",)),
+    B25: Applicability(size_bands=("micro_small_business",), channels=("b2b_sales",)),
+    B26: Applicability(size_bands=("micro_small_business",), channels=("b2b_sales",)),
+    B27: Applicability(size_bands=("micro_small_business",), channels=("online_community",)),
+    B28: Applicability(size_bands=("micro_small_business",), channels=("sampling_trials",)),
+    B29: Applicability(size_bands=("micro_small_business",), channels=("marketing_campaigns",)),
+    B31: Applicability(size_bands=("micro_small_business",), channels=("b2b_partnerships",)),
+    B32: Applicability(size_bands=("micro_small_business",), channels=("brand_marketing",)),
+    B33: Applicability(maturity_stages=("early_stage",), channels=("demand_validation",)),
+    B113: Applicability(size_bands=("micro_small_business",), channels=("business_integration",)),
+}
+
+
+def corrected_source_class(spec: dict[str, Any]) -> SourceClass:
+    """The class this CARD earned after archived-byte verification (not source reputation)."""
+
+    if spec["filename"] in VERIFIED_CITATION_FILES:
+        return SourceClass(spec["source_class"])
+    return SourceClass.T4_EXPERIENTIAL
+
+
+def corrected_supports(spec: dict[str, Any]) -> list[dict[str, Any]]:
+    """Make unsupported judgment and domain-transfer edges visibly non-qualifying."""
+
+    qualifies = (
+        spec["filename"] in VERIFIED_CITATION_FILES
+        and spec["filename"] not in NONQUALIFYING_VERIFIED_FILES
+    )
+    corrected: list[dict[str, Any]] = []
+    for item in spec["supports"]:
+        row = dict(item)
+        if not qualifies:
+            # Preserve a genuine contradiction as a contradiction even when the card itself has
+            # been demoted to T4. It remains non-qualifying, so it cannot independently dispute or
+            # promote the parent claim, but the evidence graph does not reverse its meaning.
+            if row["stance"] != "refutes":
+                row["stance"] = "partial"
+            row["qualifies_for_threshold"] = False
+        corrected.append(row)
+    return corrected
+
 
 def evidence_predicate(claim: str) -> str:
     """Derive a card's claim predicate from ITS OWN claim.
@@ -902,14 +978,22 @@ def build() -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, 
 
     decisions: dict[str, SourceRightsDecision] = {}
     prepared: list[tuple[dict[str, Any], Path, str, str]] = []
-    for spec in SOURCES:
+    for raw_spec in SOURCES:
+        card_class = corrected_source_class(raw_spec)
+        spec = {
+            **raw_spec,
+            "source_class_before_correction": raw_spec["source_class"],
+            "source_class": card_class.value,
+            "cluster": SHARED_INDEPENDENCE_CLUSTERS.get(raw_spec["filename"], raw_spec["cluster"]),
+            "supports": corrected_supports(raw_spec),
+        }
         path = ARCHIVE / spec["filename"]
         if not path.is_file():
             raise ValueError(f"missing local-only source snapshot: {path}")
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
         source_id = str(uuid5(NAMESPACE_URL, f"viabe:o8:source:{spec['url']}"))
         decisions[source_id] = SourceRightsDecision(
-            source_class=SourceClass(spec["source_class"]),
+            source_class=card_class,
             usage_rights=UsageRights(
                 status=UsageRightsStatus.UNKNOWN,
                 reviewed_at=ACQUIRED_AT,
@@ -962,10 +1046,10 @@ def build() -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, 
                 ),
             )
         else:
-            # Evidence is not universal merely because it is non-regulatory. Inherit the exact
-            # target claim's business applicability (B2B/ecommerce/India/etc.) so retrieval cannot
-            # confidently apply a scoped study to every tenant and channel.
-            applicability = Applicability.model_validate(primary_parent["applicability"])
+            # Every non-regulatory card is explicitly scoped. Empty/universal-by-accident cards are
+            # not permitted: an absent dimension used to match every tenant context.
+            applicability = TARGET_APPLICABILITY[spec["supports"][0]["legacy_id"]]
+        expires_at = ACQUIRED_AT + timedelta(days=180) if spec["source_class"] == "t4" else None
         candidate = pipeline.ingest(
             AcquiredSource(
                 source_id=source_id,
@@ -980,12 +1064,11 @@ def build() -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, 
             governance=CandidateGovernance(
                 domain=KnowledgeDomain(spec["domain"]),
                 authority=EvidenceAuthority.SEED,
-                confidence=suggested_confidence_for_source(
-                    SourceClass(spec["source_class"])
-                ),
+                confidence=suggested_confidence_for_source(SourceClass(spec["source_class"])),
                 applicability=applicability,
                 retention_class="lifecycle_managed",
                 independence_cluster=spec["cluster"],
+                expires_at=expires_at,
             ),
             card_id=str(uuid5(NAMESPACE_URL, f"viabe:o8:evidence-card:{source_id}")),
             card_version_id=str(
@@ -1000,6 +1083,7 @@ def build() -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, 
                 "title": spec["title"],
                 "publisher": spec["publisher"],
                 "source_class": spec["source_class"],
+                "source_class_before_correction": spec["source_class_before_correction"],
                 # knowledge_sources describes the acquired source reproduction, not our JSON
                 # distillation. Keep that byte hash distinct from CandidateArtifact's
                 # source_content_hash (which binds the owned extraction input).
@@ -1051,13 +1135,10 @@ def build() -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, 
             if edge["qualifies_for_threshold"] and edge["stance"] == "corroborates"
         }
         qualifying = {
-            edge["independence_cluster"]
-            for edge in edges
-            if edge["qualifies_for_threshold"]
+            edge["independence_cluster"] for edge in edges if edge["qualifies_for_threshold"]
         }
         has_refutation = any(
-            edge["qualifies_for_threshold"] and edge["stance"] == "refutes"
-            for edge in edges
+            edge["qualifies_for_threshold"] and edge["stance"] == "refutes" for edge in edges
         )
         if has_refutation and corroborating:
             resolved, reason, absence = (
@@ -1109,10 +1190,7 @@ def build() -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, 
 
 def write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
     path.write_text(
-        "".join(
-            json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n"
-            for row in rows
-        ),
+        "".join(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n" for row in rows),
         encoding="utf-8",
     )
 
@@ -1124,13 +1202,14 @@ def main() -> int:
     write_jsonl(DELTA_OUT, delta)
     counts = Counter(row["resolved_status"] for row in delta)
     tiers = Counter(row["source_class"] for row in manifests)
+    independent_clusters = len({row["independence_cluster"] for row in manifests})
     report = f"""# VT-723 T4 corroboration report
 
 - Exact forum claims reviewed: **{len(delta)}**
-- New governed source clusters: **{len(manifests)}**
+- New governed source records: **{len(manifests)}**, representing **{independent_clusters} independent clusters**
 - VT-710 pipeline results: **{len(candidates)} inert candidates**, all embedding-deferred
-- Source-tier mix **as recorded at build time**: **{tiers["t1"]} T1 / {tiers["t1v"]} T1v / {tiers["t2"]} T2 / {tiers["t3"]} T3**. This is what the acquisition asserted, NOT a verified mix — see the verification record below, which found most of these tiers unearned
-- **Source verification: `T4_CORROBORATION_VERIFICATION.md` + `t4_corroboration_verification.jsonl`.** Every card was checked against the bytes of the source it cites. `assert_corpus_verified` REFUSES to load the corpus while any card is unverified, and it runs before the database connection is opened. Three promotions out of research-only are recorded as unsound because their qualifying clusters do not hold (`t4_corroboration_unsound_promotions.json`)
+- Earned card-tier mix after archived-byte verification: **{tiers["t1"]} T1 / {tiers["t1v"]} T1v / {tiers["t2"]} T2 / {tiers["t3"]} T3 / {tiers["t4"]} T4**
+- **Source verification: `T4_CORROBORATION_VERIFICATION.md` + `t4_corroboration_verification.jsonl`.** Every card was checked against the bytes of the source it cites. Six faithful citations retain the class their evidence earns; the other 27 are explicitly demoted to T4 judgment. `assert_corpus_verified` accepts only those two exact postures and has no waiver path. The three unsound promotions are recorded before and after in `t4_corroboration_unsound_promotions.json`
 - Authorship authority: **seed** for all Codex distillations; none labelled owner, VTR, or verified outcome
 - Claim identity: subject inherited from the target claim, **predicate derived from each card's OWN claim** (it used to be inherited, which made a cited fact carry an invented behavioural instruction); no universal-by-default cards
 - Byte binding: each card reaches its source bytes as card -> `provenance.source_ids[0]` -> `knowledge_sources.content_hash`, which is the sha256 of the acquired archive file. `source_content_hash` is the hash of our own extraction input and binds nothing about the source
@@ -1148,11 +1227,10 @@ This corpus lands in **SHADOW**. The retrieval call site is not wired and prompt
 locked off. These cards and evidence transitions become durable reviewable substrate only; this
 change makes no claim of current product impact.
 
-bk028-comment-sample-loop-for-service-demand is disputed: a SaaS field experiment supports
-carefully targeted free trials, while an independent randomized study found free distribution can
-reduce later paid demand. bk025-high-trust-b2b-free-diagnostic-to-paid-pilot and
-bk113-good-glamm-integration-capacity remain research-only because only partial evidence was found
-for their exact formulations. This is recorded absence, not silent rejection.
+All 18 forum claims remain research-only. The corrected evidence set supplies at most one
+qualifying independent cluster to any target. Non-qualifying partial and refuting evidence remains
+recorded for audit, but it cannot promote or dispute a parent claim. This is recorded absence, not
+silent rejection.
 """
     REPORT_OUT.write_text(report, encoding="utf-8")
     print(
