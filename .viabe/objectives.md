@@ -10,7 +10,8 @@
 > newest CL/VT touching it is STALE and must be reconciled BEFORE any status claim is made from
 > this file. The scoreboard exists so Fazal can see the war in one page; a stale scoreboard is
 > worse than none — it launders drift as status.
-> Last updated: **2026-08-17, CC (M2 CLOSED)** — CURRENT STATE: **M2 closed on eleven rows and a
+> Last updated: **2026-08-17, CC (M2 CLOSED · M3 in progress — VT-742 §1 landed)** — CURRENT STATE:
+> **M2 closed on eleven rows and a
 > measured pack number.** Full pack ×3 on the post-M2 build: **353/390 = 90.5% clean** vs gate (d)'s
 > 338/390 = 86.7%, **0 TIMEOUT and 0 INDETERMINATE across 870 steps**, all domain floors clean;
 > stable-fails 10 → 4. **integration 100%** (96.2), **onboarding 100%** (89.7), manager 86.8% (79.8),
@@ -40,8 +41,22 @@
 > both, so the deterministic net carries it, not the prompt).
 > **Open, mechanisms named:** VT-764 (a token guard that trips every run and is swallowed by the
 > callback manager — a guard that cannot fire), 4 stable-fails (down from 10), VT-755 scope 2,
-> VT-752 items 2–5, VT-754 scope 5, VT-745 part 1. **M3 starts now** — VT-742 §1 + the VT-725 control
-> plane.
+> VT-752 items 2–5, VT-754 scope 5, VT-745 part 1.
+> **M3 IN PROGRESS (2026-08-17): VT-742 §1 BUILT + PROVEN ON DEV.** `resolve_sender(tenant_id)` is
+> now the only source of a WhatsApp sending number (own live WABA > pinned shared > default shared,
+> fail-closed), all three `messages.create` sites consume it, migration 207 applied to dev, and a CI
+> gate makes the old env read un-reintroducible. The row was written as reputation hygiene; the
+> functional half is bigger — customer inbound resolves the tenant by the number the customer
+> messaged TO, so under the shared sender **a customer could be messaged but not heard.** A customer
+> send therefore now REFUSES rather than downgrading to shared. 82/82 green on deployed dev across
+> the sender, transport, dev-guard and WABA suites; RED-proven by restoring the env read (3 tests
+> fail + the gate fails on the exact line). Exit gates (a)(b)(c)(g) CLOSED; (d)(e)(f) belong to
+> scopes 3–6, not built. **Four pre-existing defects uncovered:** the harness wrote a non-E.164 WABA
+> number for months (`+1555<uuid-hex>` — also the one malformed live number of 134 on dev); three
+> tests could only pass ONCE against a given database (one of them presented as a pooler error and
+> was a `UniqueViolation`); `tenant_whatsapp_accounts.phone_number` had no uniqueness while the
+> inbound lookup reads it with `LIMIT 1`; and `wa_send_allowed` passes a `live` row with a NULL
+> number. Next in M3: the VT-725 control plane.
 > Prior header
 > (2026-08-06, superseded): **VT-734 — CURRENT STATE: **VT-734
 > approval-breach FIXED + DEV-PROVEN** (mig 190; ordering invariant + repeat-refusal; breach repro

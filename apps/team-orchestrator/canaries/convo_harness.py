@@ -1583,7 +1583,12 @@ def cmd_setup(args: argparse.Namespace) -> int:
                 "(tenant_id, waba_id, phone_number_id, phone_number, display_name, status) "
                 "VALUES (%s, 'harness-waba', 'harness-pnid', %s, %s, 'live') "
                 "ON CONFLICT (tenant_id) DO UPDATE SET status = 'live'",
-                (tenant_id, f"+1555{tenant_id[:7].replace('-', '')}", name),
+                # VT-742: this number is now a REAL sender — resolve_sender reads it and the
+                # transport asserts E.164 on `from_`. The old `+1555{tenant_id[:7]}` form carried
+                # the uuid's hex letters (`+1555470fea5`), which is not E.164, so every harness
+                # customer send would fail closed. Derive DIGITS from the same uuid prefix so the
+                # number stays stable per tenant and unique enough for mig 207's live-phone UNIQUE.
+                (tenant_id, f"+1555{int(tenant_id[:8], 16) % 10**9:09d}", name),
             )
             if args.flow:
                 # VT-582 calibration fix — arm the __flow__ sentinel (_maybe_handle_post_profile_flow)

@@ -29,6 +29,10 @@ import pytest
 
 pytest.importorskip("twilio")
 
+from orchestrator.integrations.sender_resolution import (  # noqa: E402
+    KIND_DEFAULT_SHARED,
+    Sender,
+)
 from orchestrator.utils import twilio_send  # noqa: E402
 from orchestrator.utils.dev_send_guard import (  # noqa: E402
     DevSendGuardClient,
@@ -37,6 +41,20 @@ from orchestrator.utils.dev_send_guard import (  # noqa: E402
     is_prod_env,
     maybe_wrap_for_dev,
 )
+
+
+def _stub_sender(monkeypatch, number: str = "+910000000000") -> None:
+    """VT-742: the template send resolves its sender per tenant, which is a DB read. These tests are
+    about the dev GUARD, not about sender precedence (that is proven against real Postgres in
+    tests/orchestrator/integrations/test_vt742_sender_resolution.py), and they run with no substrate
+    — so the resolver is stubbed and the guard assertions stay exactly what they were."""
+    monkeypatch.setattr(
+        twilio_send,
+        "resolve_sender",
+        lambda tenant_id, *, conn=None, require_own_waba=False: Sender(
+            number, KIND_DEFAULT_SHARED, str(tenant_id)
+        ),
+    )
 
 # Fazal's real number — the number the breach actually messaged. The guard MUST
 # mock a dev send to it when it is not explicitly allowlisted.
@@ -249,6 +267,7 @@ def test_freeform_owner_send_funnels_through_guard(guarded_client_at_seam):
 def test_template_owner_send_funnels_through_guard(guarded_client_at_seam, monkeypatch):
     """send_template_message (owner template) is mocked on dev with empty allowlist."""
     spy_inner = guarded_client_at_seam
+    _stub_sender(monkeypatch)
     # Resolve to a real-shaped registry entry so we reach the transport call.
     monkeypatch.setattr(
         twilio_send,
@@ -270,6 +289,7 @@ def test_customer_send_funnels_through_guard(guarded_client_at_seam, monkeypatch
     STILL hits the dev guard — the customer compliance rail and the dev guard are
     independent layers; the dev guard mocks the transport regardless."""
     spy_inner = guarded_client_at_seam
+    _stub_sender(monkeypatch)
     monkeypatch.setattr(
         twilio_send,
         "_registry_resolve",

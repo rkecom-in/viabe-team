@@ -26,6 +26,7 @@ from orchestrator.error_router import route_failure
 from orchestrator.failures import FailureRecord, FailureType
 from orchestrator.graph import get_pool
 from orchestrator.integrations.customer_inbound import customer_inbound_run
+from orchestrator.integrations.sender_resolution import shared_sender_numbers
 from orchestrator.onboarding.whatsapp_signup import whatsapp_signup_run
 from orchestrator.privacy.consent import record_consent
 from orchestrator.runner import webhook_pipeline_run
@@ -165,16 +166,48 @@ def _lookup_customer_inbound_tenant(to_phone: str) -> str | None:
     Customer-inbound (inbound-first) is the inverse of owner-inbound: the message is
     addressed TO the business's WABA number (`To`), FROM a customer. Only `live` WABAs
     are eligible (a tenant can't receive customer traffic pre-verification). Service
-    pool (this resolution has no tenant context yet)."""
+    pool (this resolution has no tenant context yet).
+
+    VT-742: two guards, because this function turns a phone number into a TENANT and both failure
+    modes hand one tenant another tenant's customer conversation.
+
+    1. A **shared** sending number never resolves here. If the shared number were ever written into
+       some tenant's ``tenant_whatsapp_accounts.phone_number``, this lookup would route EVERY
+       tenant's customer replies to that one tenant. Migration 207's partial UNIQUE makes the
+       duplicate hard; this makes acting on it impossible.
+    2. **Ambiguity fails closed**, mirroring ``_lookup_tenant``: fetch two rows, and refuse to guess
+       if two tenants claim the same live number. Migration 207 should make that unreachable — if it
+       fires, the index is missing or was created before the violation.
+    """
     if not to_phone:
         return None
+    if to_phone in shared_sender_numbers():
+        logger.error(
+            "twilio-ingress: customer inbound addressed to a SHARED sending number "
+            "(to=%s) — fail-closed, NOT resolving a tenant. A shared number must never appear in "
+            "tenant_whatsapp_accounts.phone_number; if it does, every tenant's customer replies "
+            "would route to whichever tenant holds that row.",
+            hash_phone(to_phone),
+        )
+        return None
     with get_pool().connection() as conn:
-        row = conn.execute(
+        rows = conn.execute(
             "SELECT tenant_id FROM tenant_whatsapp_accounts "
-            "WHERE phone_number = %s AND status = 'live' LIMIT 1",
+            "WHERE phone_number = %s AND status = 'live' LIMIT 2",
             (to_phone,),
-        ).fetchone()
-    return str(row["tenant_id"]) if row else None
+        ).fetchall()
+    if not rows:
+        return None
+    if len(rows) > 1:
+        logger.error(
+            "twilio-ingress: ambiguous live WABA number — %d tenants claim to=%s; fail-closed "
+            "(NOT guessing whose customer this is). Impossible under "
+            "tenant_whatsapp_accounts_live_phone_key (mig 207) — investigate the schema if it fires.",
+            len(rows),
+            hash_phone(to_phone),
+        )
+        return None
+    return str(rows[0]["tenant_id"])
 
 
 # DBOS workflow statuses for a prior workflow that is still progressing — the

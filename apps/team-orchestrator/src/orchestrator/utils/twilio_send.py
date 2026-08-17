@@ -40,11 +40,16 @@ from twilio.base.exceptions import TwilioRestException
 from twilio.rest import Client
 
 from orchestrator.db import tenant_connection
+from orchestrator.integrations.sender_resolution import (
+    SenderUnresolvable,
+    resolve_sender,
+)
 from orchestrator.templates_registry import (
     UnknownTemplateError,
     resolve as _registry_resolve,
 )
 from orchestrator.utils.dev_send_guard import maybe_wrap_for_dev
+from orchestrator.utils.phone_e164 import E164_RE
 from orchestrator.utils.phone_token import hash_phone
 
 logger = logging.getLogger(__name__)
@@ -248,18 +253,28 @@ def _client() -> Client:
     return cast(Client, maybe_wrap_for_dev(inner))
 
 
-def get_tenant_whatsapp_number(tenant_id: UUID) -> str | None:
-    """Resolve a tenant's own WhatsApp number.
+def get_tenant_whatsapp_number(tenant_id: UUID, *, conn: Any = None) -> str | None:
+    """Resolve a tenant's own WhatsApp number — the OWNER-facing identity/recipient, never a sender
+    (VT-742: the sender lives in ``tenant_whatsapp_accounts``; migration 050's "WABA sender" comment
+    on this column is stale).
 
     This is a tenant-scoped read (the tenant's own ``tenants`` row), so it goes
     through ``tenant_connection`` — RLS-enforced under ``app_role`` (CL-71).
+
+    ``conn`` (VT-742, mirroring ``wa_send_allowed``'s VT-460 contract): an already-open RLS-scoped
+    tenant connection. Given one, the read rides it, so a caller needing BOTH the recipient and the
+    sender identity for one send opens ONE connection instead of two.
     """
-    with tenant_connection(tenant_id) as conn:
-        row = conn.execute(
-            "SELECT whatsapp_number FROM tenants WHERE id = %s",
-            (str(tenant_id),),
-        ).fetchone()
-    return row["whatsapp_number"] if row else None
+    query = "SELECT whatsapp_number FROM tenants WHERE id = %s"
+    params = (str(tenant_id),)
+    if conn is not None:
+        row = conn.execute(query, params).fetchone()
+    else:
+        with tenant_connection(tenant_id) as own_conn:
+            row = own_conn.execute(query, params).fetchone()
+    if not row:
+        return None
+    return row["whatsapp_number"] if isinstance(row, dict) else row[0]
 
 
 _WHATSAPP_PREFIX = "whatsapp:"
@@ -272,7 +287,12 @@ _WHATSAPP_PREFIX = "whatsapp:"
 # with 21211 ("invalid To") on six live sends. Coercion at ingest (contacts._normalize_phone)
 # is the primary fix; this guard makes it STRUCTURALLY impossible for a non-E.164 string to be
 # dispatched even if a future ingest path slips one through.
-_E164_RE = re.compile(r"^\+[1-9]\d{7,14}$")
+#
+# VT-742: the pattern itself now lives in ``utils.phone_e164`` because ``resolve_sender`` needs the
+# same shape check one layer earlier (a sending number read out of the DATABASE must be refused at
+# resolution, not discovered here). Two modules needing one rule is how a second, drifting regex
+# gets written; the SHAPE is shared, the exception raised on a violation stays each caller's own.
+_E164_RE = E164_RE
 
 
 class BlockedRecipientError(ValueError):
@@ -308,7 +328,8 @@ def _assert_e164(number: str, *, role: str) -> None:
 def _wa(number: str, *, role: str = "recipient") -> str:
     """Validate (VT-487) then idempotently apply the WhatsApp channel scheme to an E.164 number.
 
-    ``TEAM_TWILIO_FROM_NUMBER`` and recipient numbers are stored/passed as PLAIN E.164 (CL-435).
+    Sending numbers (from ``resolve_sender``) and recipient numbers are both stored/passed as PLAIN
+    E.164 (CL-435).
     Twilio requires ``whatsapp:+…`` on BOTH ``from_`` and ``to`` to route on the WhatsApp channel;
     a raw number misroutes to SMS and fails (VT-399: the welcome to a real signup failed Twilio
     error 21659 because both ends were unprefixed). Idempotent — never double-prefixes.
@@ -398,6 +419,11 @@ OWNER_TEMPLATE_WHITELIST: frozenset[str] = frozenset(
 
 #: SendResult.error_code returned when ENFORCE refuses a non-whitelisted owner template.
 TEMPLATE_NOT_WHITELISTED = "template_not_whitelisted"
+
+#: SendResult.error_code returned when VT-742's resolver cannot produce a sending number (no own
+#: live WABA for a customer send, no valid pin, no valid default). Distinct from a Twilio failure
+#: code — nothing was dispatched, and retrying will not make a sender appear.
+SENDER_UNRESOLVABLE = "sender_unresolvable"
 
 
 def _owner_template_whitelist_action(template_name: str, audience: str) -> str:
@@ -703,11 +729,35 @@ def send_template_message(
     # every {{n}} with real values.
     content_variables = _positional_content_variables(entry.variables, params)
 
+    # VT-742 §1: the sender is RESOLVED per tenant, never read from a process-wide env constant at
+    # the send site. Deliberately placed LAST, after the VT-460 ungated-customer-send rail and the
+    # VT-683 whitelist: those are structural safety gates, and a fault raised before them would mask
+    # which gate actually refused the send. Fail-closed here returns a failed SendResult rather than
+    # raising — this is a @DBOS.step, a raise would be RETRIED, and a sender does not become
+    # resolvable on a retry.
+    try:
+        sender = resolve_sender(tenant_id, require_own_waba=is_customer_send)
+    except SenderUnresolvable as exc:
+        logger.error(
+            "twilio-send: no sender resolved for tenant=%s template='%s' -> refusing the send: %s",
+            tenant_id,
+            template_name,
+            exc,
+        )
+        return SendResult(
+            success=False,
+            error_code=SENDER_UNRESOLVABLE,
+            error_message=str(exc),
+            attempted_at=attempted_at,
+            template_name=template_name,
+            recipient_phone_token=recipient_token,
+        )
+
     try:
         message = _client().messages.create(
             content_sid=content_sid,
             content_variables=json.dumps(content_variables),
-            from_=_wa(os.environ["TEAM_TWILIO_FROM_NUMBER"], role="sender"),
+            from_=_wa(sender.phone_number, role="sender"),
             to=_wa(recipient),
         )
     except TwilioRestException as exc:
@@ -879,9 +929,17 @@ def send_freeform_message(
     # VT-676: optional in-session media attachment (WhatsApp allows media on a freeform reply
     # inside an open session — no Meta media-template approval needed). The URL may be a SHORT-TTL
     # signed PII-document URL (customer export) — it is passed to the transport ONLY, never logged.
+    # VT-742 §1: resolved per tenant. A customer session send REQUIRES the tenant's own live WABA —
+    # a customer messaged from the shared number cannot reply to us at all, because customer inbound
+    # resolves the tenant by the number the customer messaged TO (VT-742 finding 2). This raises
+    # rather than returning: the callers' freeform-fallback ladders would otherwise re-attempt a send
+    # that has no valid sender, and no send has happened.
     create_kwargs: dict[str, Any] = {
         "body": body,
-        "from_": _wa(os.environ["TEAM_TWILIO_FROM_NUMBER"], role="sender"),
+        "from_": _wa(
+            resolve_sender(tenant_id, require_own_waba=is_customer_session).phone_number,
+            role="sender",
+        ),
         "to": _wa(recipient_phone),
     }
     if media_urls:
@@ -959,9 +1017,13 @@ def send_interactive_message(
         recipient_token, _dedup_body, tenant_id=tenant_id, surface=surface
     ):
         return CHOKE_SUPPRESSED_SID
+    # VT-742 §1: resolved per tenant (see send_freeform_message — same contract, same reasoning).
     create_kwargs: dict[str, Any] = {
         "content_sid": content_sid,
-        "from_": _wa(os.environ["TEAM_TWILIO_FROM_NUMBER"], role="sender"),
+        "from_": _wa(
+            resolve_sender(tenant_id, require_own_waba=is_customer_session).phone_number,
+            role="sender",
+        ),
         "to": _wa(recipient_phone),
     }
     if content_variables:
