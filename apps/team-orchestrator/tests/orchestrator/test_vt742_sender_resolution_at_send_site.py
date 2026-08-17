@@ -104,13 +104,15 @@ def test_interactive_from_is_the_resolved_sender_not_the_env(spy, monkeypatch):
     assert calls[0]["audience"] == "owner"
 
 
-def test_customer_session_send_requires_the_tenants_own_waba(spy, monkeypatch):
-    """A customer-facing send must demand the tenant's own live WABA.
+def test_a_customer_session_send_declares_the_customer_audience(spy, monkeypatch):
+    """The site must tell the resolver WHICH audience it is sending to.
 
-    Not stylistic: customer inbound resolves the tenant by the number the customer messaged TO
-    (`_lookup_customer_inbound_tenant`), so a message sent from the shared number cannot be replied
-    to at all. VT-742 finding 2 — the two halves of the conversation were built against different
-    senders.
+    What the resolver then does with that is a separate, Fazal-owned decision: today
+    (`CUSTOMER_SENDS_USE_OWN_WABA = False`) a customer send resolves to the Viabe number like every
+    other send, because requiring the tenant's own WABA would make a customer send depend on owner
+    action — the blocker his 2026-08-10 and 2026-08-17 rulings exclude. This test pins the DECLARATION,
+    which is what makes the flip a one-line change; the resolution itself is proven against real
+    Postgres in tests/orchestrator/integrations/test_vt742_sender_resolution.py.
     """
     tid = uuid4()
     calls = _resolver_spy(monkeypatch)

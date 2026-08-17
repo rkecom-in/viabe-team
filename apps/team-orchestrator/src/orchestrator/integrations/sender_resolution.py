@@ -20,37 +20,30 @@ SELECT tenant_id FROM tenant_whatsapp_accounts WHERE phone_number = %s AND statu
 So when we send FROM the shared number, the customer's reply arrives with `To` = the shared number,
 which matches no `tenant_whatsapp_accounts` row — and the inbound resolves to **no tenant**. Under a
 shared sender **a customer can be messaged but cannot be heard.** The two halves of the customer
-conversation were built against different senders. That is why a customer send here REFUSES rather
-than falling back to shared (``audience="customer"``): sending a message the customer cannot answer
-is worse than not sending it, and this row is allowed to suppress a send but never to authorise one.
+conversation were built against different senders.
 
-## The AUDIENCE split — the correction that came out of building this
+**That finding stands, and the fix I first built for it was wrong.** I made a customer send REQUIRE
+the tenant's own live WABA — which made the send depend on OWNER ACTION (Embedded Signup, business
+verification, display-name approval). Fazal's ruling, twice: owner-owned WABA is a dependency we
+cannot manage, therefore a BLOCKER, and *zero owner action is required for anything in this row*. So
+requiring it is not a fix; the gap needs the INBOUND to resolve a tenant some other way. See
+``CUSTOMER_SENDS_USE_OWN_WABA``.
 
-The row says "replace all three env reads with this call", which read literally puts every send on the
-tenant's own WABA. **That is wrong for OWNER-facing sends, and it would have been a silent product
-change.** The tenant's WABA is *their shop's* number, displaying *their* name. The Manager messaging
-the owner from it means the owner receives Viabe's messages from their own business identity, and the
-Viabe relationship disappears from the surface where it lives. That is Fazal's call to make, not a
-side effect of a refactor — so owner sends keep coming from the Viabe estate, byte-identically to
-today, and only customer-facing sends move to the tenant's own number. Flagged for his ruling.
+## Precedence — TODAY (Fazal 2026-08-17: everything sends from the Viabe number)
 
-(Owner INBOUND routing is unaffected either way: `_lookup_tenant` matches the owner's `From` against
-`tenants.whatsapp_number` and runs BEFORE the customer lookup. This split is about identity, not
-routing.)
-
-## Precedence (VT-742 §1), evaluated in order
-
-**`audience="customer"`** — a send to an end customer:
-1. the tenant's **own live WABA number**, REQUIRED — VT-286's output, finally consumed. No own live
-   WABA (or a malformed one) → **refuse**. There is no acceptable downgrade: see the reframe above.
-
-**`audience="owner"`** — a send to the business owner (the default):
+Both audiences resolve within the shared Viabe estate:
 1. the tenant's **pinned shared number** (`tenants.pinned_sender_e164`, migration 207)
 2. else the **default shared number** (`TEAM_TWILIO_FROM_NUMBER`)
 
-The owner path never reads `tenant_whatsapp_accounts` at all. Pinning still applies to it, because
-owner traffic counts toward the reputation of whichever shared number it leaves from — which is the
-entire point of pinning.
+Neither audience reads `tenant_whatsapp_accounts`. The `audience` parameter is still real: it is what
+the own-WABA branch keys on, so the day owner-owned WABA becomes deliverable
+(`CUSTOMER_SENDS_USE_OWN_WABA = True`) customer sends move and owner sends deliberately do NOT — the
+owner's relationship is with Viabe, and putting Viabe's messages on the shop's own number would make
+the Viabe relationship invisible on the surface where it lives.
+
+Owner INBOUND routing is unaffected by any of this: `_lookup_tenant` matches the owner's `From`
+against `tenants.whatsapp_number` and runs BEFORE the customer lookup. Sender choice is identity, not
+routing.
 
 **PIN, never round-robin** (VT-742 §2, decided before a second number exists): a tenant is assigned
 one number and stays on it, so one bad tenant's reputation damage is contained to the tenants sharing
@@ -60,15 +53,15 @@ that number instead of being spread across the whole estate. Today the estate is
 
 ## Fail-closed
 
-`SenderUnresolvable` when no step yields a well-formed E.164 number, or when a customer send has no
-own live WABA. **Never fall through to "some number"** — a wrong `from_` is a cross-tenant identity
-error, not a cosmetic one.
+`SenderUnresolvable` when no step yields a well-formed E.164 number — and, once the own-WABA flag is
+on, when a customer send has no usable own WABA. **Never fall through to "some number"** — a wrong
+`from_` is a cross-tenant identity error, not a cosmetic one.
 
-A customer send with **no tenant** is also refused. The production customer-inbound path
-(`customer_inbound._default_send`) was calling the transport with `is_customer_session=True` and no
-tenant at all — the pre-push suite caught it. The fix is to thread the tenant, which
-`handle_customer_inbound` has all along, not to allow a customer send that cannot name whose customer
-it is.
+Separately, and regardless of the flag: the production customer-inbound path
+(`customer_inbound._default_send`) was calling the transport with `is_customer_session=True` and **no
+tenant at all** — the pre-push suite caught it. The tenant is threaded now, because a customer send
+needs to be attributable for pinning and per-tenant quality accounting (§2-§4) even when every send
+leaves from the same number.
 
 ## What this module must NOT touch
 
@@ -182,6 +175,29 @@ def _read_tenant_sender_state(tenant_id: UUID | str, conn: Any) -> dict[str, Any
 AUDIENCE_OWNER = "owner"
 AUDIENCE_CUSTOMER = "customer"
 
+#: FAZAL RULING 2026-08-17, correcting my build: **all communications send from the Viabe number for
+#: now.** Owner-owned WABA is a dependency we cannot manage (it needs owner action: Embedded Signup,
+#: business verification, display-name approval) and is therefore a BLOCKER, not a mitigation — the
+#: same ruling as 2026-08-10 ("Unless these entire thing can be automated without the owners
+#: involvement, these will just act as blockers"), and VT-742's own Boundaries line: *zero owner
+#: action required for anything in this row*.
+#:
+#: I built the customer path to REQUIRE the tenant's own live WABA and refuse otherwise, which made a
+#: customer send depend on owner action — precisely what that ruling excludes. Flag off restores the
+#: shared Viabe number for every audience.
+#:
+#: This is a CODE constant, not an env var, on purpose: which number a business's customers see is an
+#: identity decision, and it should not be flippable by setting a variable on a box. The WABA path
+#: below stays built and tested so that flipping this to True is the whole change on the day
+#: owner-owned WABA becomes real (VT-286 is a post-value UPGRADE, not a launch gate).
+#:
+#: KNOWN CONSEQUENCE, not hidden by this flag: with customer sends leaving from the shared number, a
+#: customer's reply arrives with `To` = the shared number and `_lookup_customer_inbound_tenant`
+#: matches no `tenant_whatsapp_accounts` row, so the reply resolves to NO tenant. That is today's
+#: behaviour and it predates VT-742; it needs the inbound to resolve a tenant some other way, which
+#: is its own row. Requiring the WABA is NOT the fix — that is the blocker.
+CUSTOMER_SENDS_USE_OWN_WABA = False
+
 
 def resolve_sender(
     tenant_id: UUID | str | None,
@@ -209,13 +225,18 @@ def resolve_sender(
         )
     tid = str(tenant_id) if tenant_id is not None else None
 
-    if audience == AUDIENCE_CUSTOMER and tid is None:
+    # Fazal 2026-08-17: everything sends from the Viabe number for now, so a customer send resolves
+    # within the shared estate exactly like an owner send. The own-WABA branch below is unreachable
+    # until the flag flips.
+    want_own_waba = audience == AUDIENCE_CUSTOMER and CUSTOMER_SENDS_USE_OWN_WABA
+
+    if want_own_waba and tid is None:
         raise SenderUnresolvable(
             "a customer send needs a tenant_id — it has no WABA to resolve otherwise, and it must "
             "not fall back to a shared number the customer cannot reply to"
         )
 
-    if audience == AUDIENCE_CUSTOMER:
+    if want_own_waba:
         state = _read_tenant_sender_state(tid, conn)
         if state is None:
             # No visible tenant row (absent, or RLS-invisible on this connection) — terminal for a
@@ -246,7 +267,7 @@ def resolve_sender(
             )
         return Sender(str(waba_number), KIND_OWN_WABA, tid)
 
-    # --- owner audience: the shared estate only -------------------------------------------
+    # --- the shared Viabe estate (owner always; customer too, while the flag is off) -------
     #
     # The pin is read ONLY when the estate holds more than one number. With a single shared number a
     # pin can only point at that same number, so the read cannot change the answer — and paying a
@@ -281,6 +302,7 @@ def resolve_sender(
 __all__ = [
     "AUDIENCE_CUSTOMER",
     "AUDIENCE_OWNER",
+    "CUSTOMER_SENDS_USE_OWN_WABA",
     "KIND_DEFAULT_SHARED",
     "KIND_OWN_WABA",
     "KIND_PINNED_SHARED",
