@@ -24,6 +24,11 @@ _ALLOWLIST = frozenset(
         # The sanctioned single site that reads `railway variables --json` internally and emits
         # only booleans (VT-403).
         "scripts/env_presence.py",
+        # The sanctioned single site that WRITES a variable. Same contract in the other direction:
+        # `railway variables --set` echoes the whole variable table, so the subprocess output is
+        # captured and never printed, and the value is read from the environment or stdin rather than
+        # from argv. Without this, the only route to setting a dev config var was a raw call.
+        "scripts/env_set.py",
         # This checker names the forbidden pattern.
         "scripts/check_no_raw_railway_variables.py",
     }
