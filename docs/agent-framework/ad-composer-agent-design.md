@@ -1,7 +1,7 @@
 # Ad Composer Agent — design checkpoint
 
-**Status:** design only; no activation or registry entry.  
-**Base:** `origin/dev` at `bf352beb984d4ad4de476f1796a93247206587c0` (2026-08-19).
+**Status:** CC-approved; VT-769 implementation included, inert/default-off.
+**Implementation base:** stacked on VT-768 at `3e2ac7494515cd033cf0ff9c586feddf69c4dc55`.
 
 ## Job and constitutional boundary
 
@@ -43,8 +43,10 @@ measured.
 
 ## Tool belt: sendless and ads-write-free by construction
 
-Proposed tools are only `read_aggregate_campaign_inputs`, `read_approved_content_artifact`,
-`compose_campaign_proposal`, `validate_campaign_proposal`, and `store_campaign_proposal`.
+The resolved ACF tool belt is empty and is checked by `assert_agent_tools_safe` at import and
+registration; this capability-level assertion is the primary sendless/ads-write-free guarantee.
+Logical operations are reading already-supplied aggregate inputs and approved artifacts, composing,
+validating and returning a proposal. The proposer receives no effect tool and performs no storage.
 
 The module must not import or be injected with `customer_send`, `agent_send_draft`, Twilio, Resend,
 Meta Marketing API, Google Ads API, OAuth token stores, customer/recipient repositories, audience
@@ -52,9 +54,9 @@ uploaders, or any generic HTTP client. The proposal store is separate from `agen
 `agent_drafts` is a send-adjacent lifecycle surface. Storage is tenant-scoped, RLS + FORCE-RLS,
 DSR-registered in the same future migration, and cannot contain raw customer data.
 
-Tests must fail if the agent module imports a send choke or ads SDK, if its ACF tool list contains a
-gated/effect capability, if a fixture supplies customer-level data, or if an output omits metric,
-kill criterion, destination request, attribution caveat, or manual-publication marker.
+Tests prove the guard RED with deliberately broken send/ads imports and a gated tool fixture. They
+also reject customer-level data and outputs missing metric, kill criterion, destination request,
+attribution caveat or the immutable manual-publication boundary.
 
 ## Destination links and the current seam
 
@@ -80,7 +82,7 @@ changing its predicate, time period or denominator. It may not manufacture socia
 percentage, or a “best-performing” label. Content whose evidence has expired is rejected for
 refresh.
 
-`validate_campaign_proposal` returns machine-readable failures. At minimum it checks:
+`validate_campaign_candidate` is the live runtime gate (not the eval-only advice helper). It checks:
 
 - exactly one primary success metric and its event source;
 - a kill rule with ₹ spend, event threshold and decision action;
@@ -89,8 +91,7 @@ refresh.
 - all quantitative claims bind to supplied facts;
 - UTM components are normalized and contain no PII;
 - no customer list, phone, email or sensitive targeting trait; and
-- `publication_mode == "manual_owner_only"` and `effect_authorized == false`.
+- publication/effect authority are class constants, not model-populated instance fields.
 
 Retrieval, content approval, a high self-check score, or an owner-approved proposal never authorizes
 the advertising effect. Manual publication remains outside this agent and outside its tools.
-
