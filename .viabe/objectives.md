@@ -1,5 +1,22 @@
 # VIABE TEAM — OBJECTIVES (status of record)
 
+> ## ⚡ O12 · OPERATION FIRST PROOF — THE BINDING OBJECTIVE (Fazal, 2026-08-18) — IN PROGRESS
+> **Bar (Fazal's, verbatim intent):** the launch statement *"Our own AI team does our Sales and
+> Marketing; here are the numbers"* — RKEcom is TENANT ZERO on prod; Viabe Team runs the sales &
+> marketing of Viabe Reports (Location Feasibility live · Market Intelligence upcoming) through a
+> **two-week proof window** producing attributed, err-under numbers.
+> **Full specification (PINNED): `.viabe/FIRST-PROOF.md`** — six agents (Acquisition, Lead
+> win-back, Campaigns, Checkout rescue, Content writer, Ad planner), P0–P3 tracks, red lines,
+> tenant-zero pre-registration. **Tenant workflow diagram (PINNED):
+> `docs/diagrams/tenant-workflow.svg`** — the tenant-facing picture of what the team does.
+> **Composition into the ladder:** O12 is O0's first real-world instantiation. It SUPERSEDES the
+> M4–M7 milestone shape (M1 ✅ M2 ✅ M3 → P0.1); every other objective below keeps its bar and now
+> serves O12: O2/O6 (rails under real money) · O5 (owner language live) · O7 (promotion = P0.3) ·
+> O8 (shadow serving live; capture ledger = the proof's evidence) · O11 (the value compiler's
+> first real run). **Dates flex, sequence binds** (Fazal 2026-08-18).
+> **Red lines (constitutional):** no autonomous ad SPEND · no send without consent basis — our own
+> gates bind RKEcom hardest of all.
+
 > Objective-level view — what we are trying to achieve and where each stands. NOT a task list
 > (tasks live in the sprint dashboard / VT rows). **Maintainer: CC** (Fazal ruling 2026-07-18
 > ~04:15 IST via Cowork 224500Z — this file IS the target checklist; CC updates it at every
@@ -10,7 +27,7 @@
 > newest CL/VT touching it is STALE and must be reconciled BEFORE any status claim is made from
 > this file. The scoreboard exists so Fazal can see the war in one page; a stale scoreboard is
 > worse than none — it launders drift as status.
-> Last updated: **2026-08-17, CC (M2 CLOSED · M3 in progress — VT-742 §1 landed)** — CURRENT STATE:
+> Last updated: **2026-08-19, CC (M2 CLOSED · M3 REOPENED — VT-725 gates (a)+(f) were never real)** — CURRENT STATE:
 > **M2 closed on eleven rows and a
 > measured pack number.** Full pack ×3 on the post-M2 build: **353/390 = 90.5% clean** vs gate (d)'s
 > 338/390 = 86.7%, **0 TIMEOUT and 0 INDETERMINATE across 870 steps**, all domain floors clean;
@@ -79,7 +96,27 @@
 > `decision_evidence_links` 200 rows, and both forced failure depths degraded rather than raised — so
 > the per-tenant flip Fazal ratified demonstrably works at runtime with no deploy. Gate (f) (full pack)
 > is running. Nothing is injected: shadow cannot reach a prompt, and the seam refuses to serve if that
-> ever changes. Also in the window: **VT-764** (the swallowed token guard — output-token axis sized from
+> ever changes.
+>
+> **2026-08-19 — CORRECTION, and it is a big one: shadow serving was never actually live.** The line
+> above is true about the flag and false about the behaviour. Two things were wrong at once and each
+> alone was sufficient. First, the deployed dev service had **no `VOYAGE_API_KEY`** — dev logs show a
+> real `manager_turn:` degrading to no-cards with `EmbeddingKeyMissingError` and not one non-degraded
+> serving line. Second, and worse because the key fix did not cure it: the retrieval call lived inside
+> **`dispatch_brain`, which is exactly the router `skip_legacy_dispatch` skips** — and dev runs
+> **enforce** mode, where the triage seam owns `new_task`/`answer_pending` turns and `dispatch_brain`
+> never runs. So the Manager's most common turns on dev consulted the corpus **never**:
+> `decision_evidence_links` held **zero** `manager_turn:` rows across the entire life of the feature.
+>
+> The canary that closed gate (a) calls `retrieve_cards_for_turn` **directly**, and the wiring test
+> greps `dispatch_brain`'s source — so both passed on a path no live turn takes, and the wiring test's
+> own docstring had said it could not prove a live trace. **Gates (a) and (f) are REOPENED.** Fixed:
+> key set on dev, retrieval moved to the per-turn path in `runner` ahead of the branch, pin moved with
+> it. Also fixed in the same pass: **migration 208 raised on any fresh database** (the corpus is seeded
+> by `registry_seed`, not by migrations, so it resolved 0 of 63 and could not tell "nothing to do" from
+> "the corpus drifted") — which is why the pre-push suite was red and nothing had been pushed since
+> 04:06Z. The lesson worth keeping past this row: **three separate failures tonight were a missing
+> environment variable wearing a defect's clothes**, and the fourth was a green test on an unused path. Also in the window: **VT-764** (the swallowed token guard — output-token axis sized from
 > a 7-day ledger query, `raise_error` on the callback) plus a correction to my own overclaim about it,
 > **VT-765** (a customer's reply to the shared number resolves to NO tenant — Critical, Fazal owns the
 > routing choice), **VT-766** (74 aborts, zero recorded reasons), and a sanctioned env SETTER closing
