@@ -258,8 +258,6 @@ def test_both_call_sites_are_wired():
     So the pin moved with the call: the Manager-side retrieval belongs on the per-turn path in
     ``runner``, ahead of the router branch, where no mode can route around it.
     """
-    import inspect
-
     from orchestrator import runner
     from orchestrator.manager import workflow
 
@@ -278,8 +276,6 @@ def test_manager_retrieval_is_not_behind_the_enforce_branch():
     Structural, because the alternative is a live turn: the call must appear BEFORE the
     ``if not skip_legacy_dispatch:`` branch in the source, so both routers traverse it.
     """
-    import inspect
-
     from orchestrator import runner
 
     src = inspect.getsource(runner)
