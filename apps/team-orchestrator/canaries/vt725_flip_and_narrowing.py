@@ -60,6 +60,26 @@ def _assert_env(conn, expected: str) -> None:
     print(f"  env-guard: sentinel {actual!r} == expected {expected!r} ✓")
 
 
+def _assert_embedding_key() -> None:
+    """The second instance of the substrate-not-booted class the pool comment in ``main`` describes.
+
+    ``card_serving`` fail-softs to no-cards on ANY retrieval error, including
+    ``EmbeddingKeyMissingError``. Absent ``VOYAGE_API_KEY`` every gate below therefore reports a
+    PRODUCT failure — "tenant A retrieved ZERO cards", "the specialist retrieved nothing", "ZERO
+    evidence links" — when the only fault is that the caller never sourced ``voyage.env``. That is
+    exactly what happened on the 2026-08-17T23:27Z run: rc=1, three gate FAILs, zero defects.
+
+    A missing key means the gates were NOT MEASURED, which is not the same as failed and must never
+    be counted as one. Fail fast, distinctly, before any gate can manufacture a verdict from it.
+    """
+    if not os.environ.get("VOYAGE_API_KEY"):
+        raise SystemExit(
+            "VT-725 INDETERMINATE: VOYAGE_API_KEY is unset — retrieval would degrade to no-cards "
+            "and every gate below would report a product failure it did not measure. "
+            "Source .viabe/secrets/voyage.env and re-run. This is NOT a gate failure."
+        )
+
+
 def _retrieve(tenant_id: str, identity: str, *, decision: str):
     from orchestrator.knowledge.card_serving import retrieve_cards_for_turn
     from orchestrator.knowledge.contracts import KnowledgeDomain, RetrievalStage
@@ -133,6 +153,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.expected_env != "dev":
         raise SystemExit("VT-725 FAIL: this canary is dev-only")
+
+    _assert_embedding_key()
 
     os.environ.setdefault("TEAM_KNOWLEDGE_SERVING", "shadow")
     tenant_a, tenant_b = str(UUID(args.tenant_a)), str(UUID(args.tenant_b))
