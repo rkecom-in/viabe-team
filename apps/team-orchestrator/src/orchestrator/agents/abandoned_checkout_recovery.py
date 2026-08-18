@@ -36,7 +36,7 @@ assert_agent_tools_safe(AGENT_TOOLS, surface="agents.abandoned_checkout_recovery
 
 class CheckoutSourceKind(str, Enum):
     SHOPIFY = "shopify"
-    REPORTS_FUNNEL = "reports_funnel"
+    VIABE_REPORTS = "reports_funnel"
 
 
 class CheckoutSourceError(ValueError):
@@ -236,7 +236,7 @@ class ShopifyAbandonedCheckoutSource:
 class ReportsFunnelSource:
     """Normalise CC's Reports bridge records; the bridge must already protect contact/destination."""
 
-    source_kind = CheckoutSourceKind.REPORTS_FUNNEL
+    source_kind = CheckoutSourceKind.VIABE_REPORTS
 
     def __init__(self, *, reader: RawReader) -> None:
         self._reader = reader

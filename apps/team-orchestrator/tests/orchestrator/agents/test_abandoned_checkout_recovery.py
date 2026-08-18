@@ -43,7 +43,7 @@ def _reports_row(**overrides: object) -> dict[str, object]:
 def _attempt(tenant_id=None, **overrides: object) -> s2.CheckoutAttempt:
     values: dict[str, object] = {
         "tenant_id": tenant_id or uuid4(),
-        "source": s2.CheckoutSourceKind.REPORTS_FUNNEL,
+        "source": s2.CheckoutSourceKind.VIABE_REPORTS,
         "attempt_id": "attempt-1",
         "attempt_version": "v1",
         "created_at": NOW - timedelta(hours=4),
@@ -107,7 +107,7 @@ def test_reports_source_normalises_bridge_record_without_raw_contact_or_url() ->
 
     (attempt,) = source.read_attempts(tenant, as_of=NOW)
 
-    assert attempt.source is s2.CheckoutSourceKind.REPORTS_FUNNEL
+    assert attempt.source is s2.CheckoutSourceKind.VIABE_REPORTS
     assert attempt.total_paise == 249_950
     assert attempt.contact_token == "phone_tok_reports"
     assert attempt.destination_ref == "opaque_reports_destination"
@@ -376,5 +376,9 @@ def test_injected_executor_must_return_executor_result() -> None:
 
 
 def test_module_conforms_to_acf_contract() -> None:
+    # The dependency-light smoke intentionally omits LangChain. Keep the pure
+    # cohort/consent tests active there while reserving ACF reachability for the
+    # fully provisioned orchestrator environment.
+    pytest.importorskip("langchain_core")
     report = assert_conforms(AbandonedCheckoutRecoveryModule())
     assert report.passed
