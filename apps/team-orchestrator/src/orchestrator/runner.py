@@ -1786,6 +1786,31 @@ def webhook_pipeline_run(tenant_id: str, run_id: str, twilio_fields: dict) -> di
                 # T9 — thread the triage outcome so dispatch_brain suppresses async specialist
                 # spawns on an answerable turn (direct_reply / task_status) and answers in-turn.
                 triage_outcome = seam_result.outcome
+
+                # VT-725 (moved here 2026-08-19). This call used to live inside `dispatch_brain`,
+                # which is the ONE router `skip_legacy_dispatch` skips: in enforce mode the triage
+                # seam owns new_task/answer_pending turns and `dispatch_brain` never runs. Dev has
+                # been in enforce mode, so the Manager's most common turns reached the card corpus
+                # exactly never — `decision_evidence_links` held zero `manager_turn:` rows across
+                # the whole life of the feature while VT-725 was recorded as "shadow serving live".
+                # The wiring test could not see it: it greps `dispatch_brain`'s source for the call
+                # and passes whether or not that function is on the live path.
+                #
+                # A retrieval seam wired into one of two routers is the same drift its own module
+                # docstring refuses on the prompt-assembly side. So it sits on the per-turn path
+                # instead: one call per inbound message, before the branch, so which router owns
+                # the turn stops being able to decide whether the corpus is consulted.
+                #
+                # Still shadow, still injects nothing, still fail-soft (turn_retrieval never raises
+                # by contract) — this changes WHEN the corpus is asked, never what a turn says.
+                from orchestrator.knowledge.turn_retrieval import retrieve_for_manager_turn
+
+                retrieve_for_manager_turn(
+                    tenant_id=tenant_id,
+                    run_id=run_id,
+                    objective=event.body or "",
+                    message_ref=event.twilio_message_sid,
+                )
                 # Shared infra (D3/cluster-5b) — a deterministic in-turn reply from the enforce seam
                 # is delivered via the ONE canonical checkpointed step (replay-safe; at-most-once).
                 # Placed BEFORE the D1 in-turn wait + fallback: recording the 'assistant' turn makes

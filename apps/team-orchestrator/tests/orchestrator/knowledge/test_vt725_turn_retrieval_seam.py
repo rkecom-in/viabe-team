@@ -248,16 +248,44 @@ def test_every_primary_domain_is_one_the_profile_declares():
 
 
 def test_both_call_sites_are_wired():
-    """The engine's defect was never a bug in the engine — it was that nothing called it. This pins
-    the calls in place. It proves the call EXISTS in each path, not that a live turn produces a
-    trace: that is exit gate (a), and it needs deployed dev in shadow mode.
+    """The engine's defect was never a bug in the engine — it was that nothing called it.
+
+    The first version of this test grepped ``dispatch_brain`` for the call. It passed for the whole
+    life of the feature while the corpus was consulted exactly never on dev, because
+    ``dispatch_brain`` is the router that enforce mode's ``skip_legacy_dispatch`` skips. Pinning a
+    call inside a function says nothing about whether that function is on the live path.
+
+    So the pin moved with the call: the Manager-side retrieval belongs on the per-turn path in
+    ``runner``, ahead of the router branch, where no mode can route around it.
     """
-    from orchestrator.agent.dispatch import dispatch_brain
+    import inspect
+
+    from orchestrator import runner
     from orchestrator.manager import workflow
 
-    assert "retrieve_for_manager_turn(" in inspect.getsource(dispatch_brain), (
-        "the Manager's framing-context assembly must call the retrieval seam"
+    src = inspect.getsource(runner)
+    assert "retrieve_for_manager_turn(" in src, (
+        "the Manager's per-turn path must call the retrieval seam"
     )
     assert "retrieve_for_specialist(" in inspect.getsource(workflow), (
         "specialist dispatch must call the retrieval seam"
+    )
+
+
+def test_manager_retrieval_is_not_behind_the_enforce_branch():
+    """enforce mode skips ``dispatch_brain``; the corpus call must not be skipped with it.
+
+    Structural, because the alternative is a live turn: the call must appear BEFORE the
+    ``if not skip_legacy_dispatch:`` branch in the source, so both routers traverse it.
+    """
+    import inspect
+
+    from orchestrator import runner
+
+    src = inspect.getsource(runner)
+    call_at = src.index("retrieve_for_manager_turn(\n")
+    branch_at = src.index("if not skip_legacy_dispatch:")
+    assert call_at < branch_at, (
+        "retrieve_for_manager_turn must run before the skip_legacy_dispatch branch — behind it, "
+        "enforce mode (dev's mode) never consults the card corpus at all"
     )

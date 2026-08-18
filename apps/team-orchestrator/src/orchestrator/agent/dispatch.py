@@ -75,7 +75,6 @@ from orchestrator.agent.orchestrator_agent_driver import (
     OrchestratorAgentDriver,
     OrchestratorUsage,
 )
-from orchestrator.knowledge.turn_retrieval import retrieve_for_manager_turn
 from orchestrator.observability.decorators import observability_context
 from orchestrator.observability.langchain_callback import (
     OrchestratorReasoningCallback,
@@ -854,12 +853,9 @@ def dispatch_brain(
     #
     # Deliberately NOT wrapped in try/except here: turn_retrieval never raises, by contract, and a
     # second belt would hide the day that stops being true.
-    retrieve_for_manager_turn(
-        tenant_id=tenant_id,
-        run_id=run_id,
-        objective=event.body or "",
-        message_ref=getattr(event, "twilio_message_sid", None),
-    )
+    # VT-725: the retrieval call MOVED to runner's per-turn path 2026-08-19. It lived here, and
+    # `dispatch_brain` is precisely the router that enforce mode's `skip_legacy_dispatch` skips —
+    # so on dev the corpus was never consulted at all. See the comment at the runner call site.
 
     # VT-461: inject the Manager-intent signal as a separate system block so the
     # Team-Manager brain reads it as a prior (the prompt's "## Manager intent signal"
