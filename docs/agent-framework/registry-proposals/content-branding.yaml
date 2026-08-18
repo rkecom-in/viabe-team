@@ -1,0 +1,13 @@
+# VT-768 proposal only. CC performs the explicit activation-registry wiring after review.
+name: content_branding
+category: Marketing
+roles: [proposer]
+capabilities: [propose_draft]
+tags: [branding, content, copy, creative-brief]
+activation:
+  default: off
+  requires_journey_complete: true
+  requires_ownership_verified: true
+  requires_customer_data: false
+effect_authority: none
+publication: manual_owner_only

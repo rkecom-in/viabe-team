@@ -1,7 +1,7 @@
 # Content / Branding Agent — design checkpoint
 
-**Status:** design only; implementation waits for CC review.  
-**Base:** `origin/dev` at `bf352beb984d4ad4de476f1796a93247206587c0`.  
+**Status:** CC-approved; VT-768 implementation included in this PR, inert/default-off.
+**Implementation base:** `origin/dev` at `cfdffd61aa86eb2b11b91772d6b1f0b8b42b0978`.
 **Role:** Marketing specialist that produces reviewable content artifacts for the owner. It is not
 a publisher, campaign sender, customer communicator, website editor or ads operator.
 
@@ -47,7 +47,11 @@ labelled derived and carries its inputs.
 
 ## 3. Structurally sendless tool belt
 
-The module is a pure ACF proposer with **no gated capability** and exactly two proposed tools:
+The module is a pure ACF proposer with **no gated capability**. Its resolved ACF tool belt is empty;
+`assert_agent_tools_safe` runs over that belt at import and registration. That capability-level
+assertion is the primary guarantee. The import graph test below remains defence in depth.
+
+The two logical operations are:
 
 1. `compose_content_artifact` — pure structured composition/validation;
 2. `store_content_draft` — tenant-scoped artifact persistence only.
@@ -57,10 +61,10 @@ Twilio, Resend, Meta/Google publishing clients, customer-ledger queries, phone/e
 or `agent_drafts`. `agent_drafts` is deliberately forbidden: that table feeds the customer-send
 rail, so using it would turn “stored copy” into an accidental send-adjacent object.
 
-The proposed persistence is a separate tenant/RLS/FORCE-RLS `content_draft_artifacts` table with no
-recipient columns and no delivery state. Any migration is CC-allocated and must register DSR purge
-order in the same change. Until then the module may return an artifact through `ModuleResult` but
-cannot claim it was stored.
+Persistence uses one shared tenant/RLS/FORCE-RLS `tenant_draft_artifacts` estate, discriminated by
+artifact kind for Content and Ad Composer, with no recipient columns and no delivery state. The SQL
+remains a proposal until CC allocates a migration and lands `_PURGE_ORDER` in that same change.
+Until then the module returns an `UnpersistedArtifact` and structurally cannot claim storage.
 
 Structural tests parse the module import graph and fail if it imports `customer_send`,
 `twilio_send`, Twilio, Resend, an ads SDK, webhook transport or the send choke. A tool-catalog test
@@ -93,7 +97,7 @@ capability `PROPOSE_DRAFT`; narrow Marketing retrieval plus
 `specialist:content_branding` customisation. Activation requires journey completion, ownership
 verification and a brand-voice input; it does not require a customer-data connector.
 
-CC review must settle the generic artifact-store schema/reuse decision before implementation.
-Implementation then ships the sendless module, proposed registry entry, fact-binding validator,
-locale fixtures, bogus-input tests and artifact-store SQL proposal. Nothing is registered live,
-published, sent, migrated or activated by Codex.
+The implementation ships the sendless module, proposed registry entry, live fact-binding validator,
+prompt quarantine, locale fixtures, bogus-input tests and shared artifact-store SQL proposal. Tests
+prove the capability and import guards RED using deliberately broken fixtures. Nothing is registered
+live, published, sent, migrated or activated by Codex.
