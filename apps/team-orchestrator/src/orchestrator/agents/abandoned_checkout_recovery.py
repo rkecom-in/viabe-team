@@ -212,6 +212,7 @@ class ShopifyAbandonedCheckoutSource:
             updated_at = _time(row.get("updated_at"), field="updated_at")
             completed_at = _time(row.get("completed_at"), field="completed_at", allow_none=True)
             assert created_at is not None and updated_at is not None
+            protected_contact = self._tokenise_phone(phone)
             attempt = CheckoutAttempt(
                 tenant_id=tenant_id,
                 source=self.source_kind,
@@ -223,7 +224,7 @@ class ShopifyAbandonedCheckoutSource:
                 total_paise=_paise(row.get("total_price"), field="total_price"),
                 currency=_required_text(row, "currency").upper(),
                 item_count=_positive_count(item_count, field="item_count"),
-                contact_token=self._tokenise_phone(phone),
+                contact_token=protected_contact,
                 destination_ref=self._protect_destination(
                     _required_text(row, "abandoned_checkout_url")
                 ),
