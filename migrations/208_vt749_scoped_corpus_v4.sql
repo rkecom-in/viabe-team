@@ -203,16 +203,33 @@ SELECT s.old_id AS delta_id, s.new_id, member_card.id AS target_id,
   JOIN public.knowledge_corpus_members m
        ON m.card_id = member_card.id AND m.corpus_version_id = 'fc6ed0b5-f138-59a0-92c3-ec6e4cded7cf'::uuid;
 
--- Fail closed if the corpus is not what this migration was generated against. A silent partial match
--- would scope some cards and leave others matching everything, which is worse than not running.
+-- A database that has never been SEEDED has no v3 corpus to supersede. The corpus is loaded from
+-- knowledge_corpus/ by registry_seed, not by migrations, so a fresh migration-only database holds
+-- one placeholder card and zero corpus members — `test_clean_apply` runs exactly that database.
+-- Raising there conflates "nothing to do" with "the corpus drifted", and the first is not an error:
+-- a freshly seeded corpus carries these scopes already, from the same delta artifact this migration
+-- was generated from. So: absent v3 ⇒ skip the whole migration cleanly; v3 PRESENT but not matching
+-- ⇒ still fail closed, because a silent partial match would scope some cards and leave others
+-- matching everything, which is worse than not running.
+CREATE TEMP TABLE vt749_skip ON COMMIT DROP AS
+SELECT 1 AS skip
+ WHERE NOT EXISTS (
+     SELECT 1 FROM public.knowledge_corpus_versions
+      WHERE id = 'fc6ed0b5-f138-59a0-92c3-ec6e4cded7cf'::uuid
+ );
+
 DO $$
 DECLARE
     resolved INT;
     dupes INT;
     scoped_already INT;
+    skipping BOOLEAN;
 BEGIN
+    SELECT EXISTS (SELECT 1 FROM vt749_skip) INTO skipping;
     SELECT count(*) INTO resolved FROM vt749_targets;
-    IF resolved <> 63 THEN
+    IF skipping THEN
+        RAISE NOTICE 'VT-749: the v3 corpus this migration supersedes is absent — unseeded database, nothing to rescope. Every statement below is a no-op.';
+    ELSIF resolved <> 63 THEN
         RAISE EXCEPTION 'VT-749: resolved % of 63 targets in the served corpus — regenerate against this database', resolved;
     END IF;
 
@@ -239,12 +256,14 @@ END $$;
 -- 1. The v4 corpus version FIRST: knowledge_cards.corpus_version_id is an FK to it,
 --    so inserting the cards first fails the constraint. shadow/pending like its parent — VT-749 changes what the
 --    corpus SAYS, not its admission state; graduation stays a separate, Fazal-gated decision.
+-- Every other write below reads FROM vt749_targets or from the v3 members, so all of them no-op on
+-- an unseeded database by construction. This one does not, so it carries the skip guard explicitly.
 INSERT INTO public.knowledge_corpus_versions
     (id, version, parent_corpus_version_id, content_digest, status, admission_verdict, created_by)
-VALUES (
+SELECT
     '775b193b-6916-57aa-a034-22c80079034c'::uuid, 4, 'fc6ed0b5-f138-59a0-92c3-ec6e4cded7cf'::uuid,
     '2e4ce1bf72dffe68e3ff6b61b118322254ceae14ccd36cd063e65afc64f4184a', 'shadow', 'pending', 'vt749:scope1'
-)
+ WHERE NOT EXISTS (SELECT 1 FROM vt749_skip)
 ON CONFLICT (id) DO NOTHING;
 
 -- 2. The 63 new immutable versions. INSERT … SELECT from the old row so every content column is
@@ -308,6 +327,9 @@ DECLARE
     unscoped INT;
     universal INT;
 BEGIN
+    -- Nothing was written on an unseeded database; there is no landing to assert.
+    IF EXISTS (SELECT 1 FROM vt749_skip) THEN RETURN; END IF;
+
     SELECT count(*) INTO members FROM public.knowledge_corpus_members
      WHERE corpus_version_id = '775b193b-6916-57aa-a034-22c80079034c'::uuid;
     IF members <> 118 THEN
