@@ -23,6 +23,27 @@ the 24h conversation session (queued, idle-paced — VT-683). CC maintains this 
 | **`team_welcome4`** | en `HXc8188616…` · hi `HXd8a8d5…` · hing `HX7097590ccf0e901d893f78d9a9224e92` — **ALL THREE Meta-APPROVED as UTILITY (Fazal-confirmed 2026-08-09, SIDs re-shared verbatim; matches the registry byte-for-byte)** | account-created + Complete Setup button |
 | **`team_wakeup2`** | en `HXaedb9a8bff0163bd4c162c90cd05bc45` · hi `HXb2dd5579ea46c2715397f2e274ec533c` · hing `HXd2bfed18f25eb8c2319ccca9b22f5d35` — **Meta APPROVED as UTILITY, all three langs (Fazal-confirmed 2026-07-18; CATEGORY confirmed UTILITY by Fazal 2026-08-09).** The v1 force-conversion worry is answered — v2 held its category. | daily wake-up v2 — "{{2}} item(s) waiting for your review" + Review button; opens the session + drains the queue (VT-683 P3). Vars: owner_name, pending_count |
 
+### ACTIVE — P1.5 LEAD OUTREACH (added 2026-08-20, Meta-APPROVED, verified via Content API)
+
+| Template | Languages / SIDs | Purpose |
+|---|---|---|
+| **`lead_winback`** | en `HXb8d370885bb6e776db79352e81274214` (friendly_name `lead_winback1`) · hi `HX656d289c0401b20dfdecbfa68db864fd` (friendly_name **`lead_winback2`** — the real name Twilio holds, API-confirmed, not a typo) — **APPROVED as MARKETING, both langs** (`ApprovalRequests.whatsapp.status=approved`, fetched 2026-08-20) | re-engage a LEAD who enquired and did not buy. Vars: lead_name, business_name, enquired_about, tracked_token. URL button → `https://viabe.ai/r/{{4}}` (customer-scoped, VT-745 infra — exists) |
+| **`campaign_offer`** | en `HXdc77fa9270891ab5de2fe1e5ba8baea3` · hi `HXb5635a99070444f6c9404ece9c6695d2` — **APPROVED as MARKETING, both langs** | segment offer / MI pre-launch waitlist. Vars: customer_name, business_name, offer_description, valid_until, campaign_token. URL button → `https://viabe.ai/c/{{5}}` |
+
+**`campaign_offer` is APPROVED but NOT SENDABLE — `agent_selectable: false`.** Its button points at
+`/c/{{5}}`, an **aggregate campaign-scoped** destination that does not exist yet (**VT-773**).
+`/r/<token>` cannot substitute: it is customer-bound and redirects to WhatsApp, so reusing it would
+attribute a whole campaign to one person and leak that person into a public destination. Flip
+`agent_selectable` when `/c/` resolves — not before.
+
+**Both are MARKETING and out-of-window by definition** (a lead is not in an open session), and both
+carry the STOP opt-out inside the **approved body** (verified present in all four bodies, English and
+Devanagari). `body_sha256` is pinned per language in `twilio_templates.yaml` from the approved body.
+
+**Approval is not permission.** No send to any lead without a recorded **consent basis** (FIRST-PROOF
+red line 2 / P1.2). **P1.3 — Fazal's written answer on what the Reports funnel captured — governs how
+many leads are contactable at all**, and is still outstanding.
+
 ### UNDER RETIREMENT REVIEW (registered, still have live callers — migrate into the session per VT-683)
 
 | Template | Today's caller | Migration path |
