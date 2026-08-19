@@ -27,7 +27,7 @@
 > newest CL/VT touching it is STALE and must be reconciled BEFORE any status claim is made from
 > this file. The scoreboard exists so Fazal can see the war in one page; a stale scoreboard is
 > worse than none — it launders drift as status.
-> Last updated: **2026-08-19, CC (M2 CLOSED · M3 REOPENED — VT-725 gates (a)+(f) were never real)** — CURRENT STATE:
+> Last updated: **2026-08-19, CC (M2 CLOSED · VT-725 gate (a) CLOSED on deployed evidence; gate (f) open)** — CURRENT STATE:
 > **M2 closed on eleven rows and a
 > measured pack number.** Full pack ×3 on the post-M2 build: **353/390 = 90.5% clean** vs gate (d)'s
 > 338/390 = 86.7%, **0 TIMEOUT and 0 INDETERMINATE across 870 steps**, all domain floors clean;
@@ -117,6 +117,22 @@
 > "the corpus drifted") — which is why the pre-push suite was red and nothing had been pushed since
 > 04:06Z. The lesson worth keeping past this row: **three separate failures tonight were a missing
 > environment variable wearing a defect's clothes**, and the fourth was a green test on an unused path. Also in the window: **VT-764** (the swallowed token guard — output-token axis sized from
+>
+> **2026-08-19 (later) — gate (a) is CLOSED, and one half of the entry above is WITHDRAWN.** A real
+> deployed turn wrote **200 `decision_evidence_links` rows** (`manager_turn:SMharness28f2d930…`,
+> 100 retrieved / 100 rejected), on a build whose image digest is verifiably distinct from the
+> pre-fix one. **The correction:** I reported TWO causes; there was ONE. The claim that the seam sat
+> behind `dispatch_brain` and so "the corpus was consulted never" rested on zero evidence rows —
+> and those zeros were the HARNESS deleting its throwaway tenant at teardown, cascading the rows
+> away before I queried. The identical scenario re-run with `--keep-tenants` produced the 200 rows.
+> The 04:05Z degrade line, which carried a `manager_turn:` decision id under a build whose only
+> caller was `dispatch_brain`, actively contradicts the skip theory. **What stands is the single
+> real cause: the deployed service had no `VOYAGE_API_KEY`,** so real turns reached the seam and
+> fail-softed to no-cards; the canary passed throughout because it ran locally with a key the
+> deployment lacked. The runner move is kept on a narrower justification (a gate-relevant seam
+> behind one of two routers is fragile), not as a fix for an observed miss. **The instrument lesson
+> outlives both:** a harness that deletes its tenant destroys the evidence a shadow feature exists
+> to produce, so the proof is guaranteed absent and reads exactly like failure.
 > a 7-day ledger query, `raise_error` on the callback) plus a correction to my own overclaim about it,
 > **VT-765** (a customer's reply to the shared number resolves to NO tenant — Critical, Fazal owns the
 > routing choice), **VT-766** (74 aborts, zero recorded reasons), and a sanctioned env SETTER closing
