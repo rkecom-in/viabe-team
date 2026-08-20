@@ -51,9 +51,13 @@ def test_rkecom_adversarial_deterministic():
     assert isinstance(out, ReconciledType)
     assert out.business_type != "telecommunications"
     assert is_valid_business_type(out.business_type)
-    # rkecom.in / 'RKeCom Services' (ecom/commerce) → the e-commerce/online-retail bucket ('services'),
-    # NEVER a telecom one. The raw GBP category is recorded but did NOT lead.
-    assert out.business_type == "services"
+    # rkecom.in / 'RKeCom Services' (ecom/commerce) → `ecommerce`, NEVER a telecom one. The raw GBP
+    # category is recorded but did NOT lead.
+    # 2026-08-21: this asserted 'services' (local repair) while no e-commerce bucket existed — the
+    # workaround this module's own comment flagged. `ecommerce` now exists, so the test asserts the
+    # right answer instead of the closest available one. The INTENT is unchanged: the domain and name
+    # must beat a mis-categorized GBP field.
+    assert out.business_type == "ecommerce"
     assert out.raw_gbp_category == "Telecommunications service provider"
     # the conflict is reflected: GBP didn't win, so confidence isn't 'high-because-everyone-agreed'
     assert out.confidence in {"medium", "low"}
@@ -67,9 +71,9 @@ def test_rkecom_adversarial_with_llm_seam():
         business_name="RKeCom Services",
         gbp_category="Telecommunications service provider",
         website="https://rkecom.in",
-        reconcile_fn=lambda name, cat, domain, nature: "services",  # the LLM resolves it correctly
+        reconcile_fn=lambda name, cat, domain, nature: "ecommerce",  # the LLM resolves it correctly
     )
-    assert out.business_type == "services"
+    assert out.business_type == "ecommerce"
     assert out.business_type != "telecommunications"
     assert "llm" in out.signals_used
     assert out.confidence == "high"
@@ -123,7 +127,7 @@ def test_llm_failure_falls_back_to_domain_preferred_deterministic():
         website="https://rkecom.in",
         reconcile_fn=boom,
     )
-    assert out.business_type == "services"  # domain-preferred fallback
+    assert out.business_type == "ecommerce"  # domain-preferred fallback
     assert out.business_type != "telecommunications"
 
 
@@ -136,7 +140,7 @@ def test_llm_out_of_taxonomy_output_is_discarded():
         website="https://rkecom.in",
         reconcile_fn=lambda *a: "telecommunications",  # not a Viabe bucket
     )
-    assert out.business_type == "services"  # fell back, did NOT echo the junk
+    assert out.business_type == "ecommerce"  # fell back, did NOT echo the junk
     assert out.business_type != "telecommunications"
 
 
@@ -187,7 +191,7 @@ def test_gst_nature_as_list_does_not_no_op_the_reconcile():
     assert isinstance(out, ReconciledType)
     assert is_valid_business_type(out.business_type)
     assert out.business_type != "telecommunications"  # the mis-category must not win
-    assert out.business_type == "services"  # domain+name+gst all point at services
+    assert out.business_type == "ecommerce"  # domain+name+gst all point at e-commerce
     assert "gst_nature" in out.signals_used  # the list signal was actually consumed
 
 
@@ -200,5 +204,5 @@ def test_gst_nature_empty_list_is_no_signal():
         gst_nature=[],
     )
     assert isinstance(out, ReconciledType)
-    assert out.business_type == "services"
+    assert out.business_type == "ecommerce"
     assert "gst_nature" not in out.signals_used
