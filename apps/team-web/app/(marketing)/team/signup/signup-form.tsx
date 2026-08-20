@@ -257,9 +257,12 @@ export function SignupForm() {
             <h2 className={ui.h2}>{t(lang, 's4title')}</h2>
           </div>
           <p className={ui.body}>{t(lang, 's4sub')}</p>
-          <a href="/team/dashboard" className={ui.primaryButton()}>
-            {t(lang, 'workspaceCta')}
+          {/* Signup issues a PROOF token, not a session, and the dashboard is
+              session-gated — so send the owner to sign in rather than bounce them. */}
+          <a href="/team/login" className={ui.primaryButton()}>
+            {t(lang, 'signInCta')}
           </a>
+          <p className={`${ui.hint} text-center`}>{t(lang, 'signInNote')}</p>
         </section>
         <p className={`${ui.hint} text-center`}>{t(lang, 'footer')}</p>
       </SignupLayout>
@@ -417,11 +420,21 @@ export function SignupForm() {
         </button>
       </div>
       {openDisclosure === which && (
-        // NEEDS-FAZAL: the disclosure body is legal copy and is not published yet. The
-        // prototype supplied invented text; shipping it would put words we invented in
-        // front of a consent decision. The structure is here and renders the moment a
-        // real disclosure exists.
-        <p className={`${ui.bodySm} border-t border-border pt-2.5`}>{t(lang, 'disclosurePending')}</p>
+        <div className="flex flex-col gap-2 border-t border-border pt-2.5">
+          {/* A factual summary of what this consent actually covers. The BINDING text is
+              counsel's and lives on the linked page, which states its own draft status —
+              we do not author legal copy here. */}
+          <p className={ui.bodySm}>{t(lang, which === 'dpdpa' ? 'c1summary' : 'c2summary')}</p>
+          <p className={`${ui.hint} italic`}>{t(lang, 'disclosureDraft')}</p>
+          <a
+            href={which === 'dpdpa' ? '/team/privacy' : '/team/dpdp'}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-[13px] font-semibold text-ink-primary underline"
+          >
+            {t(lang, 'disclosureLink')}
+          </a>
+        </div>
       )}
     </div>
   )

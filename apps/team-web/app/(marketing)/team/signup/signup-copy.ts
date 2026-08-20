@@ -2,14 +2,15 @@
  * Bilingual copy for the signup wizard, from the Claude Design prototype
  * ("Viabe Reports" project, `Signup Flow.dc.html`).
  *
- * THREE THINGS FROM THE PROTOTYPE ARE DELIBERATELY NOT HERE, because shipping them
- * would mean shipping invented facts:
+ * THE PROTOTYPE'S CONTENT IS PLACEHOLDER. Everything below is either the real thing or
+ * says plainly that it is not:
  *
  *  1. `c1body` / `c2body` — the prototype writes substantive DPDP and residency
- *     disclosure text ("You are the data fiduciary for your customers…"). That is
- *     legal copy and it is not ours to author. The expandable disclosure structure is
- *     built; the body is sourced from `disclosureBody` below, which is empty until
- *     legal copy exists. See NEEDS-FAZAL in the form.
+ *     disclosure text and it is not ours to author. Instead the expander carries a
+ *     factual SUMMARY of what each consent covers (`c1summary` / `c2summary`, drawn
+ *     from what the system actually does), a link to the real disclosure page, and
+ *     `disclosureDraft` stating that the binding text is still with counsel — which
+ *     is what `/team/dpdp` and `/team/privacy` say about themselves today.
  *  2. `c1version` / `c2version` — the prototype invents "Disclosure v2.3 · 14 Jan
  *     2026". The real identifiers are server-owned in
  *     `apps/team-orchestrator/config/disclosure_versions.yaml` and are what actually
@@ -18,6 +19,12 @@
  *  3. `bt1`–`bt10` — the prototype invents a business-type list. The real taxonomy is
  *     server-owned (`/api/team/business-types`, `label_en` / `label_hi`) and is
  *     constrained so the L3 k-anon cohorts stay populated (VT-82).
+ *  4. `td1`–`td4` — the prototype invents four post-signup tasks. The real next steps
+ *     are the onboarding wizard's (VT-267 PR-C): check the drafted profile, connect a
+ *     sales-data source, connect WhatsApp. Three, not four.
+ *  5. The footer's "Viabe Technologies · DPDP-compliant" — the entity is RKeCom
+ *     Services (OPC) Pvt Ltd, and a DPDP-compliance claim is not supportable while the
+ *     legal pages say they do not yet bind.
  */
 
 export type Lang = 'en' | 'hi'
@@ -97,9 +104,18 @@ export const COPY = {
   },
   readMore: { en: 'Read the disclosure', hi: 'प्रकटीकरण पढ़ें' },
   hideMore: { en: 'Hide the disclosure', hi: 'प्रकटीकरण छिपाएँ' },
-  disclosurePending: {
-    en: 'The full disclosure text is not published yet. The version recorded with your consent is shown above.',
-    hi: 'पूरा प्रकटीकरण अभी प्रकाशित नहीं हुआ है। आपकी सहमति के साथ दर्ज होने वाला संस्करण ऊपर दिखाया गया है।',
+  disclosureLink: { en: 'Open the full disclosure', hi: 'पूरा प्रकटीकरण खोलें' },
+  disclosureDraft: {
+    en: 'The full text is still under review by our legal counsel, so it does not yet bind you or Viabe. The version identifier above is what we record against your consent, and it will not change when the text is finalised.',
+    hi: 'पूरा पाठ अभी हमारे कानूनी सलाहकार की समीक्षा में है, इसलिए यह अभी आप पर या Viabe पर बाध्यकारी नहीं है। ऊपर दिया गया संस्करण पहचानकर्ता वही है जो आपकी सहमति के साथ दर्ज होता है, और पाठ अंतिम होने पर वह नहीं बदलेगा।',
+  },
+  c1summary: {
+    en: 'Covers the customer names, phone numbers and message history your agents read and write. You remain the data fiduciary for your customers; Viabe processes on your instruction. You can withdraw this from your workspace, which stops the agents.',
+    hi: 'इसमें वे ग्राहक नाम, फ़ोन नंबर और संदेश इतिहास शामिल हैं जिन्हें आपके एजेंट पढ़ते और लिखते हैं। अपने ग्राहकों के लिए डेटा फ़िड्यूशरी आप ही रहते हैं; Viabe आपके निर्देश पर प्रोसेस करता है। आप इसे अपने वर्कस्पेस से वापस ले सकते हैं, जिससे एजेंट रुक जाएँगे।',
+  },
+  c2summary: {
+    en: 'Your account, messages and business records are stored on servers in India. Some processing happens outside India — the language model that drafts replies is the one that affects every message. The disclosure names each processor.',
+    hi: 'आपका खाता, संदेश और व्यापार रिकॉर्ड भारत के सर्वरों पर रखे जाते हैं। कुछ प्रोसेसिंग भारत के बाहर होती है — उत्तर तैयार करने वाला भाषा मॉडल हर संदेश को प्रभावित करता है। प्रकटीकरण में हर प्रोसेसर का नाम है।',
   },
   recordedAs: { en: 'Recorded as', hi: 'इस रूप में दर्ज' },
 
@@ -188,7 +204,15 @@ export const COPY = {
     en: 'Four things make the biggest difference to how your agents work. You can do them now.',
     hi: 'चार चीज़ें आपके एजेंट के काम में सबसे बड़ा फ़र्क़ लाती हैं। आप उन्हें अभी कर सकते हैं।',
   },
-  workspaceCta: { en: 'Go to my workspace', hi: 'मेरे वर्कस्पेस पर जाएँ' },
+  // Signup mints a PROOF token, not a session (verify-otp-for-signup: "signup has no
+  // tenant ... issues a PROOF token instead of minting a session"), and the dashboard is
+  // session-gated. So the honest next action is to sign in with the number just verified —
+  // "Go to my workspace" would bounce every new owner to the login page.
+  signInCta: { en: 'Sign in with this number', hi: 'इसी नंबर से साइन इन करें' },
+  signInNote: {
+    en: 'Use the WhatsApp number you just verified. We send a fresh code — there is no password.',
+    hi: 'वही WhatsApp नंबर इस्तेमाल करें जो आपने अभी सत्यापित किया। हम नया कोड भेजेंगे — कोई पासवर्ड नहीं है।',
+  },
   bannerTitle: {
     en: 'Your agents will not contact your customers yet',
     hi: 'आपके एजेंट अभी आपके ग्राहकों से संपर्क नहीं करेंगे',
@@ -198,21 +222,32 @@ export const COPY = {
     hi: 'Viabe में एक व्यक्ति यह समीक्षा करता है कि यह व्यापार आपका है या नहीं। जब तक वह समीक्षा पूरी नहीं होती, ग्राहकों से जुड़ी हर कार्रवाई बंद रहती है। आपका व्यापार अभी सत्यापित नहीं है।',
   },
   reviewMeta: {
-    en: 'Reviews usually finish within one working day. We message you on WhatsApp either way.',
-    hi: 'समीक्षा आमतौर पर एक कार्यदिवस में पूरी हो जाती है। नतीजा जो भी हो, हम आपको WhatsApp पर बताते हैं।',
+    en: 'We message you on WhatsApp when the review finishes, whichever way it goes.',
+    hi: 'समीक्षा पूरी होने पर हम आपको WhatsApp पर बताते हैं — नतीजा जो भी हो।',
   },
   footer: {
-    en: 'Viabe Technologies · DPDP-compliant · Data stored in India',
-    hi: 'Viabe Technologies · DPDP अनुरूप · डेटा भारत में संग्रहीत',
+    en: 'Viabe Team is a product of RKeCom Services (OPC) Pvt Ltd · Your data is stored in India',
+    hi: 'Viabe Team, RKeCom Services (OPC) Pvt Ltd का एक उत्पाद है · आपका डेटा भारत में संग्रहीत होता है',
   },
-  td1: { en: 'Add your products or services', hi: 'अपने उत्पाद या सेवाएँ जोड़ें' },
-  td1n: { en: 'Names and prices are enough to begin.', hi: 'शुरू करने के लिए नाम और दाम काफ़ी हैं।' },
-  td2: { en: 'Describe how you sell today', hi: 'बताएँ आप आज कैसे बेचते हैं' },
-  td2n: { en: 'Walk-ins, calls, WhatsApp, or a mix.', hi: 'दुकान पर, कॉल से, WhatsApp से, या मिला-जुला।' },
+  // The REAL next steps, from the onboarding wizard (VT-267 PR-C): review the drafted
+  // business profile, then connect a data source and WhatsApp. The prototype invented a
+  // different four (add products, describe how you sell, set a tone) that the product
+  // does not ask for.
+  td1: { en: 'Check the business profile we drafted', hi: 'हमने जो व्यापार प्रोफ़ाइल बनाई है उसे जाँचें' },
+  td1n: {
+    en: 'We build it from public records. Correct anything that is wrong before your agents use it.',
+    hi: 'हम इसे सार्वजनिक रिकॉर्ड से बनाते हैं। एजेंट के इस्तेमाल से पहले जो ग़लत हो उसे सुधारें।',
+  },
+  td2: { en: 'Connect where your sales data lives', hi: 'जहाँ आपका बिक्री डेटा है उसे जोड़ें' },
+  td2n: {
+    en: 'Google Sheets or Shopify. Without it your agents have no customers to work with.',
+    hi: 'Google Sheets या Shopify। इसके बिना आपके एजेंट के पास काम करने के लिए ग्राहक नहीं होंगे।',
+  },
   td3: { en: 'Connect your WhatsApp Business number', hi: 'अपना WhatsApp Business नंबर जोड़ें' },
-  td3n: { en: 'Connecting it does not start any messages.', hi: 'जोड़ने से कोई संदेश शुरू नहीं होता।' },
-  td4: { en: 'Set the tone your agents use', hi: 'एजेंट की भाषा का लहजा तय करें' },
-  td4n: { en: 'Formal or friendly, in English or Hindi.', hi: 'औपचारिक या मित्रवत, अंग्रेज़ी या हिन्दी में।' },
+  td3n: {
+    en: 'Connecting it does not send anything. Every send still waits for your approval.',
+    hi: 'जोड़ने से कुछ भेजा नहीं जाता। हर संदेश आपकी मंज़ूरी का इंतज़ार करता है।',
+  },
   back: { en: 'Back', hi: 'पीछे' },
 } satisfies Record<string, Entry>
 

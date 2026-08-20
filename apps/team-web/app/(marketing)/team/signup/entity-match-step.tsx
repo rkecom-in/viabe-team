@@ -597,14 +597,15 @@ export function EntityMatchStep({
     </span>
   )
 
-  const card =
-    'rounded-2xl border border-border bg-card p-6 shadow-sm sm:p-8'
+  // Matches the wizard panel from the Viabe design scheme so step 2 does not read as a
+  // different product than steps 1, 3 and 4.
+  const card = 'rounded-[18px] border border-border bg-card p-5 sm:p-[26px]'
 
   // VT-507 — discovering screen: progressive candidates + spinner + 10s manual reveal.
   if (step === 'discovering') {
     const pickableDuringDiscovery = candidates.filter((c) => c.source !== 'registry')
     return (
-      <section data-entity-step="discovering" className={`mt-8 ${card}`}>
+      <section data-entity-step="discovering" className={card}>
         {/* Spinner + heading while polling is active */}
         {discovering && (
           <div className="flex items-center gap-2.5">
@@ -630,7 +631,7 @@ export function EntityMatchStep({
               type="button"
               data-entity-honest-empty-gstin
               onClick={openPrimaryIdentify}
-              className="mt-4 rounded-xl bg-primary px-5 py-3 font-semibold text-primary-foreground shadow-sm transition hover:bg-primary/90"
+              className="mt-4 rounded-xl bg-[linear-gradient(95deg,hsl(var(--viabe-saffron)),hsl(var(--viabe-gold)))] px-5 py-3 font-display font-bold text-foreground shadow-[0_10px_22px_-14px_hsl(var(--viabe-saffron)/0.7)] transition hover:brightness-[1.03]"
             >
               {t.manual_with_gstin}
             </button>
@@ -650,7 +651,7 @@ export function EntityMatchStep({
               type="button"
               data-entity-degraded-gstin
               onClick={openPrimaryIdentify}
-              className="mt-4 rounded-xl bg-primary px-5 py-3 font-semibold text-primary-foreground shadow-sm transition hover:bg-primary/90"
+              className="mt-4 rounded-xl bg-[linear-gradient(95deg,hsl(var(--viabe-saffron)),hsl(var(--viabe-gold)))] px-5 py-3 font-display font-bold text-foreground shadow-[0_10px_22px_-14px_hsl(var(--viabe-saffron)/0.7)] transition hover:brightness-[1.03]"
             >
               {t.manual_with_gstin}
             </button>
@@ -694,7 +695,7 @@ export function EntityMatchStep({
                       data-candidate-pick
                       disabled={confirming !== null}
                       onClick={() => pick(c)}
-                      className="mt-1 self-start rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
+                      className="mt-1 self-start rounded-lg bg-[linear-gradient(95deg,hsl(var(--viabe-saffron)),hsl(var(--viabe-gold)))] px-4 py-2 font-display text-sm font-bold text-foreground transition hover:brightness-[1.03] disabled:cursor-not-allowed disabled:opacity-50"
                     >
                       {confirming === c.candidate_gstin ? t.confirming : t.pick}
                     </button>
@@ -725,7 +726,7 @@ export function EntityMatchStep({
               type="button"
               data-entity-manual-early
               onClick={openPrimaryIdentify}
-              className="mt-3 rounded-xl bg-primary px-5 py-3 font-semibold text-primary-foreground shadow-sm transition hover:bg-primary/90"
+              className="mt-3 rounded-xl bg-[linear-gradient(95deg,hsl(var(--viabe-saffron)),hsl(var(--viabe-gold)))] px-5 py-3 font-display font-bold text-foreground shadow-[0_10px_22px_-14px_hsl(var(--viabe-saffron)/0.7)] transition hover:brightness-[1.03]"
             >
               {t.manual_with_gstin}
             </button>
@@ -737,7 +738,7 @@ export function EntityMatchStep({
 
   if (step === 'idle') {
     return (
-      <section data-entity-step="loading" className={`mt-8 ${card}`}>
+      <section data-entity-step="loading" className={card}>
         <p className="text-sm leading-relaxed text-muted-foreground">{t.looking}</p>
       </section>
     )
@@ -745,7 +746,7 @@ export function EntityMatchStep({
 
   if (step === 'verified' && verified) {
     return (
-      <section data-entity-step="verified" className={`mt-8 ${card}`}>
+      <section data-entity-step="verified" className={card}>
         {/* VT-511: celebratory verified header with green icon */}
         <div className="flex items-center gap-3">
           <span aria-hidden className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-secondary text-xl font-bold text-secondary-foreground">
@@ -794,7 +795,7 @@ export function EntityMatchStep({
                     type="button"
                     data-cin-confirm
                     onClick={() => setCinConfirmed(cinCandidate.cin)}
-                    className="rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground transition hover:bg-primary/90"
+                    className="rounded-lg bg-[linear-gradient(95deg,hsl(var(--viabe-saffron)),hsl(var(--viabe-gold)))] px-4 py-2 font-display text-sm font-bold text-foreground transition hover:brightness-[1.03]"
                   >
                     {t.cin_confirm}
                   </button>
@@ -819,8 +820,8 @@ export function EntityMatchStep({
             role="alert"
             className="mt-4 flex items-start gap-2.5 rounded-lg border border-destructive/20 bg-destructive/5 px-4 py-3"
           >
-            <span aria-hidden className="mt-0.5 shrink-0 text-destructive">⚠</span>
-            <p className="text-sm leading-relaxed text-destructive">{error}</p>
+            <span aria-hidden className="mt-0.5 shrink-0 text-ink-destructive">⚠</span>
+            <p className="text-sm leading-relaxed text-ink-destructive">{error}</p>
           </div>
         )}
         <button
@@ -833,7 +834,7 @@ export function EntityMatchStep({
           // VT-449: thread the owner-CONFIRMED CIN (or '' when none confirmed/dismissed) into the
           // verified entity — the create payload sends `cin`. A SERP-scraped CIN never rides unconfirmed.
           onClick={() => onVerified({ ...verified, cin: cinConfirmed })}
-          className="mt-5 rounded-xl bg-primary px-5 py-3 font-semibold text-primary-foreground shadow-sm transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
+          className="mt-5 rounded-xl bg-[linear-gradient(95deg,hsl(var(--viabe-saffron)),hsl(var(--viabe-gold)))] px-5 py-3 font-display font-bold text-foreground shadow-[0_10px_22px_-14px_hsl(var(--viabe-saffron)/0.7)] transition hover:brightness-[1.03] disabled:cursor-not-allowed disabled:opacity-50"
         >
           {submitting ? t.confirming : t.continue}
         </button>
@@ -847,10 +848,10 @@ export function EntityMatchStep({
     // permanent trap. The affordance is shown UNCONDITIONALLY on every reject regardless of cause, so
     // it carries no inactive-vs-not-found enumeration oracle; the generic reject copy is unchanged.
     return (
-      <section data-entity-step="reject" className={`mt-8 ${card}`}>
+      <section data-entity-step="reject" className={card}>
         {/* VT-511: designed reject state — icon + heading, not a raw text blob */}
         <div className="flex items-start gap-3">
-          <span aria-hidden className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-destructive/10 text-base font-bold text-destructive">
+          <span aria-hidden className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-destructive/10 text-base font-bold text-ink-destructive">
             ✕
           </span>
           <h2 className="text-lg font-semibold text-foreground">{t.reject_heading}</h2>
@@ -862,7 +863,7 @@ export function EntityMatchStep({
           type="button"
           data-reject-reenter
           onClick={openManual}
-          className="mt-5 rounded-xl bg-primary px-5 py-3 font-semibold text-primary-foreground shadow-sm transition hover:bg-primary/90"
+          className="mt-5 rounded-xl bg-[linear-gradient(95deg,hsl(var(--viabe-saffron)),hsl(var(--viabe-gold)))] px-5 py-3 font-display font-bold text-foreground shadow-[0_10px_22px_-14px_hsl(var(--viabe-saffron)/0.7)] transition hover:brightness-[1.03]"
         >
           {t.manual_with_gstin}
         </button>
@@ -872,7 +873,7 @@ export function EntityMatchStep({
 
   if (step === 'retry') {
     return (
-      <section data-entity-step="retry" className={`mt-8 ${card}`}>
+      <section data-entity-step="retry" className={card}>
         {/* VT-511: designed retry state — icon signals transient (not terminal) */}
         <div className="flex items-start gap-3">
           <span aria-hidden className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-muted text-base font-bold text-muted-foreground">
@@ -885,7 +886,7 @@ export function EntityMatchStep({
           type="button"
           data-entity-retry
           onClick={retry}
-          className="mt-5 rounded-xl bg-primary px-5 py-3 font-semibold text-primary-foreground shadow-sm transition hover:bg-primary/90"
+          className="mt-5 rounded-xl bg-[linear-gradient(95deg,hsl(var(--viabe-saffron)),hsl(var(--viabe-gold)))] px-5 py-3 font-display font-bold text-foreground shadow-[0_10px_22px_-14px_hsl(var(--viabe-saffron)/0.7)] transition hover:brightness-[1.03]"
         >
           {t.try_again}
         </button>
@@ -899,7 +900,7 @@ export function EntityMatchStep({
     // recovery paths: (a) correct the name + re-search, (b) the existing manual-GSTIN verify path.
     // This is NOT the "couldn't find your business" empty-state — we DID find the company.
     return (
-      <section data-entity-step="found_no_gstin" className={`mt-8 ${card}`}>
+      <section data-entity-step="found_no_gstin" className={card}>
         <h2 className="text-lg font-semibold text-foreground">
           {t.fnog_heading_prefix}
           <span data-found-name className="font-semibold text-foreground">{foundNoGstin.tradeName}</span>
@@ -935,7 +936,7 @@ export function EntityMatchStep({
             data-found-enter-gstin
             disabled={researching}
             onClick={openManual}
-            className="rounded-xl bg-primary px-5 py-3 font-semibold text-primary-foreground shadow-sm transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
+            className="rounded-xl bg-[linear-gradient(95deg,hsl(var(--viabe-saffron)),hsl(var(--viabe-gold)))] px-5 py-3 font-display font-bold text-foreground shadow-[0_10px_22px_-14px_hsl(var(--viabe-saffron)/0.7)] transition hover:brightness-[1.03] disabled:cursor-not-allowed disabled:opacity-50"
           >
             {t.fnog_enter_gstin}
           </button>
@@ -946,7 +947,7 @@ export function EntityMatchStep({
 
   if (step === 'manual_gstin') {
     return (
-      <section data-entity-step="manual" className={`mt-8 ${card}`}>
+      <section data-entity-step="manual" className={card}>
         <h2 className="text-lg font-semibold text-foreground">{t.manual_heading}</h2>
         <p className="mt-1 text-sm leading-relaxed text-muted-foreground">{t.manual_hint}</p>
         <label className="mt-4 block text-sm font-medium text-foreground" htmlFor="manual-gstin">
@@ -968,7 +969,7 @@ export function EntityMatchStep({
           className="mt-1 w-full rounded-xl border border-input bg-card px-4 py-3 font-mono uppercase tracking-wide text-foreground outline-none focus:border-primary"
         />
         {manualError && (
-          <p data-manual-error className="mt-2 flex items-center gap-1.5 text-sm text-destructive">
+          <p data-manual-error className="mt-2 flex items-center gap-1.5 text-sm text-ink-destructive">
             <span aria-hidden>⚠</span>
             {t.manual_format_error}
           </p>
@@ -979,7 +980,7 @@ export function EntityMatchStep({
             data-manual-verify
             disabled={confirming !== null || manualGstin.trim() === ''}
             onClick={submitManualGstin}
-            className="rounded-xl bg-primary px-5 py-3 font-semibold text-primary-foreground shadow-sm transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
+            className="rounded-xl bg-[linear-gradient(95deg,hsl(var(--viabe-saffron)),hsl(var(--viabe-gold)))] px-5 py-3 font-display font-bold text-foreground shadow-[0_10px_22px_-14px_hsl(var(--viabe-saffron)/0.7)] transition hover:brightness-[1.03] disabled:cursor-not-allowed disabled:opacity-50"
           >
             {confirming !== null ? t.confirming : t.manual_verify}
           </button>
@@ -1011,7 +1012,7 @@ export function EntityMatchStep({
     // owner just enters their PAN). Only when the city is unknown do we surface the state hint.
     const needsStateHint = derivedStateCode === null
     return (
-      <section data-entity-step="pan_entry" className={`mt-8 ${card}`}>
+      <section data-entity-step="pan_entry" className={card}>
         <h2 className="text-lg font-semibold text-foreground">{t.pan_heading}</h2>
         <p className="mt-1 text-sm leading-relaxed text-muted-foreground">{t.pan_hint}</p>
         <label className="mt-4 block text-sm font-medium text-foreground" htmlFor="pan-input">
@@ -1033,7 +1034,7 @@ export function EntityMatchStep({
           className="mt-1 w-full rounded-xl border border-input bg-card px-4 py-3 font-mono uppercase tracking-wide text-foreground outline-none focus:border-primary"
         />
         {panError === 'format' && (
-          <p data-pan-error className="mt-2 text-sm text-destructive">{t.pan_format_error}</p>
+          <p data-pan-error className="mt-2 text-sm text-ink-destructive">{t.pan_format_error}</p>
         )}
         {needsStateHint && (
           <>
@@ -1057,7 +1058,7 @@ export function EntityMatchStep({
           </>
         )}
         {panError === 'state' && (
-          <p data-pan-state-error className="mt-2 text-sm text-destructive">{t.pan_state_error}</p>
+          <p data-pan-state-error className="mt-2 text-sm text-ink-destructive">{t.pan_state_error}</p>
         )}
         <div className="mt-5 flex flex-wrap items-center gap-3">
           <button
@@ -1065,7 +1066,7 @@ export function EntityMatchStep({
             data-pan-identify
             disabled={panLoading || pan.trim() === ''}
             onClick={() => void submitPan()}
-            className="rounded-xl bg-primary px-5 py-3 font-semibold text-primary-foreground shadow-sm transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
+            className="rounded-xl bg-[linear-gradient(95deg,hsl(var(--viabe-saffron)),hsl(var(--viabe-gold)))] px-5 py-3 font-display font-bold text-foreground shadow-[0_10px_22px_-14px_hsl(var(--viabe-saffron)/0.7)] transition hover:brightness-[1.03] disabled:cursor-not-allowed disabled:opacity-50"
           >
             {panLoading ? t.pan_identifying : t.pan_identify}
           </button>
@@ -1095,7 +1096,7 @@ export function EntityMatchStep({
 
   if (step === 'pan_pick') {
     return (
-      <section data-entity-step="pan_pick" className={`mt-8 ${card}`}>
+      <section data-entity-step="pan_pick" className={card}>
         <h2 className="text-lg font-semibold text-foreground">{t.pan_pick_heading}</h2>
         <p className="mt-1 text-sm leading-relaxed text-muted-foreground">{t.pan_pick_hint}</p>
         {panGstins.length === 0 ? (
@@ -1117,7 +1118,7 @@ export function EntityMatchStep({
                   data-pan-pick
                   disabled={confirming !== null}
                   onClick={() => void confirmGstin(g)}
-                  className="self-start rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50 sm:self-auto"
+                  className="self-start rounded-lg bg-[linear-gradient(95deg,hsl(var(--viabe-saffron)),hsl(var(--viabe-gold)))] px-4 py-2 font-display text-sm font-bold text-foreground transition hover:brightness-[1.03] disabled:cursor-not-allowed disabled:opacity-50 sm:self-auto"
                 >
                   {confirming === g ? t.confirming : t.pan_pick_this}
                 </button>
@@ -1156,7 +1157,7 @@ export function EntityMatchStep({
   // registry row has no GSTIN and would otherwise render a confusing "no GST number" line here).
   const pickable = candidates.filter((c) => c.source !== 'registry')
   return (
-    <section data-entity-step="picking" className={`mt-8 ${card}`}>
+    <section data-entity-step="picking" className={card}>
       <h2 className="text-lg font-semibold text-foreground">{t.heading}</h2>
       <p className="mt-1 text-sm leading-relaxed text-muted-foreground">{t.subhead}</p>
       {pickable.length === 0 ? (
@@ -1199,7 +1200,7 @@ export function EntityMatchStep({
                     data-candidate-pick
                     disabled={confirming !== null}
                     onClick={() => pick(c)}
-                    className="mt-1 self-start rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
+                    className="mt-1 self-start rounded-lg bg-[linear-gradient(95deg,hsl(var(--viabe-saffron)),hsl(var(--viabe-gold)))] px-4 py-2 font-display text-sm font-bold text-foreground transition hover:brightness-[1.03] disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     {confirming === c.candidate_gstin ? t.confirming : t.pick}
                   </button>
@@ -1254,7 +1255,7 @@ export function EntityMatchStep({
               data-entity-pan
               disabled={confirming !== null}
               onClick={openPrimaryIdentify}
-              className="rounded-xl bg-primary px-5 py-3 font-semibold text-primary-foreground shadow-sm transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
+              className="rounded-xl bg-[linear-gradient(95deg,hsl(var(--viabe-saffron)),hsl(var(--viabe-gold)))] px-5 py-3 font-display font-bold text-foreground shadow-[0_10px_22px_-14px_hsl(var(--viabe-saffron)/0.7)] transition hover:brightness-[1.03] disabled:cursor-not-allowed disabled:opacity-50"
             >
               {t.pan_cta}
             </button>
@@ -1276,7 +1277,7 @@ export function EntityMatchStep({
             data-entity-manual
             disabled={confirming !== null}
             onClick={openPrimaryIdentify}
-            className="rounded-xl bg-primary px-5 py-3 font-semibold text-primary-foreground shadow-sm transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
+            className="rounded-xl bg-[linear-gradient(95deg,hsl(var(--viabe-saffron)),hsl(var(--viabe-gold)))] px-5 py-3 font-display font-bold text-foreground shadow-[0_10px_22px_-14px_hsl(var(--viabe-saffron)/0.7)] transition hover:brightness-[1.03] disabled:cursor-not-allowed disabled:opacity-50"
           >
             {t.manual_with_gstin}
           </button>

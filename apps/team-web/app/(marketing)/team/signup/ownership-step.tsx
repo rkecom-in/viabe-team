@@ -23,11 +23,11 @@ import type { Lang } from './signup-copy'
 import { t } from './signup-copy'
 import * as ui from '@/lib/viabe-ui'
 
+/** The onboarding wizard's actual steps (VT-267 PR-C), not the prototype's invented four. */
 const TODOS = [
   { title: 'td1', note: 'td1n' },
   { title: 'td2', note: 'td2n' },
   { title: 'td3', note: 'td3n' },
-  { title: 'td4', note: 'td4n' },
 ] as const
 
 export function OwnershipStep({
@@ -108,14 +108,17 @@ export function OwnershipStep({
           ))}
         </ol>
 
-        <button
-          type="button"
-          data-ownership-continue
-          onClick={onVerified}
-          className={ui.primaryButton()}
-        >
-          {t(lang, 'workspaceCta')}
-        </button>
+        <div className="flex flex-col gap-2">
+          <button
+            type="button"
+            data-ownership-continue
+            onClick={onVerified}
+            className={ui.primaryButton()}
+          >
+            {t(lang, 'signInCta')}
+          </button>
+          <p className={`${ui.hint} text-center`}>{t(lang, 'signInNote')}</p>
+        </div>
       </div>
 
       <p className={`${ui.hint} text-center`}>{t(lang, 'footer')}</p>
