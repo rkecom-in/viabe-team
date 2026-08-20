@@ -34,12 +34,33 @@ Retrieval outcome per deployed turn — cards were **selected**, not merely retr
 `SMharnessbe276e84…` 100 retrieved / 92 rejected / **8 selected** · `SMharness45e47795…`
 100 / 99 / **1 selected**.
 
-## 3. Gate (f) — **PENDING, pack in flight**
+## 3. Gate (f) — **CLOSED. 128/130 clean, 0 new failure classes.**
 
-> **PLACEHOLDER — do not read this section as a pass.** The prior row said "(f) RUNNING" and no
-> result was ever written; there is no artifact on disk, so that run was **never measured**, not
-> passed. Re-launched on the fixed build. This line gets replaced with pack numbers + verdict, or the
-> package does not go to Fazal.
+Ran to completion on the fixed build: `=== summary: 130 scenario(s), 2 finding(s), 0 domain-floor
+gap(s) ===`. **128/130 clean — exactly the 128/130 baseline.** The prediction was recorded in the row
+BEFORE the run ("no change against baseline"), so it could not be fitted afterwards, and it held.
+
+**Gate (f)'s actual test is "no new failure class," and it passes on evidence, not on the rate:**
+
+| finding | non-clean in M2? | verdict |
+|---|---|---|
+| `m_conversation_multi_request_mixed_ask` | **yes — all 3 passes** | pre-existing class |
+| `routing_dual_intent_connect_and_winback` | **yes — all 3 passes** | pre-existing class |
+
+**New failure classes vs the M2 baseline: NONE.** Both survivors are the same class — a message
+carrying two or three intents where the win-back half is dropped (`route='none'`, no campaign row).
+`routing_dual_intent_connect_and_winback` is the **R1** already documented in §4's blast-radius table;
+it is unchanged, not introduced.
+
+**The result that outruns the gate:** M2 had **20** non-clean scenarios; this build has **2**. The
+mechanism that dominated M2 — 16 of those 20 answering *"I can't build this yet — something I need
+from your data is missing"* and never delegating — **is gone**. The pack's live output shows real
+Sales-Recovery delegation instead: `route: sales_recovery`, a grounded draft naming a cohort, a date
+window and a ₹ range, then an approval ask. §4's composition analysis was measured on the pre-fix
+build and is now conservative rather than current.
+
+**Nothing is injected**, which is what makes a clean result here meaningful: a regression would have
+meant something WAS reaching the prompt. Nothing did.
 
 ## 4. Blast radius of the M2 pack's 9.5% — **R0 = 0**
 
