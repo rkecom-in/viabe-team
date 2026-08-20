@@ -466,13 +466,43 @@ def test_run_signup_consent_false_no_tenant(pool):
     assert n == 0
 
 
+def test_absent_city_defers_the_tier_instead_of_asserting_tier_3(pool):
+    """2026-08-21 — city and business_type are AUTO-DETECTED, so the web form stopped asking.
+
+    The trap this pins: ``coarsen_city("")`` returns ``'tier_3'``. Dropping the field without this
+    guard would have tiered EVERY web signup as tier_3 and fed that into the L3 cohort key
+    (business_type x city_tier) — asserting a tier nobody knows, with the same confidence as a real
+    one. An absent city must persist NULL and let discovery fill it later.
+    """
+    from orchestrator.db import tenant_connection
+    from orchestrator.onboarding.signup import run_signup
+
+    res = run_signup(
+        _valid_input(city="", business_type=""),
+        welcome_send_fn=lambda *a, **k: True,
+        verify_search_fn=_active_search,
+    )
+    assert res.tenant_id is not None
+    with tenant_connection(res.tenant_id) as conn:
+        row = conn.execute(
+            "SELECT city_tier, business_type FROM tenants WHERE id = %s", (str(res.tenant_id),)
+        ).fetchone()
+    tier = row["city_tier"] if isinstance(row, dict) else row[0]
+    btype = row["business_type"] if isinstance(row, dict) else row[1]
+    assert tier is None, f"an absent city must defer the tier, not coarsen '' to {tier!r}"
+    assert not btype, "an absent business_type must stay absent, not be guessed"
+
+
 def test_run_signup_validation_negatives(pool):
     from orchestrator.onboarding.signup import SignupError, run_signup
 
+    # 2026-08-21: a blank city is no longer a rejection — city and business_type are AUTO-DETECTED
+    # and the web form does not collect them, so ABSENT is legal and defers (city_tier stays NULL
+    # rather than being coarsened from ""). A PRESENT business_type is still range-checked, which is
+    # the case kept below: silence is allowed, a wrong bucket is not.
     for over, code in [
         ({"whatsapp_number": "+1202555"}, "invalid_phone"),
         ({"preferred_language": "ta"}, "invalid_language"),
-        ({"city": "  "}, "invalid_city"),
         ({"business_type": "spaceship"}, "invalid_business_type"),
         ({"business_name": "viabe team"}, "invalid_name"),  # blocklist
     ]:

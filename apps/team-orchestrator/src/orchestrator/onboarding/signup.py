@@ -134,7 +134,10 @@ def create_signup_tenant(
         raise ValueError("signup requires both DPDPA and residency consent (Pillar 7)")
     if not whatsapp_number:
         raise ValueError("whatsapp_number is the mandatory tenant identity")
-    if business_type not in valid_business_types():
+    # Defence-in-depth taxonomy check. 2026-08-21: an ABSENT business_type is legal (it is
+    # auto-detected — the form no longer asks), so only a PRESENT value is range-checked here.
+    # Same rule as _validate: silence is allowed, a wrong bucket is not.
+    if business_type and business_type not in valid_business_types():
         raise ValueError(f"business_type {business_type!r} not in the taxonomy")
 
     from orchestrator.billing.founding_counter import try_claim_founding_slot
