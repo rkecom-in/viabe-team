@@ -220,8 +220,18 @@ def test_validate_params_correct_keys_no_raise():
 # SIDs wired + agent_selectable flipped true. The live VT-45 selectable set grew
 # from {team_weekly_approval} to {team_weekly_approval, team_winback_simple,
 # team_winback_offer}. The 3 owner_notification surfaces stay non-selectable.
+# P1.5 (2026-08-20): `lead_winback` joins the set — Meta-APPROVED en+hi, SIDs registered,
+# `agent_selectable: true`. `campaign_offer` is APPROVED in the same batch and deliberately does
+# NOT join: its URL button targets an aggregate campaign destination that does not exist yet
+# (VT-773), so it ships `agent_selectable: false`. Approved is not sendable, and this pin is where
+# that distinction is enforced rather than trusted — the set grew by exactly one, on purpose.
 _SELECTABLE_SET = frozenset(
-    {"team_weekly_approval", "team_winback_simple", "team_winback_offer"}
+    {
+        "team_weekly_approval",
+        "team_winback_simple",
+        "team_winback_offer",
+        "lead_winback",
+    }
 )
 
 
@@ -237,7 +247,9 @@ def test_approved_template_names_en_returns_only_selectable():
                  "team_welcome",
                  # Gap-5 owner surfaces — system-invoked, never agent-selectable.
                  "team_agent_draft_approval", "team_l3_presend_notice",
-                 "team_autonomy_offer"):
+                 "team_autonomy_offer",
+                 # P1.5: approved by Meta, NOT sendable — its destination (VT-773) does not exist.
+                 "campaign_offer"):
         assert name not in names, f"{name} should not be agent_selectable"
 
 
