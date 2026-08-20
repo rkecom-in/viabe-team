@@ -579,7 +579,10 @@ def test_signup_route_status_mapping(pool, monkeypatch):
     r = client.post("/api/signup", json=body, headers=hdr)
     assert r.status_code == 201, r.text
     assert r.json()["tenant_id"]
-    assert r.json()["city_tier"] == "tier_1"  # Mumbai → tier_1; VT-317 closed
+    # 2026-08-21: no city is submitted (auto-detected), so the tier is DEFERRED rather than
+    # coarsened. VT-317's guarantee is unchanged — the raw city is never persisted; there is simply
+    # no city at signup to coarsen.
+    assert r.json()["city_tier"] is None
 
     # Duplicate → 409.
     r_dup = client.post("/api/signup", json=body, headers=hdr)
