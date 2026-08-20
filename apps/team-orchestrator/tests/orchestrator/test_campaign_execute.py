@@ -474,6 +474,10 @@ def test_empty_cohort_status_still_advanced() -> None:
         "sent": 0,
         "skipped_opt_out": 0,
         "skipped_complaint_freeze": 0,
+        # VT-740: a send suppressed by the per-recipient frequency choke is a DELIBERATE
+        # non-send, so it gets its own bucket rather than landing in `failed` — bucketing a
+        # working guard as a failure would make it look like an outage.
+        "skipped_frequency": 0,
         "failed": 0,
         "killed": 0,  # VT-558: campaign true-kill counter (0 = not killed)
     }

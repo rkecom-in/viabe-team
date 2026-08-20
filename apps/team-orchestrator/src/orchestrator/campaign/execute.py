@@ -320,6 +320,7 @@ def execute_approved_campaign(
         return {
             "sent": 0,
             "skipped_opt_out": 0,
+            "skipped_frequency": 0,
             "skipped_complaint_freeze": 0,
             "failed": 0,
             "dispatch_blocked": 1,
@@ -343,6 +344,7 @@ def execute_approved_campaign(
         return {
             "sent": 0,
             "skipped_opt_out": 0,
+            "skipped_frequency": 0,
             "skipped_complaint_freeze": 0,
             "failed": 0,
             "opt_out_blocked": 1,
@@ -370,6 +372,7 @@ def execute_approved_campaign(
         return {
             "sent": 0,
             "skipped_opt_out": 0,
+            "skipped_frequency": 0,
             "skipped_complaint_freeze": 0,
             "failed": 0,
             "pre_gate_blocked": 1,
@@ -405,6 +408,7 @@ def execute_approved_campaign(
 
     sent = 0
     skipped_opt_out = 0
+    skipped_frequency = 0
     skipped_complaint_freeze = 0
     failed = 0
     killed = 0
@@ -505,6 +509,11 @@ def execute_approved_campaign(
                     language=language,  # type: ignore[arg-type]
                     template_params=body_params,
                     idempotency_key=idempotency_key,
+                    # VT-740: attribute the ledger row to THIS campaign. The column existed and was
+                    # never written, so effect-state ("did this partially send? may it be
+                    # re-driven?") had to match an idempotency-key prefix instead — a workaround
+                    # that cannot see the agent path at all.
+                    campaign_id=campaign_id_str,
                 )
                 result: SendWhatsappTemplateOutput = _send_fn(payload, pool=send_pool)
             except Exception as exc:  # noqa: BLE001
@@ -540,6 +549,17 @@ def execute_approved_campaign(
                         "execute_approved_campaign: vt320_marker_error tenant=%s customer=%s",
                         tenant_id_str, customer_id_str,
                     )
+            elif result.status == "skipped":
+                # VT-740: the per-recipient frequency choke suppressed this send (the customer was
+                # already delivered a message inside the minimum contact interval). A deliberate
+                # non-send, NOT a failure — bucketing it as failed would make a working guard look
+                # like an outage and would hide it from the skip accounting.
+                skipped_frequency += 1
+                logger.info(
+                    "execute_approved_campaign: frequency_suppressed tenant=%s customer=%s code=%s",
+                    tenant_id_str, customer_id_str,
+                    result.error_envelope.code if result.error_envelope else "unknown",
+                )
             elif result.status == "unauthorized":
                 # VT-45 refused — opt_out caught by the tool (should not reach
                 # here if our defence-in-depth gate runs first, but VT-45's
@@ -604,6 +624,7 @@ def execute_approved_campaign(
     summary = {
         "sent": sent,
         "skipped_opt_out": skipped_opt_out,
+        "skipped_frequency": skipped_frequency,
         "skipped_complaint_freeze": skipped_complaint_freeze,
         "failed": failed,
         "killed": killed,

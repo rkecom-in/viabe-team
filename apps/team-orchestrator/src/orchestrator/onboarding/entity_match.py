@@ -54,11 +54,10 @@ SearchFn = Callable[[str], list[dict[str, Any]]]
 # web/SERP legs — the returned GSTINs are CANDIDATES/HINTS only (Sandbox GST verify stays the gate).
 LlmFn = Callable[[str, str], str]
 
-# VT-452: the model + server-side web_search tool for the LLM-discovery leg. claude-opus-4-8 is the
-# canonical bare id (no date suffix); web_search_20260209 is the current dynamic-filtering web_search
-# tool variant for the Opus-4.x family. ANTHROPIC_API_KEY is the env (valid on deployed dev).
-_LLM_DISCOVERY_MODEL = "claude-opus-4-8"
-_WEB_SEARCH_TOOL = {"type": "web_search_20260209", "name": "web_search"}
+# VT-732: the COMPLEX reasoning tier for the LLM-discovery leg (was a hardcoded claude-opus-4-8).
+# Server-side web_search is bound by the seam in the resolved provider's own native form and is gated
+# by the TEAM_ENABLE_WEB_SEARCH master flag; the strict-JSON contract below is provider-independent.
+_LLM_DISCOVERY_TIER = "complex"
 
 
 @dataclass(frozen=True)
@@ -694,14 +693,15 @@ def _default_search(query: str) -> list[dict[str, Any]]:
 
 
 def _default_llm_search(name: str, city: str) -> str:
-    """VT-452/VT-509 default LLM-discovery call: claude-opus-4-8 + server-side web_search tool.
+    """VT-452/VT-509 default LLM-discovery call: the COMPLEX tier + server-side web_search.
     Returns strict JSON {"companies":[{"name","gstin","cin"}]} or {"companies":[]} if not found.
     The caller (_llm_candidates) parses this JSON strictly; a non-JSON response -> zero candidates.
 
-    ANTHROPIC_API_KEY is read by the SDK from env (valid on deployed dev/prod).
-    Server-side web_search runs on Anthropic's side; we only consume the model's final text block.
-    Raises on SDK failure -> the leg's try/except degrades it to [] (fail-soft)."""
-    from anthropic import Anthropic
+    VT-732 — routed through the tier seam: the model is the env's choice, the credential is the
+    resolved provider's, and the call is cost-metered. Server-side search runs on the provider's side;
+    we consume only the model's final text block.
+    Raises on call failure -> the leg's try/except degrades it to [] (fail-soft)."""
+    from orchestrator.llm.structured import structured_text_call
 
     location = f" in {city}" if (city or "").strip() else ""
     prompt = (
@@ -714,25 +714,22 @@ def _default_llm_search(name: str, city: str) -> str:
         f'Include ONLY companies with a confirmed 15-character GSTIN. '
         f'Your ENTIRE response must be parseable by json.loads().'
     )
-    resp = Anthropic().messages.create(
-        model=_LLM_DISCOVERY_MODEL,
-        max_tokens=512,
+    # text_mode="last" takes the model's final answer AFTER the web_search completes — earlier text
+    # blocks may be "I'll search…" preamble, and joining them would feed prose into json.loads().
+    return structured_text_call(
+        _LLM_DISCOVERY_TIER,
         system=(
             "You are a structured data extraction agent. "
             "You MUST respond with ONLY valid JSON -- no prose, no markdown, no explanation. "
             "Your entire response must be parseable by json.loads()."
         ),
-        tools=[_WEB_SEARCH_TOOL],
-        messages=[{"role": "user", "content": prompt}],
-    )
-    # Take the LAST text block -- the model's final answer after the web_search completes.
-    # Earlier text blocks may be "I'll search..." preamble; the last block is the structured result.
-    parts = [
-        getattr(block, "text", "")
-        for block in (resp.content or [])
-        if getattr(block, "type", None) == "text"
-    ]
-    return (parts[-1] if parts else "").strip()
+        user=prompt,
+        max_tokens=512,
+        agent="onboarding_entity_match",
+        call_site="llm_discovery",
+        enable_web_search=True,
+        text_mode="last",
+    ).strip()
 
 
 def _clean(v: Any) -> str | None:

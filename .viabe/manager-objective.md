@@ -265,5 +265,17 @@ earned per capability (C4). EFFECT approval (customer sends, money, consent) ALW
 deterministic gates + Pillar-7 owner approval — no confidence, plan quality, or earned autonomy
 bypasses it.
 
-**Delta to §7A (rostered VT-721):** today's loop plans monthly/daily. The ROLLING 7-DAY plan
-REVISED DAILY against prior results is net-new capability, not a rewording.
+**WHERE KNOWLEDGE SITS (Fazal 2026-07-28/29 — flippable at runtime).** Every knowledge card
+carries an assignment naming whose memory it occupies: `manager_global` (how to run a business,
+all tenants) · `manager_tenant` (what is true about THIS business) · `specialist:<agent>` (task
+customisation for one lane) · `disabled`. The global default is overridden per tenant at
+retrieval, so a card can be flipped in or out of any memory **without a deploy**. The **Manager's
+memory is the important estate**; specialist memory is **thin and task-specific** and must never
+become a second general-knowledge store. Retrieval is **advisory to reasoning and never
+authorizes an effect** — gates and Pillar-7 remain the sole effect authority.
+Full model: `docs/agent-framework/ARCHITECTURE.md` §0.1.3 (canonical).
+
+**Delta to §7A (VT-721 — DEV-PROVEN, ACTIVE on dev 2026-07-30):** today's loop plans
+monthly/daily. The ROLLING 7-DAY plan REVISED DAILY against prior results is net-new capability,
+not a rewording. Each revision now records a `week_plan` assertion in the asserted-facts ledger,
+so a changed plan is an OWNED change, never a silent one.

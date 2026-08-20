@@ -37,11 +37,9 @@ import os
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 from uuid import UUID
 
-import yaml
-from anthropic import Anthropic
 
 from orchestrator.integrations.methods._image_adapter import IngestionSummary
 from orchestrator.knowledge.l1 import upsert_business_profile
@@ -49,7 +47,6 @@ from orchestrator.security.prompt_quarantine import FRAMING, fence
 
 logger = logging.getLogger(__name__)
 
-_MODELS_YAML = Path(__file__).resolve().parents[4] / "config" / "models.yaml"
 _THEME_PROMPT = (
     Path(__file__).resolve().parents[2] / "agent" / "prompts" / "zomato_themes_v1.md"
 )
@@ -210,12 +207,17 @@ def _zomato_review_rating(item: dict[str, Any]) -> float:
     return 0.0
 
 
+# VT-732 — the CLASSIFIER tier (TEAM_MODEL_CLASSIFIER), replacing the
+# ``config/models.yaml[zomato_theme_extraction][VIABE_ENV-slot]`` pin (theme clustering is
+# classification, and both yaml slots were the same cheap model anyway).
+_THEME_TIER = "classifier"
+
+
 def _resolve_theme_model() -> str:
-    env = os.environ.get("VIABE_ENV", "test").lower()
-    slot = "production" if env == "production" else "test"
-    with open(_MODELS_YAML) as f:
-        config = yaml.safe_load(f)
-    return cast(str, config["zomato_theme_extraction"][slot])
+    """The concrete model the theme tier resolves to — for logs/attribution only."""
+    from orchestrator.llm import resolve_model_id
+
+    return resolve_model_id(_THEME_TIER)
 
 
 def _build_theme_prompt(base: str, review_texts: list[str]) -> str:
@@ -237,16 +239,16 @@ def _default_themes(review_texts: list[str]) -> list[dict[str, Any]]:
     """LLM theme clustering over IDENTITY-STRIPPED review text → abstract labels."""
     if not review_texts:
         return []
-    client = Anthropic()
-    model = _resolve_theme_model()
+    from orchestrator.llm.structured import structured_text_call
+
     base = _THEME_PROMPT.read_text(encoding="utf-8")
     text = _build_theme_prompt(base, review_texts)
-    resp = client.messages.create(
-        model=model, max_tokens=_MAX_OUTPUT_TOKENS,
-        messages=[{"role": "user", "content": [{"type": "text", "text": text}]}],
-    )
-    raw = "".join(
-        getattr(b, "text", "") for b in resp.content if getattr(b, "type", "") == "text"
+    raw = structured_text_call(
+        _THEME_TIER,
+        user=text,
+        max_tokens=_MAX_OUTPUT_TOKENS,
+        agent="apify_food",
+        call_site="theme_clustering",
     ).strip()
     if raw.startswith("```"):
         raw = raw.strip("`")

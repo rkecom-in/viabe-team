@@ -882,6 +882,43 @@ def record_inbound_message_sid(tenant_id: str, message_sid: str) -> bool:
         return cur.rowcount == 1
 
 
+def _inbound_received_at(conn: Any, tenant_id: str, message_sid: str | None) -> Any:
+    """VT-734 — when THIS inbound actually reached us, for the approval ordering invariant.
+
+    Reads the durable ``twilio_inbound_events`` receipt rather than trusting wall-clock at
+    resolution time: the resolving turn can run a minute or more after the message arrived (the D1
+    in-turn wait), and it is exactly that gap the invariant exists to measure. Returns None when the
+    sid is absent or unknown — the seam then fails CLOSED and refuses to resolve, which is the
+    money-safe direction.
+    """
+    if not message_sid:
+        return None
+    try:
+        row = conn.execute(
+            "SELECT received_at FROM twilio_inbound_events "
+            "WHERE tenant_id = %s AND message_sid = %s",
+            (str(tenant_id), str(message_sid)),
+        ).fetchone()
+    except Exception:  # noqa: BLE001 — an unreadable receipt must not crash the turn
+        logger.warning("VT-734: inbound receipt read failed for sid=%s", message_sid, exc_info=True)
+        return None
+    if row is None:
+        return None
+    return row["received_at"] if isinstance(row, dict) else row[0]
+
+
+def _approval_original_request(tenant_id: str, approval: dict[str, Any]) -> str | None:
+    """VT-734 — the owner text that PRODUCED this approval, so a verbatim re-send of it is not read
+    as consent to it. Best-effort by design: the ordering invariant is the load-bearing half, and a
+    missing objective must never block a legitimate decision."""
+    try:
+        from orchestrator.manager import task_store
+
+        return task_store.latest_objective_text(tenant_id)
+    except Exception:  # noqa: BLE001 — advisory input only
+        return None
+
+
 @DBOS.step()
 def try_resume_pending_approval(tenant_id: str, body: str, message_sid: str | None) -> str | None:
     """VT-47 — if the tenant has a PAUSED run awaiting owner approval, treat
@@ -916,6 +953,7 @@ def try_resume_pending_approval(tenant_id: str, body: str, message_sid: str | No
         return None
 
     from orchestrator.agent.approval_resume import (
+        StaleApprovalDecisionError,
         find_open_approval_for_tenant,
         mark_approval_resolved,
         resolve_decision_from_reply,
@@ -927,8 +965,14 @@ def try_resume_pending_approval(tenant_id: str, body: str, message_sid: str | No
     if approval is None:
         return None
 
+    # VT-734: the ORIGINAL REQUEST that produced this approval, so a verbatim re-send of it can
+    # never be read as consent to it (CL-2026-08-06-repeated-request-is-never-approval). Fail-soft:
+    # if it cannot be read the content rule simply does not fire — the ORDERING invariant at the
+    # resolution seam is the load-bearing half and does not depend on this.
+    _original_request = _approval_original_request(tenant_id, approval)
     decision = resolve_decision_from_reply(
         body, tenant_id=tenant_id, approval_type=approval.get("approval_type"),
+        original_request=_original_request,
     )
     if decision is None:
         # Unclear reply — leave the gate paused (Pillar 7: no guessing). For a customer-SEND
@@ -947,10 +991,22 @@ def try_resume_pending_approval(tenant_id: str, body: str, message_sid: str | No
         # it is persisted, never logged). The batch-state application happens
         # INSIDE mark_approval_resolved (the single resolution choke point, shared
         # with the timeout sweep), atomic with this transaction.
-        resolved = mark_approval_resolved(
-            conn, tenant_id, approval["id"], decision,
-            owner_message_sid=message_sid, owner_feedback=body,
-        )
+        # VT-734: hand the seam THIS inbound's timestamp so the ordering invariant can refuse a
+        # message that predates the ask. ``now()`` is correct here — the row is written as this
+        # webhook run processes the inbound, and the breach case is a message that predates the
+        # approval by MINUTES, not milliseconds.
+        try:
+            resolved = mark_approval_resolved(
+                conn, tenant_id, approval["id"], decision,
+                owner_message_sid=message_sid, owner_feedback=body,
+                owner_message_at=_inbound_received_at(conn, tenant_id, message_sid),
+            )
+        except StaleApprovalDecisionError as exc:
+            # The gate STAYS OPEN and the message falls through to normal dispatch. This is the
+            # money-safe direction: the owner is re-asked rather than having a send authorised by a
+            # message they sent before seeing the plan.
+            logger.warning("VT-734 stale approval decision refused (tenant=%s): %s", tenant_id, exc)
+            return None
         # VT-334: a 'defer' that only EXTENDS the window returns resolved=False — the run stays
         # paused (no L2 emit, no resume). The L2 + resume happen only on a real resolution
         # (incl. an exhausted defer, which resolves as a rejection).
@@ -972,18 +1028,36 @@ def try_resume_pending_approval(tenant_id: str, body: str, message_sid: str | No
             )
 
             _campaign_id = approval.get("campaign_id")
-            record_episodic_event(
-                tenant_id,
-                _l2_event,
-                payload={
-                    "campaign_id": _campaign_id,
-                    "approval_id": str(approval["id"]),
-                },
-                referenced_entity_type="campaign" if _campaign_id else "approval",
-                referenced_entity_id=_campaign_id or approval["id"],
-                event_id=deterministic_event_id(tenant_id, _l2_event, approval["id"]),
-                conn=conn,
-            )
+            # VT-747 sibling — SAVEPOINTED + caught. Found by that row's scope-2 audit ("enumerate
+            # every statement on the resolve connection"). This is an L2 OBSERVABILITY append, but it
+            # ran bare on the resolve connection: a failure here aborted the transaction and took the
+            # owner's authoritative approval down with it. The invariant VT-747 states is "the owner's
+            # resolution must commit even if every ack fails" — an episodic milestone is an ack.
+            #
+            # Unlike the fail-soft acks, this one propagated LOUDLY rather than silently, which is the
+            # better of the two failure modes but still the wrong outcome: a knowledge-graph write must
+            # not be able to veto a money-path decision. The trade this makes is explicit — a lost L2
+            # milestone becomes a WARNING in the logs, where previously a lost APPROVAL became an
+            # exception. Losing the milestone is recoverable; losing the approval is not.
+            try:
+                with conn.transaction():
+                    record_episodic_event(
+                        tenant_id,
+                        _l2_event,
+                        payload={
+                            "campaign_id": _campaign_id,
+                            "approval_id": str(approval["id"]),
+                        },
+                        referenced_entity_type="campaign" if _campaign_id else "approval",
+                        referenced_entity_id=_campaign_id or approval["id"],
+                        event_id=deterministic_event_id(tenant_id, _l2_event, approval["id"]),
+                        conn=conn,
+                    )
+            except Exception:  # noqa: BLE001 — an L2 milestone must never unwind the resolution
+                logger.warning(
+                    "VT-747: L2 %s milestone failed (fail-soft; the owner's resolution STANDS) "
+                    "tenant=%s approval=%s", _l2_event, tenant_id, approval["id"], exc_info=True,
+                )
 
     # VT-334: a defer that only EXTENDED the window leaves the run PAUSED — do not resume or
     # close. The owner gets another 48h; the next reply re-enters here.
@@ -1185,6 +1259,16 @@ def webhook_pipeline_run(tenant_id: str, run_id: str, twilio_fields: dict) -> di
     # message_sid; fail-soft; inbound-only. The later brain-path record + journey's own mirror dedup onto
     # this row. Placed after the run row exists so the tenant-scoped write has its RLS context.
     _record_owner_inbound_turn(tenant_id, event)
+
+    # VT-722 — the mode-independent agent-pick net: an exact chooser tap records the pick into
+    # the draft + asserted-facts ledger HERE (pre-mode-split), because on enforce the brain
+    # consumes the turn and the walker's writer beats never run. Recording only — never routes,
+    # never consumes; the dispatch commitments block then composes against the just-recorded
+    # pick in the same run. Inbound + non-dupe only; fail-soft inside.
+    if event.message_type == "inbound_message" and not event.dupe_status:
+        from orchestrator.onboarding.journey import maybe_record_agent_pick
+
+        maybe_record_agent_pick(tenant_id, event.body or "", event.twilio_message_sid)
 
     # VT-524 (B1) — owner-notification delivery ledger. Persist the async delivery truth
     # (delivered/failed) against the owner send, keyed by the outbound message_sid, for EVERY
@@ -1702,6 +1786,31 @@ def webhook_pipeline_run(tenant_id: str, run_id: str, twilio_fields: dict) -> di
                 # T9 — thread the triage outcome so dispatch_brain suppresses async specialist
                 # spawns on an answerable turn (direct_reply / task_status) and answers in-turn.
                 triage_outcome = seam_result.outcome
+
+                # VT-725 (moved here 2026-08-19). This call used to live inside `dispatch_brain`,
+                # which is the ONE router `skip_legacy_dispatch` skips: in enforce mode the triage
+                # seam owns new_task/answer_pending turns and `dispatch_brain` never runs. Dev has
+                # been in enforce mode, so the Manager's most common turns reached the card corpus
+                # exactly never — `decision_evidence_links` held zero `manager_turn:` rows across
+                # the whole life of the feature while VT-725 was recorded as "shadow serving live".
+                # The wiring test could not see it: it greps `dispatch_brain`'s source for the call
+                # and passes whether or not that function is on the live path.
+                #
+                # A retrieval seam wired into one of two routers is the same drift its own module
+                # docstring refuses on the prompt-assembly side. So it sits on the per-turn path
+                # instead: one call per inbound message, before the branch, so which router owns
+                # the turn stops being able to decide whether the corpus is consulted.
+                #
+                # Still shadow, still injects nothing, still fail-soft (turn_retrieval never raises
+                # by contract) — this changes WHEN the corpus is asked, never what a turn says.
+                from orchestrator.knowledge.turn_retrieval import retrieve_for_manager_turn
+
+                retrieve_for_manager_turn(
+                    tenant_id=tenant_id,
+                    run_id=run_id,
+                    objective=event.body or "",
+                    message_ref=event.twilio_message_sid,
+                )
                 # Shared infra (D3/cluster-5b) — a deterministic in-turn reply from the enforce seam
                 # is delivered via the ONE canonical checkpointed step (replay-safe; at-most-once).
                 # Placed BEFORE the D1 in-turn wait + fallback: recording the 'assistant' turn makes

@@ -163,3 +163,31 @@ access-controlled, not column-encrypted. Do not roster without Fazal's go.
 - **Surfacing:** at session start, Cowork reads this file + surfaces overdue + due-this-week without prompting.
 - **Notion side:** Notion Launch Tracker is now archival. Do not edit it. All future updates land here.
 - **Path to full migration:** when Cowork next has bandwidth, backfill the 13 missing milestones via additional Notion-MCP fetches.
+
+---
+
+## 🎯 PILOT PROOF GATE (added 2026-08-06, Fazal-ratified — the post-launch success bar)
+
+**Origin:** independent external assessment (non-Claude AI, 2026-08-06) reviewed by Fazal + Clau.
+Verdict recorded honestly: the wedge is credible, the architecture strategically correct, and the
+decisive risk is COMMERCIAL (pay-conversion), not technical. These thresholds are the falsifiable
+answer. **The pilot: 10–20 curated tenants (launch persona: online-presence businesses, structured
+records, real customer volume), one–two verticals, ≥ 8 weeks.**
+
+| # | Proof bar | Measured by |
+|---|---|---|
+| P1 | ≥ 60% of pilot tenants still ACTIVE at week 8 | activity ledger (owner turns + agent runs) |
+| P2 | ≥ 40% willingly PAY the intended price at trial end | mandate conversions (no founder discounts) |
+| P3 | ≥ 50% realise measurable value ≥ 3× product cost | VT-733-C attributed gross profit vs price |
+| P4 | ZERO serious consent / money / customer-contact violations | gate audit + incident ledger (Tier-1 = 0 in the wild) |
+| P5 | Onboarding repeatable WITHOUT founder intervention | VTR-only onboardings succeed end-to-end |
+| P6 | Owners GRANT MORE autonomy over time, not less | C4 graduation events vs autonomy withdrawals |
+
+**Reading the gate:** P1–P3 prove the business; P4–P6 prove the trust model. If owners enjoy the
+conversations but P2/P3 fail, the intelligence is impressive and the business is not working — that
+is a pricing/attribution problem to fix, not a reason to add agents. **No specialist beyond the
+revenue cluster ships until this gate reads green.** (Fazal may override per Pillar-7.)
+
+**Metric that makes P3 possible:** "attributed gross profit per tenant" is now first-class in
+VT-733-C — the VTR console shows BOTH numbers per tenant: what the tenant costs us, and what we
+made them. The sales pitch IS the console line: "generated ₹X attributable gross profit, charged ₹Y."

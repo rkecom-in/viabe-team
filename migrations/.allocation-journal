@@ -1,0 +1,19 @@
+2026-08-07T02:30:00Z	190	cc	VT-734 approval presented_at (backfilled)
+2026-08-09T04:55:00Z	191	UNACCOUNTED	BURNED - no file on any branch, never in git history; allocator consumed then abandoned. Verified 2026-08-09 (Clau 20260806T1600Z attribution check). A gap breaks nothing (runner tracks by filename); recorded so it is not re-investigated.
+2026-08-07T02:30:00Z	192	cc	VT-733A cost console RPCs (backfilled)
+2026-08-07T02:30:00Z	193	cc	VT-733B integration cost events (backfilled)
+2026-08-07T02:30:00Z	194	codex-via-clau	VT-727 full corpus load (backfilled)
+2026-08-07T02:30:00Z	195	codex-via-clau	VT-727 embeddings split - RESERVED, never used (backfilled)
+2026-08-07T02:30:00Z	196	cc	VT-725 knowledge corpus RLS read policies (backfilled)
+2026-08-07T02:35:00Z	197	cc	VT-735 OpenAI reprice
+2026-08-08T22:23:28Z	198	cc	VT-711 assignment FK cascade cannot fire
+2026-08-08T22:47:39Z	199	cc	VT-735 per-tenant daily Fast-call budget
+2026-08-10T08:50:26Z	200	unknown	unstated
+2026-08-13T09:13:41Z	201	unknown	unstated
+2026-08-13T13:47:20Z	202	unknown	unstated
+2026-08-14T00:03:52Z	203	unknown	unstated
+2026-08-14T13:05:57Z	204	unknown	unstated
+2026-08-14T13:11:47Z	205	unknown	unstated
+2026-08-15T10:29:13Z	206	unknown	unstated
+2026-08-17T12:30:55Z	207	unknown	unstated
+2026-08-17T23:18:49Z	208	unknown	unstated

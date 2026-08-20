@@ -283,13 +283,15 @@ def test_clean_plan_persists_v1(substrate, log_spy, write_spy, monkeypatch):  # 
 
     assert result == {"version": 1}
     assert len(llm.calls) == 1, "a clean plan must not trigger the retry"
-    assert llm.calls[0][1] == "claude-haiku-4-5", "non-production env must resolve the test slot"
+    # VT-732: the model comes from TEAM_MODEL_SPECIALIST (unset here → the tier default), never
+    # from a config/models.yaml VIABE_ENV slot.
+    assert llm.calls[0][1] == "claude-sonnet-5", "the specialist tier resolves the model"
     assert "<facts>" in llm.calls[0][0] and "[F1]" in llm.calls[0][0]
 
     assert len(write_spy) == 1
     write = write_spy[0]
     assert write["generated_by"] == "gap4_generator"
-    assert write["model_id"] == "claude-haiku-4-5"
+    assert write["model_id"] == "claude-sonnet-5"
 
     bundle = write["fact_bundle"]
     by_key = {f["key"]: f for f in bundle.values()}

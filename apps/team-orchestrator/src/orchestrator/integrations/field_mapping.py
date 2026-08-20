@@ -25,12 +25,8 @@ from __future__ import annotations
 
 import difflib
 import logging
-import os
 from dataclasses import dataclass
 from typing import Literal
-
-from langchain_anthropic import ChatAnthropic
-from langchain_core.messages import HumanMessage, SystemMessage
 
 from orchestrator.integrations.canonical_fields import (
     GLOBAL_FIELD_HINTS,
@@ -120,15 +116,11 @@ Output ONLY one of: customer_name, phone, email, order_amount, order_date, last_
 NONE = source field doesn't map to any canonical field cleanly.
 """
 
-_LLM_SYSTEM_MESSAGE = SystemMessage(
-    content=[
-        {
-            "type": "text",
-            "text": _LLM_SYSTEM_PROMPT,
-            "cache_control": {"type": "ephemeral"},
-        }
-    ]
-)
+# VT-732 — the classifier tier (TEAM_MODEL_CLASSIFIER), resolved per call; this site used to build
+# its own ChatAnthropic pinned to claude-opus-4-7, which is also a tier MISMATCH: picking one label
+# from a fixed set of eight is classification, not reasoning. The cache_control block the system
+# prompt used to carry is applied by the seam on anthropic (``cache_system=True``).
+_MAP_TIER = "classifier"
 
 
 def _llm_assisted_match(source_field: str) -> tuple[CanonicalField | None, float]:
@@ -138,27 +130,30 @@ def _llm_assisted_match(source_field: str) -> tuple[CanonicalField | None, float
     canonical field returned) and 0.5 for NONE / ambiguous. The LLM
     response is parsed deterministically.
 
-    Skipped (returns (None, 0.0)) when ANTHROPIC_API_KEY absent or
-    doesn't start with sk-ant- (mirrors dispatch_brain's env-gate).
+    Skipped (returns (None, 0.0)) when the credential for the tier's RESOLVED provider is absent
+    (VT-732 — asking specifically for an sk-ant- key would skip this path on a gpt-tiered box).
     """
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    if not api_key.startswith("sk-ant-"):
+    from orchestrator.llm.provider import api_key_present
+    from orchestrator.llm.structured import structured_text_call
+
+    if not api_key_present(_MAP_TIER):
         logger.warning(
-            "VT-209 LLM-assisted match skipped — no Anthropic key",
+            "VT-209 LLM-assisted match skipped — no credential for the mapping tier's provider",
             extra={"source_field": source_field},
         )
         return None, 0.0
 
     try:
         # max_tokens=10 is enough for a single canonical-field label.
-        model = ChatAnthropic(  # type: ignore[call-arg]
-            model="claude-opus-4-7", max_tokens=10
-        )
-        result = model.invoke([
-            _LLM_SYSTEM_MESSAGE,
-            HumanMessage(content=f"Source column: {source_field}"),
-        ])
-        text = str(result.content).strip().lower()
+        text = structured_text_call(
+            _MAP_TIER,
+            system=_LLM_SYSTEM_PROMPT,
+            user=f"Source column: {source_field}",
+            max_tokens=10,
+            agent="integration_field_mapping",
+            call_site="field_match",
+            cache_system=True,
+        ).strip().lower()
         valid_fields: set[str] = set(GLOBAL_FIELD_HINTS.keys())
         # Strip punctuation / pick the first valid token.
         for token in text.replace(",", " ").replace(".", " ").split():

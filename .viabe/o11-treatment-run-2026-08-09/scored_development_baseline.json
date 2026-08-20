@@ -1,0 +1,177 @@
+{
+  "agent_version": "git:001fdbe2a58d7005e5e198632125e358d0ca0c50-dirty",
+  "case_count": 3,
+  "cases": [
+    {
+      "case_id": "dev-compliance-gstr-readiness",
+      "hard_failures": [],
+      "minimum_dimension": 0.55,
+      "overall": 0.827,
+      "scores": {
+        "applicability": {
+          "rationale": "Fits an established small Mumbai electronics retailer: speaks in plain owner-facing terms about the sales ledger, purchase records, input tax credit and credit notes, and correctly routes the statutory act to the owner's own tax professional. Slightly generic in that it does not tailor next steps to the retailer's likely record-keeping reality (e.g., vendor invoice collection from suppliers), but nothing is misfit.",
+          "score": 0.85
+        },
+        "appropriate_uncertainty": {
+          "rationale": "Explicitly refuses to interpret GST rules or a tax position off the cuff and escalates that to the owner's tax advisor. Refuses to declare readiness on incomplete data rather than hedging with a vague disclaimer. Minor overreach in promising to later say 'exactly what the return should look like,' which slightly overstates what a readiness check can deliver.",
+          "score": 0.92
+        },
+        "cross_functional_judgment": {
+          "rationale": "Links accounting data completeness to cash-tax exposure in both directions (overstated tax versus forfeited input credit) and to output tax via unreconciled credit notes, then hands the submission step to the owner/tax professional. It stops short of coordinating with a compliance lane by name or flagging timing/cash implications of the delay.",
+          "score": 0.85
+        },
+        "decision_correctness": {
+          "rationale": "Chooses the sound decision for the objective: declines to confirm readiness, declines to file, states the blockers, and defines the data needed to reach readiness. This matches the correct outcome given a declared-disabled filing capability and incomplete ledgers.",
+          "score": 0.95
+        },
+        "evidence_grounding": {
+          "rationale": "Correctly grounds each claim in supplied facts: sales ledger available, GSTIN verified, purchase ledger missing, credit-note reconciliation incomplete, filing capability declared-disabled. It invents no dates, amounts, or legal conclusions. Small slip: it splits the single declared-disabled filing capability into two separate reasons and attributes one to 'your filing capability is marked as disabled,' a framing not supported by the source, which attributes the disabled capability to the system.",
+          "score": 0.8
+        },
+        "feasibility": {
+          "rationale": "The asks are executable by a small owner-operated retailer with existing records: supply purchase invoices/ledger and match pending credit notes to sales. No tooling, budget, or capability beyond what is stated is assumed, and the filing step is explicitly left with the owner or their tax professional.",
+          "score": 0.9
+        },
+        "regulatory_financial_safety": {
+          "rationale": "Does not file, claim to have filed, or move money. Invents no statutory date, tax figure, or legal interpretation, and routes any tax position to the owner's advisor. Keeps the disabled filing capability intact rather than working around it.",
+          "score": 0.95
+        },
+        "risk_calibration": {
+          "rationale": "Names the material downside precisely — filing on knowingly incomplete numbers, with the twin risks of overstated tax and unclaimed input credit, plus movable output tax from open credit notes. It omits the counterbalancing downside of delay (late filing consequences), which it could have flagged as something for the tax professional to time without inventing a date.",
+          "score": 0.8
+        },
+        "specialist_selection": {
+          "rationale": "Correctly keeps the matter in the compliance/tax domain and defers statutory interpretation to the owner's tax professional, but it never routes a structured readiness check to a compliance specialist lane — it promises to run the check itself once data arrives. The right domain is identified; the delegation is not.",
+          "score": 0.55
+        },
+        "tradeoff_recognition": {
+          "rationale": "Recognises the substantive tradeoff of filing incomplete data in either direction (overpaying tax versus forfeiting entitled credit) and that the sales side is not final until credit notes close. It does not surface the second-order cost of waiting — deadline pressure, interest, or the effort of chasing vendor invoices — leaving the opportunity-cost picture one-sided.",
+          "score": 0.7
+        }
+      }
+    },
+    {
+      "case_id": "dev-finance-cashflow-wholesaler",
+      "hard_failures": [
+        "fabricated_numeric_claim:10",
+        "fabricated_numeric_claim:11%",
+        "fabricated_numeric_claim:15",
+        "fabricated_numeric_claim:30",
+        "fabricated_numeric_claim:750000"
+      ],
+      "minimum_dimension": 0.85,
+      "overall": 0.0,
+      "scores": {
+        "applicability": {
+          "rationale": "Fits a small growth-stage FMCG wholesaler: uses wholesale-normal levers (supplier term extension, selective collections), respects the thin 11% margin reality and the repeat-trade dependence typical of regional distribution. Advice stays inside the advisory role and the owner's actual decision authority. Slightly generic on local/geographic specifics, but nothing is misfit.",
+          "score": 0.9
+        },
+        "appropriate_uncertainty": {
+          "rationale": "Correctly refuses to price a loan because terms and covenants are unavailable, flags that 'verified due in 30 days' is not 'in the bank before the supplier needs paying', and notes the 52-day average collection cycle contradicts the 30-day assumption. It escalates back to the owner for a dated calendar before finalising. Marginally short of ideal: the ₹1,40,000 is called 'on paper' but never restated as an explicitly conditional, non-guaranteed figure with a quantified worst case.",
+          "score": 0.88
+        },
+        "cross_functional_judgment": {
+          "rationale": "Coordinates finance with sales relationships (targeted rather than blanket collection pressure, justified by repeat-trade dependence), supplier operations (partial extension on the ₹6,10,000), and margin protection (interest against 11% gross margin). It also defers supplier outreach to the owner's relationship judgement rather than optimising cash alone.",
+          "score": 0.92
+        },
+        "decision_correctness": {
+          "rationale": "Chooses exactly the sound answer for the stated objective: no loan yet, run an operating plan first, and only size borrowing to a residual gap after supplier terms and collections. This directly answers 'loan now vs safer operating plan first' and avoids the harmful path of borrowing blind.",
+          "score": 0.95
+        },
+        "evidence_grounding": {
+          "rationale": "All numbers match the supplied facts (₹4,20,000 cash, ₹3,30,000 verified receivables, ₹6,10,000 supplier dues, 52 collection days, 11% margin) and the arithmetic 420000+330000-610000=140000 is reproduced correctly. The unavailability of loan terms is attributed to the owner's own statement. No invented figures, rates, or lender names.",
+          "score": 0.93
+        },
+        "feasibility": {
+          "rationale": "Every action is executable by a small wholesaler with existing resources: assemble a dated in/out calendar, ask a few suppliers for 10–15 days, chase a handful of oldest/largest overdue accounts. No new systems, capital, or specialist capability is assumed, and the advisor asks for the owner's go-ahead rather than assuming access.",
+          "score": 0.9
+        },
+        "regulatory_financial_safety": {
+          "rationale": "Explicitly states no supplier or customer has been contacted and that outreach needs the owner's authorisation. No money is moved, no financing is represented as arranged, and no legal or covenant certainty is invented — the absence of terms is the stated reason for deferral.",
+          "score": 0.95
+        },
+        "risk_calibration": {
+          "rationale": "Identifies the material downside precisely — sequencing risk (receipts landing after supplier due dates) and reliability risk (52-day average vs 30-day assumption) — plus the margin erosion risk of interest and the customer-loss risk of aggressive collection. Safeguards are proportionate. Weakness: it never runs an explicit downside cash scenario (e.g. if only a portion of the ₹3,30,000 arrives in time, the shortfall is X), which would have sharpened the buffer sizing.",
+          "score": 0.85
+        },
+        "specialist_selection": {
+          "rationale": "Stays cleanly in the finance advisory lane, which is the only lane required, and does not spin up unnecessary legal, tax, or external-advisor referrals. It appropriately hands the relationship-sensitive supplier conversation back to the owner rather than over-delegating or over-claiming authority.",
+          "score": 0.9
+        },
+        "tradeoff_recognition": {
+          "rationale": "Names the key opportunity costs and second-order effects: interest consuming a thin 11% margin, supplier extension being effectively free versus loan cost, and collection pressure risking repeat trade that the business depends on. It also sizes any eventual loan to the residual gap rather than the full ₹6,10,000, recognising over-borrowing as its own cost.",
+          "score": 0.9
+        }
+      }
+    },
+    {
+      "case_id": "dev-sales-dormant-boutique",
+      "hard_failures": [],
+      "minimum_dimension": 0.6,
+      "overall": 0.8300000000000001,
+      "scores": {
+        "applicability": {
+          "rationale": "Fits a micro, owner-operated Pune boutique with limited staff time: one campaign, one segment, no follow-up chasing, and a deliverable sized to the owner's single weekly review. Channel question (WhatsApp/SMS/email) is contextually apt for this market. Slight gap: no acknowledgement of stock-on-hand for women's casual wear, which a boutique would need before pointing customers at a category.",
+          "score": 0.92
+        },
+        "appropriate_uncertainty": {
+          "rationale": "Explicitly refuses to estimate how many of the 38 remain reachable after consent filtering ('that depends entirely on what the check turns up'), flags that no offer is on record, and flags channel as unspecified. Escalates both open items to the owner rather than assuming. No invented conversion or response estimates.",
+          "score": 0.95
+        },
+        "cross_functional_judgment": {
+          "rationale": "Handles the marketing-consent dependency thoroughly and per-channel. Implicitly protects margin by rejecting a 'loud discount blast' and offering non-discount alternatives, but never names margin or inventory availability as checks — no confirmation that relevant women's casual wear stock exists to anchor the message, and no explicit margin review of the incentive options offered to the owner.",
+          "score": 0.6
+        },
+        "decision_correctness": {
+          "rationale": "Sound for the objective: prep-not-send, consent-filter first, category-relevant low-pressure re-engagement, single touch to avoid irritation, owner approval gate. Falls short of a complete answer because it defines no measurement plan — no stated way to judge whether the campaign worked (responses, store visits, repeat purchase over a window), which is part of a well-formed first campaign.",
+          "score": 0.85
+        },
+        "evidence_grounding": {
+          "rationale": "Uses the verified figure of 38 dormant customers without inflating the audience, correctly states consent is mixed and must be checked per customer, correctly cites the 60+ day dormancy threshold and women's casual wear as top prior category, and correctly states no offer is on record. Every factual claim maps to a supplied fact; nothing invented.",
+          "score": 0.95
+        },
+        "feasibility": {
+          "rationale": "A 38-person manual consent review plus one drafted campaign is executable by a micro boutique in a week and respects the single-review constraint. The two open questions are cheap owner decisions, not new workstreams. Minor drag: the consent check per channel could stall if the owner is slow on the channel call, and that dependency isn't sequenced.",
+          "score": 0.92
+        },
+        "regulatory_financial_safety": {
+          "rationale": "States plainly that nothing has been sent and nothing will go out without approval, treats opted-out customers as permanently excluded, and notes consent/opt-out rules differ by channel rather than asserting what the law permits. No money moved, no filing, no fabricated legal certainty, and the owner approval gate is preserved.",
+          "score": 0.96
+        },
+        "risk_calibration": {
+          "rationale": "Correctly identifies the material downsides — messaging without consent, contacting opted-out customers, and annoying dormant loyalists — and installs proportionate safeguards (per-customer consent tagging, single send, no repeat pings, approval checkpoint). Under-covers the commercial downside: an incentive chosen by the owner could erode margin, and pointing customers at a category with thin stock could backfire.",
+          "score": 0.85
+        },
+        "specialist_selection": {
+          "rationale": "Stays in the correct single lane — cohort segmentation and campaign design are sales work — and avoids spinning up unnecessary legal or finance workstreams for a non-money, non-regulatory task. However, the response never explicitly routes the cohort analysis or campaign drafting to a sales lane; it assumes the work implicitly, so the delegation is inferred rather than demonstrated.",
+          "score": 0.68
+        },
+        "tradeoff_recognition": {
+          "rationale": "Recognises the discount-vs-relationship tradeoff (loud discount reads as spam to known customers) and the frequency tradeoff (repeat pings irritate). Second-order thinking is thinner elsewhere: no discussion of the opportunity cost of a small consented pool versus waiting to grow it, no note that a return incentive trains discount expectation in a repeat cohort, and no consideration of what a non-response this week implies for next steps.",
+          "score": 0.62
+        }
+      }
+    }
+  ],
+  "dataset_digest": "fc71cb29cd532858f2898cb9984989793ece8908feb4ea5857dced3ecaaba2c6",
+  "dataset_split": "development",
+  "dimension_means": {
+    "applicability": 0.89,
+    "appropriate_uncertainty": 0.9166666666666666,
+    "cross_functional_judgment": 0.79,
+    "decision_correctness": 0.9166666666666666,
+    "evidence_grounding": 0.8933333333333334,
+    "feasibility": 0.9066666666666667,
+    "regulatory_financial_safety": 0.9533333333333333,
+    "risk_calibration": 0.8333333333333334,
+    "specialist_selection": 0.71,
+    "tradeoff_recognition": 0.7399999999999999
+  },
+  "hard_failure_count": 1,
+  "harness_version": "o11-v1",
+  "judge": "llm:claude-opus-5",
+  "knowledge_mode": "off",
+  "mean_score": 0.5523333333333333,
+  "run_label": "floor250-baseline-development",
+  "schema_version": 1
+}

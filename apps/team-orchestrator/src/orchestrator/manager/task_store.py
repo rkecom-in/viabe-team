@@ -75,6 +75,33 @@ def _uuid(row: Any) -> UUID:
 
 
 # ── Tasks ────────────────────────────────────────────────────────────────────
+def latest_objective_text(tenant_id: UUID | str) -> str | None:
+    """VT-734 — the most recent objective text for a tenant, i.e. what the owner ASKED for.
+
+    Used by the approval path to recognise a re-sent request: the objective is stored verbatim from
+    the owner's own message, so comparing an inbound against it is comparing the reply to the ask.
+    Read-only, tenant-scoped (RLS), and best-effort — returns None rather than raising, because this
+    is an advisory input to a gate whose load-bearing half is the ordering invariant.
+    """
+    try:
+        with tenant_connection(tenant_id) as conn:
+            row = conn.execute(
+                "SELECT objective FROM manager_tasks WHERE tenant_id = %s "
+                "ORDER BY created_at DESC LIMIT 1",
+                (str(tenant_id),),
+            ).fetchone()
+    except Exception:  # noqa: BLE001 — advisory read; never a gate on the owner's decision
+        logger.warning("latest_objective_text read failed tenant=%s", tenant_id, exc_info=True)
+        return None
+    if row is None:
+        return None
+    doc = row["objective"] if isinstance(row, dict) else row[0]
+    if isinstance(doc, dict):
+        text = doc.get("objective")
+        return str(text) if text else None
+    return str(doc) if doc else None
+
+
 def create_task(
     tenant_id: UUID | str,
     objective: dict[str, Any],
@@ -181,6 +208,42 @@ def set_task_status(
             )
             return False
     return True
+
+
+def settle_unretryable_block(tenant_id: UUID | str, task_id: UUID | str) -> bool:
+    """VT-736 — settle a permanently-blocked task into ``dead_letter`` so it stops holding the
+    tenant's one active slot. Returns True if this call settled it.
+
+    THE WEDGE THIS CLOSES (found 2026-08-07; 5 live dev tenants, oldest a month):
+    every ``_block_*`` path sets ``status='blocked'`` + ``terminal_outcome='escalated'`` and arms NO
+    ``next_retry_at``. ``blocked`` is in ``TASK_ACTIVE``, so the row keeps the slot; the workflow
+    tail only calls ``_promote_next_queued`` for ``TASK_TERMINAL`` and ``blocked`` is not terminal,
+    so nothing behind it ever runs; and the reaper's ladder only wakes ``blocked`` rows that HAVE an
+    elapsed ``next_retry_at`` — one without is, in its own words, "left for a human". Net effect: the
+    tenant can still chat, but no task of any kind executes for them again, and the admission gate
+    tells them work is "already in progress". Silent, permanent, and it looks like the product working.
+
+    WHY ``dead_letter`` IS THE RIGHT TERMINAL: it is documented at the top of this module as
+    "terminal (retry budget spent) — but an OPERATOR-REDRIVABLE one (``redrive_task`` resets it to
+    'planned'); the reaper never auto-retries a dead_letter row". That is exactly what an escalated
+    block IS. Settling there releases the slot, lets the queue promote, and keeps ops visibility and
+    redrive — where inventing a new status, or flipping ``blocked`` out of ``TASK_ACTIVE``, would
+    have changed the meaning of the partial unique index that enforces one-active-task.
+
+    ``next_retry_at IS NULL`` is inside the UPDATE, not a read-then-write: the reaper may arm a retry
+    concurrently, and a task with a pending retry is NOT permanently blocked and must not be settled.
+    ``terminal_outcome`` is deliberately left alone so ops still sees WHY it stopped ('escalated'),
+    matching the reaper's own orphan path, which also lands dead_letter + escalated.
+    """
+    with tenant_connection(tenant_id) as conn:
+        cur = conn.execute(
+            "UPDATE manager_tasks SET status = 'dead_letter', version = version + 1, "
+            "       updated_at = now(), completed_at = now() "
+            " WHERE tenant_id = %s AND id = %s "
+            "   AND status = 'blocked' AND next_retry_at IS NULL",
+            (str(tenant_id), str(task_id)),
+        )
+        return cur.rowcount == 1
 
 
 def redrive_task(tenant_id: UUID | str, task_id: UUID | str, *, conn: Any) -> bool:
@@ -531,6 +594,7 @@ __all__ = [
     "TERMINAL_OUTCOMES", "OWNER_NOTIFICATION_STATUSES",
     "STEP_KINDS", "STEP_STATUSES", "STEP_TERMINAL", "STEP_NON_TERMINAL", "EVIDENCE_KINDS",
     "create_task", "set_task_status", "set_owner_notification_status", "get_task",
+    "settle_unretryable_block",
     "park_awaiting_approval", "find_task_for_resolved_approval",
     "find_open_approval_run_for_task",
     "get_most_recent_task", "find_task_id",

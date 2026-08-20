@@ -94,6 +94,8 @@ from uuid import UUID
 
 from langchain_core.callbacks import BaseCallbackHandler
 
+from orchestrator.llm import fast_budget as _fast_budget
+from orchestrator.llm import service_tier_policy as _service_tier_policy
 from orchestrator.llm_config import sampling_kwargs
 
 if TYPE_CHECKING:
@@ -156,6 +158,42 @@ _TIER_DEFAULTS: dict[str, tuple[str, str]] = {
 }
 
 _DEFAULT_MAX_TOKENS = 4096
+# VT-732 — the REASONING-MODEL OUTPUT FLOOR.
+#
+# On the Responses API the cap covers REASONING tokens as well as visible output, so a small cap can
+# be spent entirely on reasoning and the call returns with NO text at all (status=incomplete,
+# incomplete_details.reason=max_output_tokens). Anthropic's ``max_tokens`` does not behave this way,
+# so every hand-tuned cap in this codebase was sized for Anthropic: the classifiers ask for 60, the
+# taxonomy reconcile 16, the field-mapping label 10. Pointed at gpt-5.6 those return empty, each site
+# fails soft to its fallback, and the system looks fine while quietly running without its classifiers
+# — the exact "green on a fallback is not green" class. Observed on dev as
+# ``empty response from triage (complex) call`` (triage asks for 200), which dropped the turn to
+# legacy dispatch and cost the run its SR delegation.
+#
+# The floor is a CAP, not a spend: raising it bills nothing extra unless the model actually emits
+# more, whereas truncation bills the reasoning AND throws the answer away. Applied only to the
+# Responses-API providers (openai / xai); anthropic, google and GLM keep the caller's number.
+# VT-762 raised this 1024 -> 2048: with the floor at 1024, claude-sonnet-5 still cut a dual-intent
+# triage JSON mid-field 1 time in 24 (thinking spent ~950 of it). A cap, not a spend — the model
+# emits what it emits; a floor that is too low bills the thinking and discards the answer.
+_REASONING_MIN_MAX_TOKENS = 2048
+# VT-762 — the SAME trap on Anthropic, found the same way. "Anthropic's max_tokens does not behave
+# this way" above was true of the models the caps were tuned on. The Claude 5 family THINKS BY
+# DEFAULT (adaptive thinking, no ``thinking`` param needed), and its thinking blocks count against
+# ``max_tokens``. Observed on dev 2026-08-17: triage on claude-sonnet-5 at max_tokens=200 returned
+# ``blocks=['thinking']``, ``stop_reason='max_tokens'``, no text — 2 of 8 win-back asks fell soft to
+# legacy dispatch and the SR lane lost 6 scenarios to flips in the M2 pack. Anthropic bills the
+# thinking and throws the answer away, exactly like the Responses providers. Only the family that
+# thinks unprompted gets the floor; the non-thinking models keep the caller's hand-tuned cap
+# (some sites use it as a length limiter — see test_anthropic_and_google_and_glm_keep_the_callers_cap).
+_ANTHROPIC_THINKS_BY_DEFAULT_MARKERS = ("claude-sonnet-5", "claude-opus-5", "claude-fable-5")
+
+
+def _thinks_by_default(provider: str, model_id: str) -> bool:
+    """True for a model that emits thinking blocks WITHOUT being asked, so a small ``max_tokens``
+    can be spent entirely on thinking. Anthropic Claude 5 family; the Responses-API providers are
+    handled by the provider check in ``_effective_max_tokens`` already."""
+    return provider == "anthropic" and any(m in model_id for m in _ANTHROPIC_THINKS_BY_DEFAULT_MARKERS)
 # GLM (Z.ai) OpenAI-compatible endpoint. GLM_BASE_URL is the SINGLE self-host switch (see
 # _build_glm_chat_model); this is only the managed-z.ai fallback when that env var is unset.
 _GLM_DEFAULT_BASE_URL = "https://api.z.ai/api/paas/v4/"
@@ -255,6 +293,36 @@ def require_anthropic_model(model_id: str, *, site: str) -> str:
     return model_id
 
 
+# Per-provider credential env var — the key a call on that provider actually needs. Names are the
+# canonical ones the builders already pass explicitly (no env-suffix per env, standing rule).
+_PROVIDER_KEY_VARS: dict[str, str] = {
+    "anthropic": "ANTHROPIC_API_KEY",
+    "openai": "OPENAI_API_KEY",
+    "google": "GEMINI_API_KEY",
+    "zai": "GLM_API_KEY",
+    "xai": "XAI_API_KEY",
+}
+# A unit/CI run sets a placeholder rather than leaving the var unset; treat those as "no key" so a
+# test run never makes a live call. Same prefixes the hand-rolled guards used before VT-732.
+_SENTINEL_KEY_PREFIXES = ("test", "sentinel", "dummy", "sk-ant-test", "sk-test")
+
+
+def api_key_present(tier: str) -> bool:
+    """True iff a usable (non-sentinel) credential is set for the provider ``tier`` RESOLVES TO.
+
+    VT-732: the fail-soft call sites used to ask ``ANTHROPIC_API_KEY?`` before invoking. Once a tier
+    can resolve to any of five providers that question is the wrong one — on a gpt-tiered box it
+    answers "no key" and silently disables an LLM path that would have worked (and on an Anthropic
+    box with a stale key it answers "yes" for a provider the call never touches). Ask about the
+    provider the call will ACTUALLY use.
+    """
+    var = _PROVIDER_KEY_VARS.get(provider_for(resolve_model_id(tier)))
+    if not var:
+        return False
+    key = (os.environ.get(var) or "").strip()
+    return bool(key) and not key.lower().startswith(_SENTINEL_KEY_PREFIXES)
+
+
 def _configured_service_tier() -> str:
     """The Viabe-facing OpenAI service tier from ``TEAM_OPENAI_SERVICE_TIER`` (standard|flex|auto,
     default standard). 'standard' means "no special tier" — the OpenAI request omits service_tier."""
@@ -274,6 +342,88 @@ def _api_service_tier(configured: str) -> str | None:
     return None if configured == "standard" else configured
 
 
+def assert_tier_vars_configured() -> dict[str, str]:
+    """VT-731 boot conformance — every LLM tier var must be SET on a deployed env, and the
+    resolved model id per tier is logged by NAME.
+
+    Fail-loud, not fallback. ``_TIER_DEFAULTS`` exists for local runs and dev tooling; on a
+    deployed box a MISSING var silently selects a different VENDOR, which is a config error
+    wearing the costume of a default. That is exactly what it looked like on 2026-08-05 when
+    Fazal saw Sonnet burn on the dev orchestrator key while every tier was believed to be Luna.
+    (The vars turned out to be set — the burn came from direct SDK call sites bypassing this seam
+    entirely — but the hole is real and cost a day of hunting either way.)
+
+    Model ids are NOT secrets: Rule 18 governs VALUES of credentials, and a model id is a
+    configuration name. Logging it by name is what makes the next hunt one grep long.
+
+    Returns ``{tier: model_id}``. Raises ``UnknownModelError`` on a deployed env when a var is
+    unset or names an unsupported model. A local run (no ``EXPECTED_ENV``) only logs.
+    """
+    deployed = bool((os.environ.get("EXPECTED_ENV") or "").strip())
+    resolved: dict[str, str] = {}
+    missing: list[str] = []
+    for tier, (env_var, default) in _TIER_DEFAULTS.items():
+        raw = (os.environ.get(env_var) or "").strip()
+        if not raw and deployed:
+            missing.append(env_var)
+            continue
+        model_id = raw or default
+        _assert_supported(model_id)
+        resolved[tier] = model_id
+    if missing:
+        raise UnknownModelError(
+            "LLM tier vars unset on a deployed environment (EXPECTED_ENV="
+            f"{os.environ.get('EXPECTED_ENV')!r}): {', '.join(sorted(missing))}. "
+            "A deployed box must never fall back to a built-in default — that silently changes "
+            "vendor. Set the variable(s) and redeploy."
+        )
+    summary = ", ".join(f"{tier}={model_id}" for tier, model_id in sorted(resolved.items()))
+    logger.info("llm tier conformance: %s", summary)
+    # ...and print it. VT-732: the logger line above is INVISIBLE on the deployed box — the app's
+    # loggers are not configured in the Railway process (only DBOS's own logger and uvicorn's emit),
+    # so VT-731 shipped a boot line nobody could read, and "the boot log shows every tier" was an
+    # unverifiable exit gate. stdout is the channel that demonstrably reaches the deploy log — the
+    # sibling env-guard sentinel line arrives the same way. Model ids are configuration names, not
+    # secrets (Rule 18 governs credential VALUES), and this is what makes the next burn-hunt one
+    # `railway logs | grep` long instead of a day.
+    print(f"llm tier conformance: {summary}", flush=True)
+    # VT-735: the service-tier POSTURE belongs on the same boot line for the same reason the model
+    # ids do — the burn-hunt that started all of this began with nobody being able to see, from the
+    # deploy log, what the box was actually configured to do. An override being set is the
+    # interesting case (it disables the per-call-class policy), so name it explicitly rather than
+    # letting a force-test posture look like the ratified default.
+    override = _configured_service_tier()
+    print(
+        "llm service-tier policy: "
+        f"TEAM_GPT_FLEX={_service_tier_policy.flex_mode()}, "
+        f"override={'none' if override == 'standard' else override}",
+        flush=True,
+    )
+    return resolved
+
+
+def _effective_max_tokens(
+    provider: str, max_tokens: int, *, call_site: str, model_id: str = ""
+) -> int:
+    """Raise a too-small cap to the reasoning floor where the cap covers reasoning/thinking tokens:
+    the Responses-API providers, and (VT-762) the Anthropic models that think by default.
+
+    See ``_REASONING_MIN_MAX_TOKENS``. Logged when it fires so the adjustment is visible rather than
+    magic — a site whose cap is routinely floored is a site whose cap was written for a different
+    provider, which is worth knowing.
+    """
+    if max_tokens >= _REASONING_MIN_MAX_TOKENS:
+        return max_tokens
+    if provider not in ("openai", "xai") and not _thinks_by_default(provider, model_id):
+        return max_tokens
+    logger.info(
+        "raising max_tokens %d -> %d for call_site=%s on provider=%s model=%s: the cap covers "
+        "REASONING/THINKING tokens there, and a cap this small returns no visible text at all",
+        max_tokens, _REASONING_MIN_MAX_TOKENS, call_site, provider, model_id,
+    )
+    return _REASONING_MIN_MAX_TOKENS
+
+
 def resolve_chat_model(
     tier: str,
     *,
@@ -283,6 +433,8 @@ def resolve_chat_model(
     enable_web_search: bool = False,
     enable_x_search: bool = False,
     call_site: str | None = None,
+    timeout_s: float | None = None,
+    betas: list[str] | None = None,
 ) -> BaseChatModel:
     """Build the langchain chat model for ``tier`` (ChatAnthropic / ChatOpenAI-on-Responses-API /
     Gemini / GLM / Grok).
@@ -291,6 +443,19 @@ def resolve_chat_model(
     and the usage-recording ledger callback (Migration-173 ``LlmUsageCallback`` → ``record_llm_call``,
     lazy + fail-soft). ``agent`` / ``tenant_id`` are the metering attribution for this model's calls
     (``call_site`` == ``tier``).
+
+    ``timeout_s`` (VT-732) bounds ONE request at the client — the hot-path sites that used to call the
+    Anthropic SDK directly all passed ``timeout=`` and a hang on the owner-inbound path is a stalled
+    WhatsApp turn, so the seam must carry it rather than make porting a downgrade. Mapped per provider:
+    ``default_request_timeout`` (anthropic), ``request_timeout`` (openai / xai / GLM), ``timeout``
+    (google). ``None`` leaves each client's own default in place.
+
+    ``betas`` (VT-732) are Anthropic beta headers (e.g. the ``web_fetch`` server tool) — passed ONLY on
+    the anthropic path and ONLY when non-empty (VT-662: an empty list emits a blank ``anthropic-beta``
+    header and the API 400s it, which silently killed the turn-brain on every no-web-fetch turn). On any
+    other provider a requested beta is logged + dropped: a beta is Anthropic-native by definition, and
+    the alternative — refusing to build the model — would make a documented-exception call site fail
+    closed on a perfectly serviceable provider.
 
     ``enable_web_search`` / ``enable_x_search`` opt this model into the provider's NATIVE server-side
     search tool (Migration-176). BOTH are gated by the master ``TEAM_ENABLE_WEB_SEARCH`` flag (default
@@ -307,11 +472,35 @@ def resolve_chat_model(
     # openai. anthropic + google + zai(GLM) + xai(Grok) are forced to 'standard' here — Gemini's
     # flex/batch are NOT wired in v1, GLM/Grok publish no batch/flex tier, and the env var's name is
     # OpenAI-scoped so it must not affect google/GLM/Grok calls.
-    configured_tier = _configured_service_tier() if provider == "openai" else "standard"
-    # Ledger-facing billing tier: only flex/batch carry the discount. 'auto' lets OpenAI pick the
-    # tier server-side, so we can't know the billed rate at write time — record 'standard' (full
-    # price) conservatively rather than under-costing.
-    billing_tier = configured_tier if configured_tier in ("flex", "batch") else "standard"
+    # VT-735: the tier is decided by CALL CLASS, not one global switch. `TEAM_OPENAI_SERVICE_TIER`
+    # remains an explicit OVERRIDE for force-testing a single tier; when it is unset (or 'standard')
+    # the ratified policy in `.viabe/model-tier-policy.md` decides per call site. Still OpenAI-scoped:
+    # google/GLM/Grok publish no flex/batch and Gemini's tiers are not wired in v1.
+    if provider == "openai":
+        override = _configured_service_tier()
+        configured_tier = (
+            override
+            if override != "standard"
+            else _service_tier_policy.resolve_service_tier(
+                call_site,
+                tenant_id=tenant_id,
+                # VT-735: supply the budget store. Until now the hook existed and nothing passed
+                # it, so `_fast_allowed` short-circuited to True and Fast was unbounded — the
+                # policy's per-tenant daily cap was declared but not enforced. The check is cached
+                # and fails OPEN; see fast_budget.py for why that is the right side to fail on
+                # for a tier whose whole purpose is latency on the approval path.
+                fast_budget_check=_fast_budget.fast_budget_check,
+            )
+        )
+    else:
+        configured_tier = "standard"
+    # Ledger-facing billing tier: flex/batch carry the ½× discount, fast the 2× premium. 'auto' lets
+    # OpenAI pick the tier server-side, so we can't know the billed rate at write time — record
+    # 'standard' (full price) conservatively rather than under-costing.
+    billing_tier = (
+        "batch" if configured_tier == "batch"
+        else _service_tier_policy.billing_tier_for(configured_tier)
+    )
     callbacks = _seam_callbacks(
         tier=tier,
         agent=agent,
@@ -320,26 +509,50 @@ def resolve_chat_model(
         call_site=call_site or tier,
     )
 
+    if betas and provider != "anthropic":
+        logger.info(
+            "betas %s requested for provider %r — Anthropic-only; building without them", betas, provider
+        )
+
+    max_tokens = _effective_max_tokens(
+        provider, max_tokens, call_site=call_site or tier, model_id=model_id
+    )
+
     if provider == "anthropic":
         from langchain_anthropic import ChatAnthropic
 
         # mypy --strict needs the call-arg ignore for ChatAnthropic's pydantic kwargs (parity with
         # the pre-seam ctors in dispatch / the lanes). sampling_kwargs pins temp=0 only on haiku.
+        anthropic_kwargs: dict[str, Any] = {}
+        if betas:  # VT-662 — never an empty list (blank anthropic-beta header -> 400).
+            anthropic_kwargs["betas"] = list(betas)
         model: BaseChatModel = ChatAnthropic(  # type: ignore[call-arg]
             model=model_id,
             max_tokens=max_tokens,
             callbacks=callbacks,
+            default_request_timeout=timeout_s,
+            **anthropic_kwargs,
             **sampling_kwargs(model_id),
         )
     elif provider == "google":
-        model = _build_google_chat_model(model_id, max_tokens=max_tokens, callbacks=callbacks)
+        model = _build_google_chat_model(
+            model_id, max_tokens=max_tokens, callbacks=callbacks, timeout_s=timeout_s
+        )
     elif provider == "zai":
-        model = _build_glm_chat_model(model_id, max_tokens=max_tokens, callbacks=callbacks)
+        model = _build_glm_chat_model(
+            model_id, max_tokens=max_tokens, callbacks=callbacks, timeout_s=timeout_s
+        )
     elif provider == "xai":
-        model = _build_grok_chat_model(model_id, max_tokens=max_tokens, callbacks=callbacks)
+        model = _build_grok_chat_model(
+            model_id, max_tokens=max_tokens, callbacks=callbacks, timeout_s=timeout_s
+        )
     else:
         model = _build_openai_chat_model(
-            model_id, max_tokens=max_tokens, configured_tier=configured_tier, callbacks=callbacks,
+            model_id,
+            max_tokens=max_tokens,
+            configured_tier=configured_tier,
+            callbacks=callbacks,
+            timeout_s=timeout_s,
         )
 
     # Master kill switch gates the WHOLE capability (Fazal): both forced off when TEAM_ENABLE_WEB_SEARCH
@@ -357,6 +570,7 @@ def _build_grok_chat_model(
     *,
     max_tokens: int,
     callbacks: list[BaseCallbackHandler],
+    timeout_s: float | None = None,
 ) -> BaseChatModel:
     from langchain_openai import ChatOpenAI
 
@@ -376,6 +590,7 @@ def _build_grok_chat_model(
         api_key=api_key,
         max_tokens=max_tokens,
         max_retries=_OPENAI_MAX_RETRIES,
+        request_timeout=timeout_s,
         callbacks=callbacks,
         **sampling_kwargs(model_id),
     )
@@ -386,6 +601,7 @@ def _build_glm_chat_model(
     *,
     max_tokens: int,
     callbacks: list[BaseCallbackHandler],
+    timeout_s: float | None = None,
 ) -> BaseChatModel:
     from langchain_openai import ChatOpenAI
 
@@ -408,6 +624,7 @@ def _build_glm_chat_model(
         api_key=api_key,
         max_tokens=max_tokens,
         max_retries=_OPENAI_MAX_RETRIES,
+        request_timeout=timeout_s,
         callbacks=callbacks,
         **sampling_kwargs(model_id),
     )
@@ -418,6 +635,7 @@ def _build_google_chat_model(
     *,
     max_tokens: int,
     callbacks: list[BaseCallbackHandler],
+    timeout_s: float | None = None,
 ) -> BaseChatModel:
     from langchain_google_genai import ChatGoogleGenerativeAI
 
@@ -436,6 +654,7 @@ def _build_google_chat_model(
         model=model_id,
         google_api_key=os.environ.get("GEMINI_API_KEY") or None,
         max_output_tokens=max_tokens,
+        timeout=timeout_s,
         callbacks=callbacks,
         **sampling_kwargs(model_id),
     )
@@ -447,13 +666,18 @@ def _build_openai_chat_model(
     max_tokens: int,
     configured_tier: str,
     callbacks: list[BaseCallbackHandler],
+    timeout_s: float | None = None,
 ) -> BaseChatModel:
     from langchain_openai import ChatOpenAI
 
     api_tier = _api_service_tier(configured_tier)
     # Widen the request timeout to the 15-min flex ceiling only for flex; else leave the client
     # default (None). max_retries mirrors the SDK's 408-class auto-retry (twice).
-    request_timeout = _FLEX_TIMEOUT_S if configured_tier == "flex" else None
+    # An EXPLICIT caller timeout wins over the flex ceiling (VT-732): a hot-path site asking for 10s
+    # means 10s — its fallback is a live owner turn, and a 15-min flex wait is not a fallback.
+    request_timeout = timeout_s if timeout_s is not None else (
+        _FLEX_TIMEOUT_S if configured_tier == "flex" else None
+    )
     return ChatOpenAI(  # type: ignore[call-arg]
         model=model_id,
         # GPT-5.6 needs the Responses API for reasoning / tool-calling / multi-turn.
@@ -480,6 +704,16 @@ def _web_search_master_on() -> bool:
     """The single master kill switch (Fazal): ``TEAM_ENABLE_WEB_SEARCH`` (default OFF, read fresh).
     While off, BOTH web + X search are forced off regardless of the resolve_chat_model kwargs."""
     return (os.environ.get("TEAM_ENABLE_WEB_SEARCH") or "").strip().lower() in {"1", "true", "yes"}
+
+
+def web_search_enabled() -> bool:
+    """Public read of the master search switch, for the call sites where server-side search is
+    LOAD-BEARING rather than advisory (entity discovery / identity adjudication / thin-signal type
+    reconcile). Those sites called the Anthropic SDK with a web_search tool unconditionally before
+    VT-732; routed through the seam they inherit Fazal's kill switch, and a silently search-less
+    adjudication is a quality regression that looks like a model regression. They log when it is off
+    — the switch stays authoritative, the consequence stops being invisible."""
+    return _web_search_master_on()
 
 
 def _search_tools(provider: str, *, web: bool, x: bool) -> list[dict[str, Any]]:

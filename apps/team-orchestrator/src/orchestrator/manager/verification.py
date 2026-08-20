@@ -43,7 +43,6 @@ from pathlib import Path
 from typing import Any, Literal
 from uuid import UUID
 
-from anthropic import Anthropic
 from pydantic import BaseModel, ConfigDict
 
 from orchestrator.llm.structured import structured_text_call
@@ -63,9 +62,12 @@ logger = logging.getLogger("orchestrator.manager.verification")
 # dep-less smoke coverage) — keep this in sync BY VALUE if workflow.LIMIT_MAX_CYCLES ever changes.
 _MAX_ATTEMPT_CANDIDATES = 6
 
-# A5: the completion-verification checkpoint is one of the loop's ONLY two opus calls (the other is
-# plan-validation at objective creation, wired at create_plan's call site).
-_VERIFICATION_MODEL = "claude-opus-4-8"
+# A5: the completion-verification checkpoint is one of the loop's ONLY two calls on the top REVIEW
+# tier (the other is plan-validation at objective creation, wired at create_plan's call site).
+# VT-732 — a TIER (TEAM_MODEL_REVIEW), not a model id: this used to build its own Anthropic client,
+# which both pinned the vendor and bypassed the VT-619 cost ledger. Same tier as the impact judge
+# below, which was already ported.
+_VERIFICATION_TIER = "review"
 _MAX_TOKENS = 500
 
 _PROMPT_PATH = Path(__file__).parent / "prompts" / "manager_completion_verification.md"
@@ -287,10 +289,12 @@ def resolve_terminal_outcome(
 
 
 def verify_completion(
-    tenant_id: UUID | str, task_id: UUID | str, *, client: Anthropic | None = None,
+    tenant_id: UUID | str, task_id: UUID | str, *, text_call: Callable[..., str] | None = None,
 ) -> CompletionVerification:
-    """The full checkpoint: deterministic floor, then (only if it passes) ONE opus judgment call.
-    NEVER raises — a client/parse/schema failure fails CLOSED to ``not_verified`` with a reason
+    """The full checkpoint: deterministic floor, then (only if it passes) ONE review-tier judgment
+    call (VT-732: ``text_call`` replaces the old injectable Anthropic ``client``, matching the
+    impact judge below and manager.triage/review).
+    NEVER raises — a transport/parse/schema failure fails CLOSED to ``not_verified`` with a reason
     describing what went wrong, mirroring ``manager_review``'s own fail-closed extraction discipline
     (an honest 'we could not verify this', never a crash and never a fabricated 'verified').
     """
@@ -385,15 +389,16 @@ def verify_completion(
         default=str,
     )
 
-    anthropic_client = client if client is not None else Anthropic()
+    _call = text_call or structured_text_call
     try:
-        resp = anthropic_client.messages.create(
-            model=_VERIFICATION_MODEL,
-            max_tokens=_MAX_TOKENS,
+        text = _call(
+            _VERIFICATION_TIER,
             system=_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": user_content}],
+            user=user_content,
+            max_tokens=_MAX_TOKENS,
+            agent="manager_verification",
+            call_site="completion_verification",
         )
-        text = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text")
         if not text.strip():
             raise ValueError("empty response from completion-verification call")
         cleaned = _FENCE_RE.sub("", text).strip()

@@ -222,7 +222,7 @@ def _stub_infra(monkeypatch):
     """Stub every real-I/O seam run_scenario_x3/main touch: _dsn/_ingress_base/_dev_secret/_connect
     (trivial), build_parser/cmd_setup/cmd_teardown (tenant provisioning), run_scenario_steps (the
     actual turn-driving loop). Returns a dict of call-tracking lists."""
-    calls: dict[str, list] = {"setup": [], "teardown": [], "steps": []}
+    calls: dict[str, list] = {"setup": [], "teardown": [], "steps": [], "forensics": []}
 
     monkeypatch.setattr(ch, "_dsn", lambda: "dsn")
     monkeypatch.setattr(ch, "_ingress_base", lambda url: "http://orch")
@@ -240,6 +240,12 @@ def _stub_infra(monkeypatch):
 
     monkeypatch.setattr(ch, "cmd_setup", _fake_cmd_setup)
     monkeypatch.setattr(ch, "cmd_teardown", _fake_cmd_teardown)
+    # VT-738 — the keep-tenants path now hits the DB twice more (the synthetic-tenant guard and the
+    # forensic dump). Both are real-I/O seams, so they are stubbed here with the rest; each has its
+    # own direct test below.
+    monkeypatch.setattr(rx3, "_assert_kept_tenant_is_synthetic", lambda dsn, tid: None)
+    monkeypatch.setattr(rx3, "_dump_forensics", lambda dsn, tid, name, i: calls["forensics"].append(tid))
+    monkeypatch.setattr(rx3, "_quiesce_kept_tenant", lambda dsn, tid: None)
     return calls
 
 
@@ -266,6 +272,87 @@ def test_run_scenario_x3_keep_tenants_skips_teardown(monkeypatch, _stub_infra):
     scenario = {"name": "s1", "steps": [{"message": "hi"}]}
     rx3.run_scenario_x3(Path("s1.json"), scenario, ingress_url=None, timeout=5.0, keep_tenants=True)
     assert _stub_infra["teardown"] == []
+
+
+def test_keep_tenants_dumps_forensics_BEFORE_quiescing(monkeypatch, _stub_infra):
+    """Order is the whole point. `_quiesce_kept_tenant` flips non-terminal manager_tasks to
+    'cancelled' and excludes 'blocked' but NOT 'running' — and a step still 'running' is exactly
+    what separates the loop's default-to-escalate from a dispatch that had not finished. Quiescing
+    first destroys that distinction, silently, in the one run built to measure it."""
+    order: list[str] = []
+    monkeypatch.setattr(rx3, "_dump_forensics", lambda dsn, tid, n, i: order.append("dump"))
+    monkeypatch.setattr(rx3, "_quiesce_kept_tenant", lambda dsn, tid: order.append("quiesce"))
+    monkeypatch.setattr(ch, "run_scenario_steps", lambda *a, **k: [_sr("PASS", run_id=None)])
+    monkeypatch.setattr(rx3, "observe_route_and_grounded_count", lambda conn, tid, rid: ("none", None))
+
+    rx3.run_scenario_x3(
+        Path("s1.json"), {"name": "s1", "steps": [{"message": "hi"}]},
+        ingress_url=None, timeout=5.0, keep_tenants=True,
+    )
+
+    assert order == ["dump", "quiesce"] * 3, f"dump must precede quiesce on every run, got {order}"
+
+
+def test_keep_tenants_guard_refuses_a_non_harness_tenant(monkeypatch):
+    """`--keep-tenants` skips the teardown that stops a tenant, and dev has Twilio mock OFF — so a
+    kept tenant can reach a real phone. Only harness-minted tenants may be left alive."""
+    # psycopg is absent in the dep-less smoke suite (mirrors CI 'test'); this test
+    # drives psycopg.connect through the guard, so it skips there rather than failing.
+    pytest.importorskip("psycopg")
+    class _Conn:
+        def execute(self, *_a, **_k):
+            return self
+
+        def fetchone(self):
+            return ("Fazal's Real Business",)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_a):
+            return False
+
+    monkeypatch.setattr(rx3, "os", rx3.os)
+    import psycopg
+
+    monkeypatch.setattr(psycopg, "connect", lambda *a, **k: _Conn())
+
+    with pytest.raises(SystemExit, match="REFUSING --keep-tenants"):
+        rx3._assert_kept_tenant_is_synthetic("dsn", "11111111-2222-3333-4444-555555555555")
+
+
+def test_keep_tenants_guard_allows_a_harness_tenant(monkeypatch):
+    # psycopg is absent in the dep-less smoke suite (mirrors CI 'test'); this test
+    # drives psycopg.connect through the guard, so it skips there rather than failing.
+    pytest.importorskip("psycopg")
+    class _Conn:
+        def execute(self, *_a, **_k):
+            return self
+
+        def fetchone(self):
+            return ("convo-harness-abc123",)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_a):
+            return False
+
+    import psycopg
+
+    monkeypatch.setattr(psycopg, "connect", lambda *a, **k: _Conn())
+    rx3._assert_kept_tenant_is_synthetic("dsn", "11111111-2222-3333-4444-555555555555")
+
+
+def test_keep_tenants_guard_refuses_the_fazal_tenant(monkeypatch):
+    """The explicit protected-id check must fire before any DB read — a Fazal-owned tenant is
+    never keepable regardless of what its business_name happens to say."""
+    # psycopg is absent in the dep-less smoke suite (mirrors CI 'test'); this test
+    # drives psycopg.connect through the guard, so it skips there rather than failing.
+    pytest.importorskip("psycopg")
+    monkeypatch.setenv("FAZAL_TENANT_ID", "63211ce5-0000-0000-0000-000000000000")
+    with pytest.raises(SystemExit, match="Fazal-owned tenant"):
+        rx3._assert_kept_tenant_is_synthetic("dsn", "63211ce5-0000-0000-0000-000000000000")
 
 
 def test_run_scenario_x3_tears_down_even_when_steps_raise(monkeypatch, _stub_infra):

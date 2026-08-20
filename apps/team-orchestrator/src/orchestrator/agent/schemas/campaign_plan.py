@@ -90,11 +90,23 @@ class SelfEvaluateStatus(str, Enum):
 
 
 class EvidenceSourceKind(str, Enum):
-    """Typed source kind for an evidence ref. No free strings."""
+    """Typed source kind for an evidence ref. No free strings.
+
+    VT-763 added ``CONTEXT_BUNDLE``. The Sales-Recovery specialist runs with ``tools=[]`` — its
+    dormant cohort, ledger summary and campaign history arrive IN ITS INPUT CONTEXT (built by
+    ``context_builder`` from ``detect_lapsed_customers`` and friends). Before this value the enum
+    named three sources the specialist could not always have (a tool result, an L4 doc, an L2
+    episode) and none for the one it always has, so the model — correctly reading the enum as
+    exhaustive — sometimes refused to plan with ``insufficient_data: category="evidence"`` on a
+    tenant whose cohort was built with 3 candidates (kept tenant 470fea52, 2026-08-17). The server
+    was already healing prose citations under a mislabelled kind (``l2_episodic_memory`` /
+    ``source_id="context_bundle"``); this is that label, honest.
+    """
 
     TOOL_CALL = "tool_call"
     L4_SKILL_CORPUS = "l4_skill_corpus"
     L2_EPISODIC_MEMORY = "l2_episodic_memory"
+    CONTEXT_BUNDLE = "context_bundle"
 
 
 class ConfidenceLevel(str, Enum):

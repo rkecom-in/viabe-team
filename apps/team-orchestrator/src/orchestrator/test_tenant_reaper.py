@@ -27,6 +27,7 @@ failure must not block boot or crash the scheduler; mirrors ``orphan_reaper.reap
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 from orchestrator.orphan_reaper import _service_pool  # reuse the exact service-role pool helper
@@ -44,6 +45,10 @@ _REAP_AGE_HOURS = 1
 # ordering passes so a genuine dependency cycle can't spin forever.
 _MAX_FK_PASSES = 8
 
+# The tenant delete races the manager's own async child writes (see fk_safe_delete_tenant).
+_DELETE_ATTEMPTS = 4
+_DELETE_SETTLE_S = 2.0
+
 
 def fk_safe_delete_tenant(conn, tenant_id: str) -> list[tuple[str, str]]:
     """Delete one tenant + all its rows, FK-safely. Returns still-blocked (table,col) list
@@ -59,7 +64,10 @@ def fk_safe_delete_tenant(conn, tenant_id: str) -> list[tuple[str, str]]:
         "JOIN pg_attribute att ON att.attrelid=con.conrelid AND att.attnum=ANY(con.conkey) "
         "WHERE con.contype='f' AND con.confrelid='public.tenants'::regclass AND con.confdeltype<>'c'"
     ).fetchall()
-    remaining = [(r[0], r[1]) if not isinstance(r, dict) else (r["tbl"], r["col"]) for r in noncascade]
+    noncascade_pairs = [
+        (r[0], r[1]) if not isinstance(r, dict) else (r["tbl"], r["col"]) for r in noncascade
+    ]
+    remaining = list(noncascade_pairs)
     for _ in range(_MAX_FK_PASSES):
         still, progressed = [], False
         for tbl, col in remaining:
@@ -71,7 +79,26 @@ def fk_safe_delete_tenant(conn, tenant_id: str) -> list[tuple[str, str]]:
         remaining = still
         if not remaining or not progressed:
             break
-    conn.execute("DELETE FROM tenants WHERE id = %s", (tenant_id,))
+
+    # The tenant delete RACES the manager's own async writes. Observed on dev during the VT-720 ×3:
+    # the sweep cleared every child row, then a late tm_audit_log insert landed between the sweep
+    # and the delete, and cmd_teardown died with ForeignKeyViolation — killing runs 2 and 3 of a
+    # scenario whose run 1 had already passed. A teardown failure must never destroy a measurement
+    # run. So: settle briefly, RE-sweep, retry. Bounded, and the final attempt still surfaces the
+    # real blockers rather than swallowing them.
+    for attempt in range(_DELETE_ATTEMPTS):
+        try:
+            conn.execute("DELETE FROM tenants WHERE id = %s", (tenant_id,))
+            break
+        except Exception:  # noqa: BLE001 — a late async child write; settle and re-sweep
+            if attempt == _DELETE_ATTEMPTS - 1:
+                raise
+            time.sleep(_DELETE_SETTLE_S)
+            for tbl, col in noncascade_pairs:
+                try:
+                    conn.execute(f'DELETE FROM "{tbl}" WHERE "{col}" = %s', (tenant_id,))  # noqa: S608 catalog-derived
+                except Exception:  # noqa: BLE001 — still blocked; the next attempt re-tries
+                    pass
     left = conn.execute("SELECT 1 FROM tenants WHERE id = %s", (tenant_id,)).fetchone()
     return remaining if left is not None else []
 

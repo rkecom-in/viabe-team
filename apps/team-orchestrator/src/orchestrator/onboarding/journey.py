@@ -723,6 +723,10 @@ def handle_reply(
     # is NOT an answer: re-present the gap WITHOUT recording/advancing. Gap-only (never a confirm — a
     # confirm-"yes" is a real signal, handled below); subset test so a mid-sentence particle still records.
     is_bare_gap_affirm = q.get("kind") != "confirm" and bool(toks) and toks <= _GAP_BARE_AFFIRM
+    # VT-724 (canary v4: the 'Yes' confirm was eaten here): with a PENDING echoed email, a bare
+    # affirmation IS the meaningful confirm — the two-phase branch owns it.
+    if field == "owner_email" and answers.get(_PENDING_EMAIL_KEY):
+        is_bare_gap_affirm = False
     if not is_skip and _is_bare_greeting(body):
         # A bare greeting → acknowledge + re-present the SAME question (the owner just said hi).
         return _greet_then_question(q)
@@ -807,6 +811,17 @@ def handle_reply(
                     _confirm(tenant_id, {field: value})
             else:
                 _confirm(tenant_id, {field: value})
+    elif field == "owner_email":
+        # VT-724 — the email capture is TWO-PHASE (echo-and-confirm): a consent record naming
+        # the business must never go to an address the owner hasn't seen echoed back (a typo =
+        # a self-inflicted DPDP disclosure). Phase 1: a syntactically-valid address is held
+        # PENDING + echoed with a Yes/correct ask (no advance). Phase 2: Yes → persist to
+        # tenants.owner_email + fire the retroactive consent-record send + record + advance;
+        # a new address replaces the pending echo; anything else re-presents.
+        hold = _handle_owner_email_turn(tenant_id, q, body, toks, answers, skipped)
+        if hold is not None:
+            return hold
+        recorded_answer = True
     else:  # gap question — the body IS the value
         if field and body.strip():
             answers[field] = body.strip()
@@ -886,6 +901,85 @@ def handle_reply(
         # Deterministic; holds with the LLM down (that is exactly when this path runs).
         reply = _prefix_answer_ack(reply)
     return reply
+
+
+_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+_PENDING_EMAIL_KEY = "owner_email__pending"
+
+
+def _handle_owner_email_turn(
+    tenant_id, q, body: str, toks, answers: dict[str, Any], skipped: list[str]
+) -> dict[str, Any] | None:
+    """VT-724 — the two-phase owner_email turn. Returns a reply dict to HOLD on this question
+    (no advance), or None when a confirmed address was recorded (the caller's shared advance
+    runs). Deterministic throughout; the pending echo survives restarts via the answers jsonb."""
+    pending = str(answers.get(_PENDING_EMAIL_KEY) or "")
+    match = _EMAIL_RE.search(body or "")
+    if match:
+        email = match.group(0).strip().rstrip(".").lower()
+        # A (new) address → hold it pending + echo for confirmation. Replaces any prior pending.
+        answers[_PENDING_EMAIL_KEY] = email
+        try:
+            _write_answers_skipped(tenant_id, answers, skipped)
+        except Exception:  # noqa: BLE001 — a persist miss only risks a re-ask, never a wrong send
+            logger.warning("VT-724: pending-email persist failed tenant=%s", tenant_id)
+        return {
+            "reply_en": (
+                f"Got it — {email}. Your consent record will go there. "
+                "Reply Yes to confirm, or send the correct address."
+            ),
+            "reply_hi": (
+                f"ठीक है — {email}. आपका consent record इसी पते पर जाएगा। "
+                "सही है तो Yes भेजें, या सही पता भेज दें।"
+            ),
+            "done": False,
+            "re_present": True,
+        }
+    if pending and (toks & _YES):
+        # Confirmed: persist + fire the retroactive consent-record send; record + advance.
+        try:
+            with tenant_connection(tenant_id) as conn:
+                conn.execute(
+                    "UPDATE tenants SET owner_email = %s WHERE id = %s",
+                    (pending, str(tenant_id)),
+                )
+        except Exception:  # noqa: BLE001 — the journey answer still records; retro-send skips
+            logger.warning("VT-724: owner_email persist failed tenant=%s", tenant_id)
+        try:
+            from orchestrator.onboarding.consent_record_email import (
+                send_pending_consent_record,
+            )
+
+            send_pending_consent_record(tenant_id)
+        except Exception:  # noqa: BLE001 — the record send is fail-soft + idempotent
+            logger.warning("VT-724: pending consent-record send failed tenant=%s", tenant_id)
+        answers[q.get("field")] = pending
+        answers.pop(_PENDING_EMAIL_KEY, None)
+        return None
+    # No address in the body and no confirmable pending → re-present with the format hint
+    # (or, with a pending held, nudge toward Yes/correction).
+    if pending:
+        return {
+            "reply_en": (
+                f"Should I use {pending}? Reply Yes to confirm, or send the correct address."
+            ),
+            "reply_hi": (
+                f"क्या {pending} सही है? Yes भेजें, या सही पता भेज दें।"
+            ),
+            "done": False,
+            "re_present": True,
+        }
+    return {
+        "reply_en": (
+            "That doesn't look like an email address — something like name@example.com. "
+            "You can also reply Skip."
+        ),
+        "reply_hi": (
+            "यह email पता नहीं लग रहा — जैसे name@example.com. आप Skip भी भेज सकते हैं।"
+        ),
+        "done": False,
+        "re_present": True,
+    }
 
 
 def _advance(tenant_id, cursor, answers, skipped, message_sid) -> None:
@@ -1951,7 +2045,11 @@ def _maybe_refresh_owner_website(
     belt-and-braces — it guarantees the ≤10s same-turn wait + persistence even when the brain doesn't
     decide to fetch, so the reply reflects the site without depending on the LLM's tool choice."""
     try:
-        m = _URL_RE.search(body or "")
+        # VT-724 (live diag: "Asha.Kirana@Gmail.com" → website 'https://Asha.Kirana'): an
+        # EMAIL-shaped message is never a website — the domain regex matches the local part.
+        # Strip email spans before sniffing so an email answer can't be stolen as a URL.
+        sniff = _EMAIL_RE.sub(" ", body or "")
+        m = _URL_RE.search(sniff)
         if not m:
             return
         url = m.group(0).rstrip(".,;:!?)")
@@ -2040,6 +2138,21 @@ def _handle_reply_with_turn_brain(
     # walker — signal already_presented so the intercept does NOT re-send (the first delivery sent it).
     if message_sid and message_sid == g.get("last_message_sid"):
         return {"already_presented": True, "done": _current(g) is None}
+
+    # VT-724 (the turn-brain-bypasses-walker-seams lesson, applied at build time): while the
+    # owner_email question is IN-FLIGHT, a REPLY turn is the deterministic two-phase machinery's
+    # — never the brain's (live diag: the URL sniffer + brain stole "Asha.Kirana@Gmail.com" as a
+    # website). The walker's owner_email branch owns validate → echo-confirm → persist →
+    # retro-send. START/card turns are exempt — the profile card must still present (the brain
+    # renders it; the email ask follows on the owner's next message).
+    _cur_q = _current(g)
+    if (
+        not is_start
+        and profile_card is None
+        and _cur_q is not None
+        and _cur_q.get("field") == "owner_email"
+    ):
+        return handle_reply(tenant_id, body, message_sid, lang=lang)
 
     # VT-716 — TYPED-TWICE guard (run-5: a repeated business name re-ran discovery and sent
     # the found-online card twice). A NEW sid whose normalized body equals the owner's LAST
@@ -2369,6 +2482,56 @@ _AGENT_CATALOG = {
     "customer win-back": "customer_winback",
     "campaigns": "campaigns",
 }
+
+
+def maybe_record_agent_pick(
+    tenant_id: UUID | str, body: str, message_sid: str | None
+) -> str | None:
+    """VT-722 — the MODE-INDEPENDENT agent-pick recorder (the ledger's live-path hole).
+
+    An EXACT catalog tap ("Sales Recovery" / "Customer Win-back" / "Campaigns" — a finite
+    button-title enum, the sanctioned exact-match list class) records the pick into the draft
+    substrate + the asserted-facts ledger, regardless of WHICH gate then consumes the turn:
+    on enforce the brain composes the confirm free-form and the walker beats never run, so
+    without this net `active_agent` never landed on the live path. Called from the runner's
+    inbound seam (pre-mode-split). NEVER consumes the turn — recording only; the reply is
+    whatever the mode's consumer produces. Gated on owner_inputs (the chooser only exists
+    post-activation) so a pre-consent message can't record. Idempotent: the walker beat's own
+    writer (legacy/shadow) collapses onto this via record_assertion's same-value no-op, and
+    the draft merge dedups. Returns the canonical choice, or None (not a tap / gated / error).
+    """
+    try:
+        choice = _AGENT_CATALOG.get((body or "").strip().lower())
+        if not choice:
+            return None
+        from orchestrator.db import tenant_connection
+
+        with tenant_connection(tenant_id) as conn:
+            row = conn.execute(
+                "SELECT owner_inputs FROM tenants WHERE id = %s", (str(tenant_id),)
+            ).fetchone()
+        enabled = bool(row and (row["owner_inputs"] if isinstance(row, dict) else row[0]))
+        if not enabled:
+            return None
+        try:
+            from orchestrator.onboarding.draft_profile import get_draft, write_draft
+
+            have = (get_draft(tenant_id) or {}).get("attributes") or {}
+            agents = list(dict.fromkeys([*(have.get("activated_agents") or []), choice]))
+            write_draft(tenant_id, {"activated_agents": agents}, source="owner")
+        except Exception:  # noqa: BLE001 — the assertion still records; draft is best-effort
+            logger.warning("VT-722: agent-pick draft write failed tenant=%s", tenant_id)
+        from orchestrator.manager.asserted_facts import record_assertion
+
+        record_assertion(
+            tenant_id, "active_agent", choice,
+            statement_text=(body or "").strip(), surface="manager", message_sid=message_sid,
+            derived_from={"site": "runner_pick_net"},
+        )
+        return choice
+    except Exception:  # noqa: BLE001 — recording only; never perturb the inbound pipeline
+        logger.warning("VT-722: agent-pick net failed (fail-soft) tenant=%s", tenant_id)
+        return None
 _AGENT_CHOSEN = {
     "en": (
         "{agent} is on your team — your FREE 1-month trial starts now (after the month it's "

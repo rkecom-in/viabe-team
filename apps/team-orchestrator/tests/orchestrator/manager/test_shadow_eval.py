@@ -18,42 +18,23 @@ import pytest
 
 pytest.importorskip("langgraph")
 pytest.importorskip("langchain_anthropic")
-pytest.importorskip("anthropic")
 
 from orchestrator.manager.decision import ManagerDecisionKind  # noqa: E402
 from orchestrator.manager.shadow_eval import evaluate_turn_shadow  # noqa: E402
 
 # ---------------------------------------------------------------------------
-# Fake Anthropic client — same shape as test_review_extraction.py's double.
+# Transport double — same shape as test_review_extraction.py's (VT-732: the extraction call goes
+# through the multi-provider seam, so the injection point is a text-returning callable).
 # ---------------------------------------------------------------------------
 
 
-class _FakeTextBlock:
-    type = "text"
+def _FakeClient(json_out: dict | None = None, raw_text: str | None = None):  # noqa: N802
+    text = raw_text if raw_text is not None else json.dumps(json_out)
 
-    def __init__(self, text: str) -> None:
-        self.text = text
+    def _call(tier: str, **kwargs):  # noqa: ANN003, ANN202 — test double
+        return text
 
-
-class _FakeResp:
-    def __init__(self, content: list) -> None:
-        self.content = content
-
-
-class _FakeMessages:
-    def __init__(self, json_out: dict | None = None, raw_text: str | None = None) -> None:
-        self._json_out = json_out
-        self._raw_text = raw_text
-
-    def create(self, **kwargs):  # noqa: ANN003, ANN201 — test double
-        if self._raw_text is not None:
-            return _FakeResp([_FakeTextBlock(self._raw_text)])
-        return _FakeResp([_FakeTextBlock(json.dumps(self._json_out))])
-
-
-class _FakeClient:
-    def __init__(self, json_out: dict | None = None, raw_text: str | None = None) -> None:
-        self.messages = _FakeMessages(json_out, raw_text)
+    return _call
 
 
 _BASE_KWARGS = {
@@ -90,7 +71,7 @@ def test_no_divergence_when_shadow_accepts_and_legacy_landed() -> None:
     result = evaluate_turn_shadow(
         str(uuid4()),
         **_BASE_KWARGS,
-        client=_FakeClient(_payload(status="completed", action_summary="sent winback")),
+        text_call=_FakeClient(_payload(status="completed", action_summary="sent winback")),
     )
     assert result.shadow_decision_kind is ManagerDecisionKind.ACCEPT
     assert result.divergence_class == "no_divergence"
@@ -102,7 +83,7 @@ def test_intent_divergence_when_shadow_disagrees_with_no_effect_at_stake() -> No
     result = evaluate_turn_shadow(
         str(uuid4()),
         **_BASE_KWARGS,
-        client=_FakeClient(
+        text_call=_FakeClient(
             _payload(status="needs_owner_input", action_summary="", owner_question="which cohort?")
         ),
     )
@@ -117,7 +98,7 @@ def test_safety_divergence_when_consequential_effect_and_shadow_would_escalate()
         str(uuid4()),
         **_BASE_KWARGS,
         legacy_final_status="completed",
-        client=_FakeClient(
+        text_call=_FakeClient(
             _payload(
                 status="blocked",
                 action_summary="",
@@ -144,7 +125,7 @@ def test_intent_divergence_capped_when_legacy_did_not_land() -> None:
         str(uuid4()),
         **_BASE_KWARGS,
         legacy_final_status="escalated",
-        client=_FakeClient(
+        text_call=_FakeClient(
             _payload(
                 status="blocked",
                 action_summary="",
@@ -172,7 +153,7 @@ def test_extraction_failure_fails_closed_without_manufacturing_a_safety_alarm() 
     result = evaluate_turn_shadow(
         str(uuid4()),
         **_BASE_KWARGS,
-        client=_FakeClient(raw_text="not json at all"),
+        text_call=_FakeClient(raw_text="not json at all"),
     )
     assert result.shadow_decision_kind is ManagerDecisionKind.ESCALATE
     assert result.divergence_class == "intent_divergence"
@@ -225,7 +206,7 @@ def test_calling_evaluate_turn_shadow_never_imports_twilio_send() -> None:
     evaluate_turn_shadow(
         str(uuid4()),
         **_BASE_KWARGS,
-        client=_FakeClient(_payload(status="completed")),
+        text_call=_FakeClient(_payload(status="completed")),
     )
     newly_imported = set(sys.modules) - before
     assert "orchestrator.utils.twilio_send" not in newly_imported

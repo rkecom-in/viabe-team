@@ -547,17 +547,19 @@ def _manager_review_node(state: AgentGraphState) -> dict[str, Any]:
         )
         return {"manager_review_outcome": "escalate", "manager_review_revised_outcome": None}
 
-    # §7D — the reasoning_ref join target is the ACTIVE ObservabilityContext's run_id, NOT
-    # state['run_id']: the two diverge for an enforce-loop dispatch (manager.workflow.
-    # _dispatch_specialist_step enters observability_context(run_id=UUID(task_id), ...) while
-    # state['run_id'] carries the per-attempt loop_run_id) — see manager_review's own docstring
-    # for the full explanation. Fail-soft to state['run_id'] if the context is somehow unset
-    # (should not happen — every graph.invoke() reaching this node runs inside that context — but
-    # observability must never crash the graph over a missing ContextVar).
-    from orchestrator.observability.decorators import _observability_context
-
-    ctx = _observability_context.get()
-    review_run_id = ctx.run_id if ctx is not None else state.get("run_id")
+    # §7D — the reasoning_ref join target is the manager TASK id, not state['run_id'] (which
+    # carries the per-attempt loop_run_id).
+    #
+    # VT-738: this used to read the ACTIVE ObservabilityContext's run_id, which happened to BE
+    # UUID(task_id) because _dispatch_specialist_step opened the context under the task id. That
+    # coupling was load-bearing by accident, and it was also the bug: pipeline_steps.run_id is
+    # `NOT NULL REFERENCES pipeline_runs (id)` (migration 006) and no pipeline_runs row exists
+    # under a manager_tasks.id, so EVERY state_transition write from the loop's node hook
+    # FK-violated and was swallowed at langgraph_hooks.py:207-212 — the loop ran with its richest
+    # per-node trace silently off. The context is now opened under the dispatch run_id that
+    # _open_dispatch_run actually created, so those rows land; this join is pinned to the task id
+    # explicitly rather than borrowing it from the context, so §7D is unchanged either way.
+    review_run_id = task_id
 
     result = manager_review(
         tenant_id,
@@ -764,6 +766,30 @@ def build_supervisor_graph(
     }
     orchestrator_route_map["terminal"] = "orchestrator_terminal"
 
+    def _record_budget_suppressed_route(state: AgentGraphState, billed: str) -> None:
+        """VT-738 — the one routing fact nothing recorded. Fail-soft by construction: an audit
+        write must never be able to change a route, so every error here is swallowed."""
+        try:
+            from orchestrator.observability.tm_audit import emit_tm_audit
+
+            emit_tm_audit(
+                event_layer="decides",
+                event_kind="route_budget_suppressed",
+                actor="team_manager",
+                tenant_id=state.get("tenant_id"),
+                run_id=state.get("run_id"),
+                summary=f"spawn suppressed by hard budget cap on {billed}; answering conversationally",
+                decision={
+                    "billed_agent": billed,
+                    "route_taken": "terminal",
+                    "manager_task_id": str(state.get("manager_task_id") or "") or None,
+                    "manager_step_id": str(state.get("manager_step_id") or "") or None,
+                },
+                severity="warning",
+            )
+        except Exception:  # noqa: BLE001 — instrumentation must never touch routing
+            logger.warning("VT-738 budget-suppressed route audit swallowed", exc_info=True)
+
     def _route_after_orchestrator_producing(state: AgentGraphState) -> str:
         """VT-565 — wrap the routing decision so an objective-bearing SPAWN mints the run's
         durable manager_task at the delegation seam (the B2 live producer). This is the seam the
@@ -798,6 +824,14 @@ def build_supervisor_graph(
                 # update; set best-effort for now. The LOAD-BEARING behavior is the route override
                 # (no paid specialist spawn once hard-capped).
                 state["budget_paused_agent"] = billed
+                # VT-738 I-1 — RECORD-ONLY, and narrower than it first looked. `routing.py:65,87`
+                # ALREADY emits a `route_decided` row on both the spawn and terminal paths, keyed
+                # on the loop's `run_id`, so the loop's route is NOT unrecorded. What was invisible
+                # is exactly THIS branch: the budget override silently converts a recorded
+                # `route_decided(spawn)` into an actual terminal, so the audit trail claims a
+                # delegation that never happened — indistinguishable after the fact from a Manager
+                # that chose not to delegate. Emitted only when the override actually fires.
+                _record_budget_suppressed_route(state, billed)
                 return "terminal"
         except Exception:  # noqa: BLE001 — fail-open: a metering blip never changes routing
             logger.warning("VT-619 budget-pause route check swallowed", exc_info=True)

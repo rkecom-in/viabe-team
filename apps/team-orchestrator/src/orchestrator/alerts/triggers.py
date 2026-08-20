@@ -54,6 +54,14 @@ TriggerKind = Literal[
     "silent_terminal",  # the detector opened a silent-terminal incident
     # VT-557 (B6): a manager_task exhausted its retry budget → dead_letter (operator must redrive).
     "dead_letter_task",  # the retry-ladder reaper dead-lettered a chronically-stalled task
+    # VT-735: a tenant exhausted its daily Fast-tier budget and is degrading to Standard.
+    "fast_budget_exhausted",
+    # VT-755: a tenant's Manager is WEDGED — a task parked 'waiting_owner' that nothing can wake
+    # (no resolvable approval, no wake stamp) and that the reaper deliberately excludes, so every
+    # later objective queues behind it forever. Its own kind, NOT reused 'escalation', because
+    # alerts.dispatch._dedup_key is `tenant:kind` on a 5-minute window: sharing a kind would let a
+    # wedge suppress a genuine escalation for the same tenant, or vice versa.
+    "wedged_tenant",
 ]
 
 Severity = Literal["critical", "warning"]
@@ -86,6 +94,17 @@ _SEVERITY_BY_KIND: dict[TriggerKind, Severity] = {
     "silent_terminal": "warning",
     # VT-557 — a dead-lettered task is stuck until an operator redrives → ops-actionable warning.
     "dead_letter_task": "warning",
+    # VT-735 — the Fast budget is a runaway-loop tripwire, and the degrade to Standard means the
+    # turn still completes correctly (just not on the premium tier). Ops-actionable, never a page:
+    # same reasoning as "hard_limit", which is a budget gate working as designed.
+    "fast_budget_exhausted": "warning",
+    # VT-755 — CRITICAL, and deliberately not a warning. Every other stall kind here degrades a
+    # tenant; this one ENDS them: the parked task is unreachable by the wake path AND excluded from
+    # the retry ladder, and because 'waiting_owner' counts as TASK_ACTIVE the queue promoter refuses
+    # to advance anything behind it. Nothing in the system recovers from this on its own, so nobody
+    # finds out unless a human is paged. Measured on dev 2026-08-14: 4 of 7 parked tasks were in this
+    # state and 1 tenant was already wedged.
+    "wedged_tenant": "critical",
 }
 
 # VT-620 — error-envelope subtypes that are a correctness/quality GATE working as designed

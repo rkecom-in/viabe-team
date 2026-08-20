@@ -68,7 +68,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from orchestrator.agent.orchestrator_agent_driver import (
     ORCHESTRATOR_COST_HARD_LIMIT_PAISE,
-    ORCHESTRATOR_TOKEN_HARD_LIMIT,
+    ORCHESTRATOR_OUTPUT_TOKEN_HARD_LIMIT,
     ORCHESTRATOR_TOOL_CALL_HARD_LIMIT,
     ORCHESTRATOR_WALL_CLOCK_HARD_LIMIT_S,
     HardLimitExceeded,
@@ -172,16 +172,22 @@ def select_brain_model(intent: dict[str, Any]) -> tuple[str, str]:
     skipped or failed. This REUSES that classification — it does NOT make a
     second classify / LLM call.
 
-    Returns ``(model_id, tier)`` where ``tier`` is ``"haiku"`` | ``"sonnet"`` (a
+    Returns ``(model_id, tier)`` where ``tier`` is ``"routine"`` | ``"complex"`` (a
     PII-safe label for observability — never the owner body). CORRECTNESS-FIRST:
-    a routine classification in ``_ROUTINE_INTENTS`` → Haiku; ANY other value,
-    including a missing/empty signal, fails safe to Sonnet (the capable model).
+    a routine classification in ``_ROUTINE_INTENTS`` → the routine tier; ANY other
+    value, including a missing/empty signal, fails safe to the complex tier.
+
+    The labels are the TIER, not a vendor. They used to read "haiku"/"sonnet", which
+    became a lie in the traces the moment the tiers were pointed at Luna — and that
+    lie is what made the 2026-08-05 Sonnet-burn hunt hard: a Luna call labelled
+    "sonnet" sends you looking for a model that was never invoked. Names that track
+    the tier survive a provider change; names that track a vendor do not.
     """
     classification = intent.get("classification")
     if isinstance(classification, str) and classification in _ROUTINE_INTENTS:
-        return (_BRAIN_MODEL_HAIKU, "haiku")
+        return (_BRAIN_MODEL_HAIKU, "routine")
     # Complex, ambiguous, or signal-absent → the capable model (fail-safe).
-    return (_BRAIN_MODEL_SONNET, "sonnet")
+    return (_BRAIN_MODEL_SONNET, "complex")
 
 
 def _build_manager_intent_block(intent: dict[str, Any]) -> str | None:
@@ -348,6 +354,38 @@ def _build_commitments_block(tenant_id: UUID) -> str | None:
     ]
     for f in facts:
         lines.append(f"- {f.get('fact_key')}: {_json.dumps(f.get('fact_value'), default=str)}")
+    return "\n".join(lines)
+
+
+def _build_week_plan_block(tenant_id: UUID) -> str | None:
+    """VT-721 S3 — the current 7-day plan as per-turn context, so 'what's the plan this week?'
+    is answerable from the durable plan object (owner-visible on ask, CL-2026-07-29-manager-is-coo
+    (c)) and the brain never invents a plan. None while the tenant has no plan row (pre-VT-721
+    byte-identical) or the flag is off. Best-effort; cache-preserving per-turn SystemMessage."""
+    try:
+        from orchestrator.business_plan.week_plan import latest_plan
+        from orchestrator.business_plan.week_plan_revision import week_plan_mode
+
+        if week_plan_mode() == "off":
+            return None
+        plan = latest_plan(tenant_id)
+    except Exception:  # noqa: BLE001 — advisory context, never a gate on dispatch
+        logger.warning("dispatch: week-plan block assembly failed (tenant=%s); proceeding without", tenant_id)
+        return None
+    if plan is None or not plan.actions:
+        return None
+    lines = [
+        f"## This week's plan (rolling 7-day, revised {plan.plan_date})",
+        "The current plan for this business. When the owner asks what the plan is (any "
+        "phrasing — 'plan', 'is hafte ka plan', 'what are we doing this week'), your reply "
+        "MUST enumerate the actions below, one short line each in the owner's language, before "
+        "anything else — never summarize them away, never invent items not listed. A planned "
+        "action is an intention, not an authorization: effects still need their approvals.",
+    ]
+    for a in plan.actions:
+        status = a.get("status", "planned")
+        approval = " [needs owner approval]" if a.get("requires_approval") else ""
+        lines.append(f"- ({status}) {a.get('objective')} — {a.get('assigned_to')}{approval}")
     return "\n".join(lines)
 
 
@@ -801,6 +839,24 @@ def dispatch_brain(
             ),
         )
 
+    # VT-725 scope 1: the O8 retrieval step at the Manager's framing-context assembly — the first
+    # caller the card engine has ever had in src/ (it was complete and unreachable; the Manager
+    # could not read a single card). **Nothing is injected**: shadow retrieves, scores and records
+    # attribution, and the result object carries card refs and scores, never claim text
+    # (`CardServingResult.INJECTS_INTO_PROMPT` is a ClassVar False, and turn_retrieval asserts it).
+    # No system block is built here and none may be until the D3 flip.
+    #
+    # Lands DARK: `TEAM_KNOWLEDGE_SERVING` is unset, so this is one env read per turn and no DB
+    # work at all. It stays that way until VT-749 scope 1 scopes the 63 of 100 eligible cards that
+    # currently scope nothing — populating `decision_evidence_links` before then would make our
+    # first causality evidence evidence about an indiscriminate corpus.
+    #
+    # Deliberately NOT wrapped in try/except here: turn_retrieval never raises, by contract, and a
+    # second belt would hide the day that stops being true.
+    # VT-725: the retrieval call MOVED to runner's per-turn path 2026-08-19. It lived here, and
+    # `dispatch_brain` is precisely the router that enforce mode's `skip_legacy_dispatch` skips —
+    # so on dev the corpus was never consulted at all. See the comment at the runner call site.
+
     # VT-461: inject the Manager-intent signal as a separate system block so the
     # Team-Manager brain reads it as a prior (the prompt's "## Manager intent signal"
     # contract) when deciding handle-directly-vs-delegate. Reuses the classification the
@@ -840,6 +896,17 @@ def dispatch_brain(
             0,
             SystemMessage(
                 content=commitments_block, id=_initial_turn_msg_id(run_id, "commitments_block")
+            ),
+        )
+
+    # VT-721 S3: the rolling 7-day plan — answerable on ask, never invented. None when the
+    # flag is off or no plan row exists (pre-VT-721 tenants byte-identical).
+    week_plan_block = _build_week_plan_block(tenant_id)
+    if week_plan_block:
+        _messages.insert(
+            0,
+            SystemMessage(
+                content=week_plan_block, id=_initial_turn_msg_id(run_id, "week_plan_block")
             ),
         )
 
@@ -998,7 +1065,7 @@ def dispatch_brain(
             # completes within the ₹5 cap); complex/ambiguous/absent → Opus.
             brain_model_id, brain_tier = select_brain_model(_manager_intent)
             # PII-safe observability: the TIER + the (typed) intent label only —
-            # never the owner body. Lets Ops see the Sonnet/Opus split.
+            # never the owner body. Lets Ops see the routine/complex split.
             logger.info(
                 "dispatch_brain: brain model tier selected",
                 extra={
@@ -1493,6 +1560,81 @@ _COMPOSE_ANTIREPEAT_SYSTEM = (
     "when they wrote Hindi or Hinglish), complete and self-contained, no narration or meta-commentary. "
     "Never invent a number, price, date, or status, and never claim an action you did not take."
 )
+
+
+_COMPOSE_VETO_SYSTEM = (
+    "You are the Viabe Team-Manager writing a WhatsApp reply to the OWNER of a small Indian "
+    "business. A draft reply you wrote was BLOCKED by a deterministic fact-check because it "
+    "asserted something the system's own records do not support. The block is CORRECT and final — "
+    "you may not restate the blocked assertion in any form. Rewrite the reply: KEEP everything in "
+    "the draft that was true and that actually answered the owner, and DROP the unsupported claim. "
+    "Do NOT replace it with a denial, and do NOT raise the subject of the blocked claim at all "
+    "unless the owner themselves asked about it. An owner who said 'just check this, don't create "
+    "anything' should simply get their check answered — no mention of creating anything, and no "
+    "offer to create it. Saying nothing about a topic they did not raise is the correct rewrite; a "
+    "denial ('I haven't made one yet') keeps their attention on the very thing they declined and "
+    "reads as pestering. Honor what the owner asked for: if they told you NOT to do something, "
+    "neither do it nor offer it. Output ONLY the message to send the owner — "
+    "second person, in the SAME language and script the owner is using (Hindi/Hinglish/English; "
+    "never switch them into English when they wrote Hindi or Hinglish), complete and "
+    "self-contained, no narration or meta-commentary. Never invent a number, price, date or status, "
+    "and never claim an action you did not take."
+)
+
+
+def compose_under_veto(
+    tenant_id: UUID | str, rejected: str, finding: str, *, owner_message: str = ""
+) -> str | None:
+    """VT-720 (S4) — recompose a reply a deterministic FACT-CHECK vetoed, in the Manager's own voice.
+
+    The single-voice counterpart to the emission gate's canned replacements. A floor that catches a
+    false claim is right to catch it; what it must NOT do is speak a stock sentence in the Manager's
+    place. Measured (routing_db_proof_finance_vs_sr, 3/3): an owner who said "just check, do NOT
+    make any campaign or message" got the canned "I haven't drafted that yet — want me to put it
+    together now?" — a fixed line offering the very thing they had just refused, alongside the real
+    answer. Two mouths, one of them deaf.
+
+    ``finding`` is the deterministic fact the rewrite must respect (e.g. "no campaign draft exists
+    for this tenant"). ``None`` on ANY failure so the caller keeps its deterministic replacement —
+    the floor's guarantee never depends on this call succeeding.
+    """
+    try:
+        text = (rejected or "").strip()
+        if not text:
+            return None
+        tid = tenant_id if isinstance(tenant_id, UUID) else UUID(str(tenant_id))
+        parts: list[str] = []
+        conversation_block = _build_manager_conversation_block(tid)
+        if conversation_block:
+            parts.append(conversation_block)
+        if (owner_message or "").strip():
+            parts.append(f"## The owner just messaged you\n{owner_message.strip()}")
+        parts.append(
+            "## The deterministic finding your rewrite MUST respect\n"
+            f"{finding}"
+        )
+        parts.append(f"## Your BLOCKED draft — do not restate the unsupported claim\n{text}")
+        response = _resolve_model(_BRAIN_MODEL_SONNET, tenant_id=tid).invoke(
+            [
+                SystemMessage(content=_COMPOSE_VETO_SYSTEM),
+                HumanMessage(content="\n\n".join(parts)),
+            ]
+        )
+        raw = getattr(response, "content", None)
+        if isinstance(raw, str):
+            out = raw.strip()
+        elif isinstance(raw, list):
+            out = "".join(
+                block.get("text", "")
+                for block in raw
+                if isinstance(block, dict) and block.get("type") == "text"
+            ).strip()
+        else:
+            out = ""
+        return out or None
+    except Exception:  # noqa: BLE001 — best-effort voice; the caller's deterministic line stands
+        logger.warning("VT-720: compose_under_veto failed (fail-soft) tenant=%s", tenant_id)
+        return None
 
 
 def _normalize_reply(text: str) -> str:
@@ -2093,8 +2235,12 @@ class _NullDriver:
     tool_call_limit: int = int(os.environ.get(
         "ORCHESTRATOR_TOOL_CALL_HARD_LIMIT", str(ORCHESTRATOR_TOOL_CALL_HARD_LIMIT)
     ))
-    token_limit: int = int(os.environ.get(
-        "ORCHESTRATOR_TOKEN_HARD_LIMIT", str(ORCHESTRATOR_TOKEN_HARD_LIMIT)
+    # VT-764: OUTPUT tokens only. The retired combined 10k limit was TRUE on the first call of
+    # every brain run (the prompt alone measures ~17k) and aborted nothing, because the raise was
+    # swallowed by langchain's callback manager. Both halves are fixed together on purpose: making
+    # the raise propagate while the limit stayed at 10k combined would abort EVERY run.
+    output_token_limit: int = int(os.environ.get(
+        "ORCHESTRATOR_OUTPUT_TOKEN_HARD_LIMIT", str(ORCHESTRATOR_OUTPUT_TOKEN_HARD_LIMIT)
     ))
     wall_clock_limit_s: float = float(os.environ.get(
         "ORCHESTRATOR_WALL_CLOCK_HARD_LIMIT_S", str(ORCHESTRATOR_WALL_CLOCK_HARD_LIMIT_S)
@@ -2118,11 +2264,11 @@ class _NullDriver:
                 run_id=run_id,
                 tenant_id=tenant_id,
             )
-        if usage.cumulative_tokens > self.token_limit:
+        if usage.tokens_output > self.output_token_limit:
             raise HardLimitExceeded(
-                axis="tokens",
-                observed=usage.cumulative_tokens,
-                limit=self.token_limit,
+                axis="tokens_output",
+                observed=usage.tokens_output,
+                limit=self.output_token_limit,
                 run_id=run_id,
                 tenant_id=tenant_id,
             )

@@ -34,8 +34,30 @@ recovery immediate and clean. (It cannot make the loop immune to process death �
 6. **Re-arm FIRST on every wake.** First action on any watcher fire / heartbeat = re-arm the watcher, THEN
    drain the full inbox.
 
-7. **Progress heartbeat.** On any task running >10 min, emit a progress status so silence ≠ stalled. Never
-   hold work silently for >15 min.
+7. **Progress heartbeat — it MUST carry a STATE WORD.** On any task running >10 min, emit a progress
+   status so silence ≠ stalled. Never hold work silently for >15 min.
+
+   `.running/cc-heartbeat` used to be a 0-byte file touched for its mtime, which proved only that
+   SOMETHING still ran — alive-and-stuck read exactly like alive-and-thinking, and one such stall cost
+   ~4 hours while the heartbeat ticked all night (Clau 2026-08-06, third occurrence). It now carries:
+
+   ```bash
+   python scripts/cc_heartbeat.py --state working --item "<what>"   # at every phase transition
+   python scripts/cc_heartbeat.py --state blocked --why "<why>"
+   python scripts/cc_heartbeat.py --state idle
+   python scripts/cc_heartbeat.py --read                            # what Clau runs
+   ```
+
+   The file records `beat_at` (process alive) AND `state_since` (state last CHANGED). **A fresh
+   `beat_at` under a stale `state_since` is a stall, readable in one command.** Re-announcing the same
+   state deliberately does NOT reset `state_since` — that is what makes the stall visible.
+
+   **The work loop writes it, never a side loop.** A side loop would keep the state fresh while the
+   real work is wedged, which is the exact failure this replaces.
+
+7b. **A gate / pack / long run emits a one-line signal the MOMENT it finishes — BEFORE any analysis.**
+   "Done, verdict coming" costs 10 seconds. Withholding it until the analysis is written is what turned
+   a finished gate into a 4-hour silence. Analyse after the signal, never before it.
 
 8. **Tree discipline (CL-418).** Stay on `dev` when idle. Commit at PR-time on feature branches; return to
    `dev` after each PR/merge. Never leave the shared tree parked on a feature branch — it strands the next

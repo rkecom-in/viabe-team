@@ -58,6 +58,42 @@ VTR and Manager WRITE customisation cards into specialist thin memory. That writ
 like any other: provenance recorded (who wrote it — VTR or Manager — and why), a lifecycle
 event on every change, tenant-scoped + RLS + DSR-purgeable, and bounded to task customisation.
 
+### 0.1.3 WHERE knowledge sits, and how it is flipped (CANONICAL — Fazal 2026-07-28/29)
+
+Knowledge is not "in the system" generically. **Every card has an assignment that says whose
+memory it occupies**, and that assignment is changeable at runtime — no deploy, no migration.
+This is the mechanism behind Fazal's ruling that cards must be flippable in and out of Manager
+and specialist memory as the situation demands.
+
+| Assignment | Whose memory | What belongs there |
+|---|---|---|
+| `manager_global` | Manager, all tenants | How to run a business — general operating knowledge, applicable across the book |
+| `manager_tenant` | Manager, THIS tenant only | What is true about THIS business — its context, its history, its learned particulars |
+| `specialist:<agent>` | One specialist's thin memory | Task customisation for that lane only — the diversions and changes this tenant needs |
+| `disabled` | nobody | Present in the registry, not retrievable |
+
+**Resolution order at retrieval:** the global `knowledge_cards.default_assignment` gives the
+card's out-of-the-box home; a per-tenant `knowledge_card_assignments` row OVERRIDES it for that
+tenant. Both are evaluated per retrieval, so a flip takes effect on the next turn.
+
+**The asymmetry is deliberate and load-bearing.** The **Manager's memory is the important
+estate** — it is the COO and the broad knowledge holder (§0.1). **Specialist memory is THIN and
+TASK-SPECIFIC by construction** — it exists to hold this tenant's customisations of that
+specialised action, never to become a second general-knowledge store. A specialist retrieves
+only its lane's assigned cards plus its own thin memory; it never gets the Manager's breadth.
+The Manager retrieves specialist CONCLUSIONS and cross-functional evidence, not deep domain
+corpora. Depth belongs to specialists; synthesis belongs to the Manager.
+
+**Who writes specialist memory:** the VTR or the Manager, as cards, governed per §0.1.2.
+
+**The hard boundary:** retrieval is **advisory to reasoning and NEVER authorizes an effect**.
+No retrieved card — however authoritative, however confident — permits a customer send, a money
+action, or a consent change. Those pass the deterministic gates and Pillar-7 always (§0.1.1).
+
+Mechanism detail (tables, tiers, admission, ablation): `.viabe/o8-knowledge-engine-design.md`
+§13 and `.viabe/o8-registry-schema-spec.md`. **This section is the authority on the model; those
+are the authority on the implementation.**
+
 ## 1. The three roles
 
 ### 1.1 Manager (the embedded agent)

@@ -258,11 +258,25 @@ def test_choke_never_touches_customer_sends(monkeypatch, twilio_create):
     """A customer-session send is NEVER deduped by the owner choke (identical bodies both go),
     and the customer effect gate still fail-closes outside its context regardless of choke mode."""
     _mode(monkeypatch, "enforce")
+    # VT-742: a customer send now resolves its `from_` to the tenant's OWN live WABA (a customer
+    # messaged from a shared number cannot reply to us at all). This test is about the CHOKE, not
+    # about sender precedence — which is proven against real Postgres in
+    # tests/orchestrator/integrations/test_vt742_sender_resolution.py — so the resolver is stubbed
+    # and every assertion below stays exactly what it was.
+    from orchestrator.integrations.sender_resolution import KIND_OWN_WABA, Sender
+
+    monkeypatch.setattr(
+        twilio_send,
+        "resolve_sender",
+        lambda tenant_id, *, audience="owner", conn=None: Sender(
+            "+919900000123", KIND_OWN_WABA, str(tenant_id)
+        ),
+    )
     with pytest.raises(UngatedCustomerSendError):
-        send_freeform_message("promo", _PHONE, is_customer_session=True)
+        send_freeform_message("promo", _PHONE, is_customer_session=True, tenant_id=_TENANT)
     with customer_send_context():
-        s1 = send_freeform_message("promo", _PHONE, is_customer_session=True)
-        s2 = send_freeform_message("promo", _PHONE, is_customer_session=True)
+        s1 = send_freeform_message("promo", _PHONE, is_customer_session=True, tenant_id=_TENANT)
+        s2 = send_freeform_message("promo", _PHONE, is_customer_session=True, tenant_id=_TENANT)
     assert CHOKE_SUPPRESSED_SID not in (s1, s2)
     assert twilio_create.call_count == 2
 

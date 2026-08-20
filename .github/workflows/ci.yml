@@ -344,6 +344,42 @@ jobs:
       - name: no-raw-railway-variables (enforced — hard-fail)
         run: python3 scripts/check_no_raw_railway_variables.py
 
+  gate-no-env-sender-at-send-site:
+    name: gate-no-env-sender-at-send-site
+    needs: changes
+    if: needs.changes.outputs.orchestrator == 'true' || needs.changes.outputs.ci == 'true'
+    runs-on: ubuntu-latest
+    # VT-742 exit gate (a): TEAM_TWILIO_FROM_NUMBER is the DEFAULT SHARED sender, not the sender.
+    # For two months all three messages.create sites read it directly, so 138 tenants with a live
+    # provisioned WABA still sent from the shared Viabe number — and their customers' replies
+    # resolved to NO tenant, because customer inbound routes by the number the customer messaged TO.
+    # resolve_sender(tenant_id) is the only sanctioned source; a resolver any call site can bypass
+    # with one env read is not a resolver.
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: no-env-sender-at-send-site (enforced — hard-fail)
+        run: python3 scripts/check_no_env_sender_at_send_site.py
+
+  gate-no-model-literals:
+    name: gate-no-model-literals
+    needs: changes
+    if: needs.changes.outputs.orchestrator == 'true' || needs.changes.outputs.ci == 'true'
+    runs-on: ubuntu-latest
+    # VT-732: every TEAM_MODEL_* var read gpt-5.6-luna on dev while the bill said Sonnet, because
+    # ~30 call sites built their own Anthropic client and config/models.yaml kept a second set of
+    # VIABE_ENV-slotted pins. Configuration the code can bypass is not governance — this gate fails
+    # the build on a model id outside the seam, or on an LLM slot re-added to models.yaml.
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: no-model-literals-outside-the-seam (enforced — hard-fail)
+        run: python3 apps/team-orchestrator/scripts/gate_no_model_literals.py
+
   gate-owner-emission-choke:
     name: gate-owner-emission-choke
     needs: changes
@@ -908,6 +944,8 @@ jobs:
       - gate-no-langsmith-imports
       - gate-no-direct-tenant-db-access
       - gate-no-raw-railway-variables
+      - gate-no-env-sender-at-send-site
+      - gate-no-model-literals
       - gate-owner-emission-choke
       - gate-sr-agent-prompt-token-cap
       - gate-vt39-tools-harness-import

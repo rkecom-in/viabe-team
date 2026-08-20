@@ -142,7 +142,10 @@ def test_send_propagates_transient_twilio_error_5xx(send_ctx, twilio_create):
 def test_send_uses_tenant_whatsapp_number_by_default(send_ctx, twilio_create):
     from orchestrator.utils.twilio_send import send_template_message
 
-    number = "+919876543210"
+    # Unique per run: tenants.whatsapp_number carries a partial UNIQUE (mig 066 / VT-267), so a
+    # CONSTANT number here passes once and then fails on every later run against the same database —
+    # which is what it did, as a UniqueViolation dressed up as a pooler error in the teardown noise.
+    number = f"+9198{uuid4().int % 10**8:08d}"
     tenant_id = _new_tenant(send_ctx.dsn, number)
     send_template_message(UUID(tenant_id), "team_status_ping", _PING_PARAMS)
     # VT-399: from_/to ride the WhatsApp channel (whatsapp:-prefixed).

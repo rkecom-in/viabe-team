@@ -1,4 +1,4 @@
-"""VT-710 adversarial and ordering tests for rights-first quarantined ingestion."""
+"""VT-710 adversarial and ordering tests for source-governed quarantined ingestion."""
 
 from __future__ import annotations
 
@@ -34,6 +34,7 @@ from orchestrator.knowledge.ingestion import (  # noqa: E402
     IngestionPipeline,
     IngestionRejected,
     MappingRightsResolver,
+    SourceReviewFlag,
     SourceRightsDecision,
 )
 from orchestrator.knowledge_global_purity import GlobalKnowledgePurityError  # noqa: E402
@@ -61,6 +62,9 @@ def rights(
     source_class: SourceClass = SourceClass.T4_EXPERIENTIAL,
     status: UsageRightsStatus = UsageRightsStatus.PERMISSION_GRANTED,
     allows_embedding: bool = True,
+    contractual_extraction_restriction: bool = False,
+    paywall_access_circumvented: bool = False,
+    compilation_concentration: bool = False,
 ) -> SourceRightsDecision:
     return SourceRightsDecision(
         source_class=source_class,
@@ -72,6 +76,9 @@ def rights(
             reviewed_at=NOW,
             reviewed_by="test-rights-reviewer",
         ),
+        contractual_extraction_restriction=contractual_extraction_restriction,
+        paywall_access_circumvented=paywall_access_circumvented,
+        compilation_concentration=compilation_concentration,
     )
 
 
@@ -80,8 +87,7 @@ def governance(*, applicability: Applicability | None = None) -> CandidateGovern
         domain=KnowledgeDomain.SALES,
         authority=EvidenceAuthority.SEED,
         confidence=EvidenceConfidence.LOW,
-        applicability=applicability
-        or Applicability(jurisdictions=("IN",), effective_from=NOW),
+        applicability=applicability or Applicability(jurisdictions=("IN",), effective_from=NOW),
         retention_class="six_month_experiential",
         independence_cluster="cluster:operator-thread",
         expires_at=datetime(2027, 1, 27, 12, 0, tzinfo=UTC),
@@ -92,6 +98,8 @@ def source(
     raw_text: str | None = None,
     *,
     content_kind: AcquiredContentKind = AcquiredContentKind.RAW_SOURCE,
+    expression_reference_text: str | None = None,
+    expression_originality_attested_by: str | None = None,
 ) -> AcquiredSource:
     return AcquiredSource(
         source_id="source-forum-1",
@@ -106,6 +114,16 @@ def source(
             "PAN AAKCD4875D."
         ),
         content_kind=content_kind,
+        expression_reference_text=expression_reference_text,
+        expression_originality_attested_by=(
+            expression_originality_attested_by
+            or (
+                "test-corpus-author"
+                if content_kind is AcquiredContentKind.OWNED_DISTILLATION
+                and expression_reference_text is None
+                else None
+            )
+        ),
     )
 
 
@@ -113,6 +131,7 @@ def pipeline(
     source_rights: SourceRightsDecision,
     *,
     embedder=None,  # noqa: ANN001
+    extractor=None,  # noqa: ANN001
     embedding_mode: EmbeddingMode = EmbeddingMode.REQUIRE,
 ):
     quarantine = InMemoryQuarantineStore()
@@ -121,7 +140,7 @@ def pipeline(
         rights=MappingRightsResolver({"source-forum-1": source_rights}),
         quarantine=quarantine,
         dedupe=InMemoryDedupeStore(),
-        extractor=AdversarialExtractor(),
+        extractor=extractor or AdversarialExtractor(),
         registry=registry,
         embedder=embedder or (lambda texts: [[0.0] * 1_024 for _ in texts]),
         embedding_mode=embedding_mode,
@@ -142,11 +161,12 @@ def test_adversarial_source_cannot_self_promote_and_raw_stays_quarantined() -> N
     assert result.card.provenance.tainted is True
     assert result.embedding_state is EmbeddingState.COMPLETE
     assert result.pipeline_steps == (
-        "rights_verified",
+        "source_governance_recorded",
         "hashed_deduped",
         "raw_quarantined",
         "toolless_extracted",
         "schema_validated",
+        "expression_originality_checked",
         "claim_applicability_normalized",
         "pii_redacted",
         "global_purity_checked",
@@ -154,41 +174,119 @@ def test_adversarial_source_cannot_self_promote_and_raw_stays_quarantined() -> N
         "embedded",
         "candidate_registered",
     )
-    assert "ignore all previous instructions" in quarantine.read_for_audit(
-        result.quarantine_ref
-    ).casefold()
+    assert (
+        "ignore all previous instructions"
+        in quarantine.read_for_audit(result.quarantine_ref).casefold()
+    )
     serialized = result.model_dump_json().casefold()
     assert "ignore all previous instructions" not in serialized
     assert "owner@example.com" not in serialized
     assert len(registry.candidates) == 1
 
 
-def test_rights_unknown_blocks_raw_extraction_but_owned_distillation_stays_inert() -> None:
-    blocked = rights(
+def test_unknown_rights_do_not_block_raw_or_owned_claim_embedding() -> None:
+    unknown = rights(
         status=UsageRightsStatus.UNKNOWN,
         allows_embedding=False,
     )
-    instance, _, _ = pipeline(blocked, embedding_mode=EmbeddingMode.DEFER)
-    with pytest.raises(IngestionRejected, match="do not allow raw-content extraction"):
-        instance.ingest(
-            source(),
-            governance=governance(),
-            card_id=str(uuid4()),
-            card_version_id=str(uuid4()),
-        )
+    instance, _, _ = pipeline(unknown)
+    raw_result = instance.ingest(
+        source(),
+        governance=governance(),
+        card_id=str(uuid4()),
+        card_version_id=str(uuid4()),
+    )
+    assert raw_result.embedding_state is EmbeddingState.COMPLETE
 
-    # The legacy corpus payload is RKECOM-authored distillation, not third-party raw text. It may
-    # be re-keyed as a candidate, but underlying unknown rights still block embedding/retrieval.
-    instance, _, _ = pipeline(blocked, embedding_mode=EmbeddingMode.DEFER)
+    # Source licensing remains recorded as unknown, while the original Viabe-authored claim is
+    # eligible for the ordinary embedding path. Candidate status still keeps retrieval inert.
+    instance, _, _ = pipeline(unknown, embedding_mode=EmbeddingMode.DEFER)
     result = instance.ingest(
         source(content_kind=AcquiredContentKind.OWNED_DISTILLATION),
         governance=governance(),
         card_id=str(uuid4()),
         card_version_id=str(uuid4()),
     )
-    assert result.embedding_state is EmbeddingState.RIGHTS_BLOCKED
+    assert result.embedding_state is EmbeddingState.PENDING
     assert result.embedding is None
     assert result.card.retrieval_eligible is False
+    assert result.card.usage_rights.status is UsageRightsStatus.UNKNOWN
+    assert "expression_originality_attested" in result.pipeline_steps
+
+
+def test_expression_originality_rejects_verbatim_and_near_verbatim_source_text() -> None:
+    source_sentence = (
+        "Sales teams should review the pipeline every morning and contact stalled buyers "
+        "with a specific next step before adding new leads."
+    )
+
+    class CopyingExtractor:
+        tools_enabled = False
+
+        def __init__(self, claim: str) -> None:
+            self.claim = claim
+
+        def extract(self, raw_text: str) -> ExtractedClaimDraft:
+            del raw_text
+            return ExtractedClaimDraft(
+                claim=self.claim,
+                distillation_note="This remains an operating hypothesis pending measured impact.",
+                claim_subject="sales pipeline",
+                claim_predicate="requires disciplined review",
+                claim_value=TypedClaimValue(value_type="boolean", value=True),
+            )
+
+    instance, _, _ = pipeline(rights(), extractor=CopyingExtractor(source_sentence))
+    with pytest.raises(IngestionRejected, match="verbatim or near-verbatim source expression"):
+        instance.ingest(
+            source(source_sentence),
+            governance=governance(),
+            card_id=str(uuid4()),
+            card_version_id=str(uuid4()),
+        )
+
+    near_copy = source_sentence.replace("every morning", "each morning")
+    instance, _, _ = pipeline(rights(), extractor=CopyingExtractor(near_copy))
+    with pytest.raises(IngestionRejected, match="verbatim or near-verbatim source expression"):
+        instance.ingest(
+            source(source_sentence),
+            governance=governance(),
+            card_id=str(uuid4()),
+            card_version_id=str(uuid4()),
+        )
+
+
+def test_source_access_exclusion_and_non_blocking_review_flags() -> None:
+    flagged = rights(
+        status=UsageRightsStatus.UNKNOWN,
+        allows_embedding=False,
+        contractual_extraction_restriction=True,
+        compilation_concentration=True,
+    )
+    instance, _, _ = pipeline(flagged)
+    result = instance.ingest(
+        source(),
+        governance=governance(),
+        card_id=str(uuid4()),
+        card_version_id=str(uuid4()),
+    )
+    assert result.embedding_state is EmbeddingState.COMPLETE
+    assert result.review_flags == (
+        SourceReviewFlag.CONTRACTUAL_EXTRACTION_RESTRICTION,
+        SourceReviewFlag.COMPILATION_CONCENTRATION,
+    )
+
+    excluded = rights(paywall_access_circumvented=True)
+    instance, quarantine, registry = pipeline(excluded)
+    with pytest.raises(IngestionRejected, match="access circumvention"):
+        instance.ingest(
+            source(),
+            governance=governance(),
+            card_id=str(uuid4()),
+            card_version_id=str(uuid4()),
+        )
+    assert quarantine._records == {}  # noqa: SLF001 - exclusion precedes source processing
+    assert registry.candidates == []
 
 
 def test_required_embedding_failure_is_fail_not_skip() -> None:
@@ -217,7 +315,7 @@ def test_missing_rights_and_duplicate_payload_fail_closed() -> None:
         registry=InMemoryCandidateRegistry(),
         embedder=lambda texts: [[0.0] * 1_024 for _ in texts],
     )
-    with pytest.raises(IngestionRejected, match="no explicit rights"):
+    with pytest.raises(IngestionRejected, match="no explicit source-governance"):
         missing.ingest(
             source(),
             governance=governance(),
@@ -242,9 +340,7 @@ def test_missing_rights_and_duplicate_payload_fail_closed() -> None:
 
 
 def test_regulatory_governance_requires_jurisdiction_and_effective_date() -> None:
-    instance, _, _ = pipeline(
-        rights(source_class=SourceClass.T1_REGULATORY)
-    )
+    instance, _, _ = pipeline(rights(source_class=SourceClass.T1_REGULATORY))
     with pytest.raises(IngestionRejected, match="jurisdiction"):
         instance.ingest(
             source(),

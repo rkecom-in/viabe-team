@@ -487,9 +487,11 @@ def main(argv: list[str] | None = None) -> int:
     xpassed = sum(1 for r in result.results if r.label == "XPASS")
     failed = sum(1 for r in result.results if r.label == "FAIL")
     timed_out = sum(1 for r in result.results if r.label == "TIMEOUT")
+    indeterminate = sum(1 for r in result.results if r.label == "INDETERMINATE")
     print(
         f"\n=== summary: {len(result.phases)} phase(s), {passed} PASS, {xfailed} XFAIL, "
-        f"{xpassed} XPASS, {failed} FAIL, {timed_out} TIMEOUT ==="
+        f"{xpassed} XPASS, {failed} FAIL, {timed_out} TIMEOUT, "
+        f"{indeterminate} INDETERMINATE ==="
     )
     for pr in result.phases:
         if pr.db_assert_failures:

@@ -432,3 +432,64 @@ export async function fetchHistoricalSteps(
   }
   return { rows: rows as PipelineStepRow[], nextCursor }
 }
+
+
+// ---------------------------------------------------------------------------
+// VT-733 slice A — cost console reads.
+// ---------------------------------------------------------------------------
+// Aggregation happens in Postgres (mig 192 RPCs), not here: a per-tenant × agent × model rollup is
+// a GROUP BY, and pulling raw ledger rows into Node to sum them would move both the cost and the
+// PII surface for no gain. Same reason fetchTopTenants uses an RPC.
+
+export interface TenantCostRow {
+  tenant_id: string
+  business_name: string | null
+  agent: string
+  model: string
+  calls: number
+  tokens_in: number
+  tokens_out: number
+  cost_usd: number
+  search_cost_usd: number
+}
+
+export interface TenantCapStatusRow {
+  tenant_id: string
+  business_name: string | null
+  spend_today_usd: number
+  spend_month_usd: number
+  /** null = NO ceiling configured. Render as "no cap", never as 0% used. */
+  max_cost_usd_day: number | null
+  max_cost_usd_month: number | null
+  soft_pct: number | null
+  caps_enabled: boolean
+  cap_state: 'none' | 'ok' | 'soft' | 'hard'
+}
+
+/**
+ * Per-tenant spend since `since`, broken out by agent and model.
+ *
+ * `tenantIds` MUST come from scopeCostTenantFilter (derived from the operator's own assignment),
+ * never from a client parameter — the Ops-mutation IDOR pattern. `null` means every tenant and is
+ * only ever produced for VTAdmin/Fazal.
+ */
+export async function fetchTenantCostSummary(
+  since: Date,
+  tenantIds: string[] | null,
+): Promise<TenantCostRow[]> {
+  const client = serverSecretClient()
+  const { data } = await client.rpc('ops_tenant_cost_summary', {
+    p_since: since.toISOString(),
+    p_tenant_ids: tenantIds,
+  })
+  return ((data as TenantCostRow[]) ?? [])
+}
+
+/** Per-tenant spend vs cap over the cap's OWN window, with the honest 'none' state. */
+export async function fetchTenantCapStatus(
+  tenantIds: string[] | null,
+): Promise<TenantCapStatusRow[]> {
+  const client = serverSecretClient()
+  const { data } = await client.rpc('ops_tenant_cap_status', { p_tenant_ids: tenantIds })
+  return ((data as TenantCapStatusRow[]) ?? [])
+}

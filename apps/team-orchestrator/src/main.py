@@ -34,6 +34,13 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     # mirrors VT-362's EXPECTED_ENV signal; dev/CI is a no-op.
     assert_prod_safe_flags()
 
+    # VT-731 boot conformance: log the RESOLVED model id per tier, and on a deployed env
+    # (EXPECTED_ENV set) refuse to boot when a tier var is unset. A missing var silently
+    # choosing a different vendor is the loose-wiring class again — inert-looking, not inert.
+    from orchestrator.llm.provider import assert_tier_vars_configured
+
+    assert_tier_vars_configured()
+
     # VT-179 boot hook (CL-419 / VT-179 fix-1): validate the typed-envelope
     # registry covers every step_kind=<literal> in source. Fail-fast at
     # FastAPI startup — second guard alongside dbos_config.launch_dbos's

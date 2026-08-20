@@ -20,8 +20,29 @@ the 24h conversation session (queued, idle-paced — VT-683). CC maintains this 
 | Template | Languages / SIDs | Purpose |
 |---|---|---|
 | **auth OTP** | Twilio Verify (no content SID) | login/verification |
-| **`team_welcome4`** | en `HXc8188616…` · hi `HXd8a8d5…` · hing `HX7097590ccf0e901d893f78d9a9224e92` (Meta approval pending) | account-created + Complete Setup button |
-| **`team_wakeup2`** | en `HXaedb9a8bff0163bd4c162c90cd05bc45` · hi `HXb2dd5579ea46c2715397f2e274ec533c` · hing `HXd2bfed18f25eb8c2319ccca9b22f5d35` — **Meta APPROVED 2026-07-18** (Fazal-confirmed; category verify pending CC ask) | daily wake-up v2 — "{{2}} item(s) waiting for your review" + Review button; opens the session + drains the queue (VT-683 P3). Vars: owner_name, pending_count |
+| **`team_welcome4`** | en `HXc8188616…` · hi `HXd8a8d5…` · hing `HX7097590ccf0e901d893f78d9a9224e92` — **ALL THREE Meta-APPROVED as UTILITY (Fazal-confirmed 2026-08-09, SIDs re-shared verbatim; matches the registry byte-for-byte)** | account-created + Complete Setup button |
+| **`team_wakeup2`** | en `HXaedb9a8bff0163bd4c162c90cd05bc45` · hi `HXb2dd5579ea46c2715397f2e274ec533c` · hing `HXd2bfed18f25eb8c2319ccca9b22f5d35` — **Meta APPROVED as UTILITY, all three langs (Fazal-confirmed 2026-07-18; CATEGORY confirmed UTILITY by Fazal 2026-08-09).** The v1 force-conversion worry is answered — v2 held its category. | daily wake-up v2 — "{{2}} item(s) waiting for your review" + Review button; opens the session + drains the queue (VT-683 P3). Vars: owner_name, pending_count |
+
+### ACTIVE — P1.5 LEAD OUTREACH (added 2026-08-20, Meta-APPROVED, verified via Content API)
+
+| Template | Languages / SIDs | Purpose |
+|---|---|---|
+| **`lead_winback`** | en `HXb8d370885bb6e776db79352e81274214` (friendly_name `lead_winback1`) · hi `HX656d289c0401b20dfdecbfa68db864fd` (friendly_name **`lead_winback2`** — the real name Twilio holds, API-confirmed, not a typo) — **APPROVED as MARKETING, both langs** (`ApprovalRequests.whatsapp.status=approved`, fetched 2026-08-20) | re-engage a LEAD who enquired and did not buy. Vars: lead_name, business_name, enquired_about, tracked_token. URL button → `https://viabe.ai/r/{{4}}` (customer-scoped, VT-745 infra — exists) |
+| **`campaign_offer`** | en `HXdc77fa9270891ab5de2fe1e5ba8baea3` · hi `HXb5635a99070444f6c9404ece9c6695d2` — **APPROVED as MARKETING, both langs** | segment offer / MI pre-launch waitlist. Vars: customer_name, business_name, offer_description, valid_until, campaign_token. URL button → `https://viabe.ai/c/{{5}}` |
+
+**`campaign_offer` is APPROVED but NOT SENDABLE — `agent_selectable: false`.** Its button points at
+`/c/{{5}}`, an **aggregate campaign-scoped** destination that does not exist yet (**VT-773**).
+`/r/<token>` cannot substitute: it is customer-bound and redirects to WhatsApp, so reusing it would
+attribute a whole campaign to one person and leak that person into a public destination. Flip
+`agent_selectable` when `/c/` resolves — not before.
+
+**Both are MARKETING and out-of-window by definition** (a lead is not in an open session), and both
+carry the STOP opt-out inside the **approved body** (verified present in all four bodies, English and
+Devanagari). `body_sha256` is pinned per language in `twilio_templates.yaml` from the approved body.
+
+**Approval is not permission.** No send to any lead without a recorded **consent basis** (FIRST-PROOF
+red line 2 / P1.2). **P1.3 — Fazal's written answer on what the Reports funnel captured — governs how
+many leads are contactable at all**, and is still outstanding.
 
 ### UNDER RETIREMENT REVIEW (registered, still have live callers — migrate into the session per VT-683)
 
@@ -80,7 +101,7 @@ This file becomes the contract. Code in `apps/team-orchestrator/` (when wired) r
 
 - **Twilio Content SID (en):** `HXc8188616b2e97b557f4c7330157c4f8f`
 - **Twilio Content SID (hi):** `HXd8a8d5945c79c75d373d9c24edd4b183`
-- **Meta category:** **UTILITY** (created + submitted 2026-07-02 via Content API — `canaries/vt555_welcome4_create.py`; approval ASYNC — `status=received` at submit)
+- **Meta category:** **UTILITY — APPROVED, all three languages.** en + hi verified APPROVED by a REAL Content-API read 2026-07-02 (`status=approved category=UTILITY`, VT-555 drill evidence). **hing confirmed APPROVED UTILITY by Fazal 2026-08-09** (SIDs re-shared verbatim; all three match this registry and `twilio_templates.yaml` byte-for-byte). Original submit 2026-07-02 via `canaries/vt555_welcome4_create.py`.
 - **Content type:** `twilio/quick-reply` — a "Complete Setup" button (id/payload **`COMPLETE_SETUP`**, same both langs)
 - **Variables:** `{{1}}` = owner name ONLY (the `{{2}}` trial-date var was dropped — no trial/free wording)
 - **Copy (en):** `Hi {{1}}, your Viabe account has been created. To complete your setup, tap the button below.`
@@ -88,7 +109,15 @@ This file becomes the contract. Code in `apps/team-orchestrator/` (when wired) r
 - **Button (en/hi):** `Complete Setup` / `सेटअप पूरा करें`
 - **Twilio Content SID (hing / hi-Latn):** `HX7097590ccf0e901d893f78d9a9224e92` — Roman-script
   Hindi registered under Meta language=en (Meta has no hi-Latn code), Fazal-created 2026-07-18
-  (O5). Meta approval ASYNC; hinglish welcome routing flips to it on Fazal's approved-confirm.
+  (O5). **APPROVED UTILITY — Fazal-confirmed 2026-08-09.** The approved-confirm this variant was
+  waiting on has now been given, so the **hinglish welcome routing must flip off the EN fallback**:
+  `owner_locale.template_register()` still hard-codes `'hinglish' → 'en'` with the comment "until
+  the hi-Latn template variants are Meta-approved". That condition is now satisfied for
+  `team_welcome4` (and `team_wakeup2`, which already bypasses `template_register` via its own
+  `_LOCALE_TO_WAKEUP_LANG`). **Constraint on the flip:** the whitelist means only welcome4 +
+  wakeup2 carry a `hing` variant, so the register change MUST resolve per-template with a guarded
+  absent-variant → `en` fallback — never a blanket `hinglish → hing` that would fail-resolve on a
+  template with no hing SID.
 - **TEMPLATE-WHITELIST RULING (Fazal 2026-07-18):** owner-facing template surface is MINIMAL —
   auth OTP (Twilio-handled) + welcome + wake-up/re-engage ONLY. All other owner comms ride the
   24h conversation session (owner replies daily → session opens → queued comms deliver at idle

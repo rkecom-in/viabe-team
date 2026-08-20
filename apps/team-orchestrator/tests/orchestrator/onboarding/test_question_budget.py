@@ -32,7 +32,9 @@ def test_budget_debits_answered_residuals() -> None:
         answered=["primary_service_category", "typical_customer_type", "peak_season_or_demand"],
         llm_fn=_gaps("operating_hours", "team_size"),
     )
-    assert [q for q in qs if q.kind == "gap"] == [], "the live 'last one then more' defect"
+    # VT-724 (Fazal D6 override): the ONE budget-exempt owner_email compliance capture may
+    # remain after the profile budget is spent — profile interrogation stays capped.
+    assert [q.field for q in qs if q.kind == "gap"] in ([], ["owner_email"]), "the live 'last one then more' defect"
 
 
 def test_budget_ignores_identity_and_confirm_answers() -> None:
@@ -51,7 +53,7 @@ def test_budget_partial_spend_leaves_remainder() -> None:
         "services", _DRAFT, answered=["primary_service_category", "web_presence"],
         llm_fn=_gaps("operating_hours", "team_size", "price_range"),
     )
-    assert sum(q.kind == "gap" for q in qs) <= 1, "2 of 3 spent → at most 1 residual left"
+    assert sum(q.kind == "gap" and q.field != "owner_email" for q in qs) <= 1, "2 of 3 spent → at most 1 residual left"
 
 
 def test_zero_budget_skips_the_gap_llm() -> None:
@@ -76,7 +78,7 @@ def test_web_presence_leads_and_consumes_budget() -> None:
     qs = compose_onboarding_questions("services", _DRAFT, answered=[], llm_fn=_gaps("operating_hours"))
     gap_fields = [q.field for q in qs if q.kind == "gap"]
     assert gap_fields[0] == "web_presence", "the highest-value capture asks first"
-    assert len(gap_fields) <= 3
+    assert len([f for f in gap_fields if f != "owner_email"]) <= 3
     web = next(q for q in qs if q.field == "web_presence")
     assert web.suggestions_en == ("No website",)
 

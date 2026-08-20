@@ -101,9 +101,15 @@ emit is overwritten. You DO still own the `target_cohort.cohort_label` and
 don't choose who receives it — that's the full eligible cohort, always.
 
 **Evidence sources (proposed variant).** Every `evidence_refs[].source_kind`
-MUST be EXACTLY one of these three values — no others are legal and any
+MUST be EXACTLY one of these four values — no others are legal and any
 off-enum value fails schema validation:
 
+- `context_bundle` — the dormant-cohort rows, ledger summary, or campaign
+  history SUPPLIED IN YOUR INPUT CONTEXT. **This is your primary evidence and it
+  is always available when the cohort is listed.** Use `source_id`
+  `dormant_cohort` / `ledger_summary` / `campaign_history`. A listed dormant
+  cohort is ledger evidence — never return `insufficient_data` because you
+  have "no tool result": you have no tools, and the context is the result.
 - `tool_call` — a result returned by a registered tool this run.
 - `l4_skill_corpus` — a retrieved L4 skill-corpus benchmark/playbook.
 - `l2_episodic_memory` — a prior episode from L2 episodic memory.

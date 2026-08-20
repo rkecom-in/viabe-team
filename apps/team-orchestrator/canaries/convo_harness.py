@@ -59,6 +59,10 @@ VT-598 additions (the P3 exhaustive validation pack + hard-asserts confirmation 
     (substantively) JUST the D1 completed-no-reply fallback line — see ``is_d1_fallback_only``.
   - ``--json-report PATH`` on ``script``: appends a machine-readable transcript bundle (one entry
     per scenario run) to PATH, for ``canaries/transcript_judge.py`` to rubric-score.
+  - ``assert_is_question`` (VT-759, per-step flag, default False): fails when the assistant reply
+    asks the owner nothing (no '?' in the text). The language-agnostic way to assert a SPEECH ACT —
+    a re-confirm, a hand-back — where the alternative was an English literal that could only pass
+    when a code-mixed reply happened to drift English.
   - ``assert_run_reason`` / ``assert_run_reason_not`` (per-step flags, optional str): INVESTIGATED
     and found NOT SUPPORTED — see ``evaluate_assertions`` docstring. Wired as an explicit, always-
     failing assertion (never a silent no-op) so a scenario that sets either flag fails LOUDLY
@@ -156,7 +160,11 @@ class Turn:
 class StepResult:
     ok: bool
     xfail: bool  # a failure that was EXPECTED (a known, marked gap) — green for the exit code
-    label: str  # PASS | FAIL | XFAIL | XPASS
+    # PASS | FAIL | XFAIL | XPASS | TIMEOUT | INDETERMINATE. INDETERMINATE (VT-753) is neither a pass
+    # nor a failure: the turn's async work was still producing when the settle ceiling fired, so no
+    # DB-state verdict was reachable. It carries ok=False (an unmeasured step is not green) but must be
+    # bucketed apart from FAIL in every report — folding it into a miss rate is the bug VT-753 fixed.
+    label: str
     reasons: list[str]
     transcript: list[Turn]
     run_status: str | None
@@ -224,6 +232,7 @@ def evaluate_assertions(
     assert_contains: list[str] | None = None,
     assert_not_contains: list[str] | None = None,
     assert_not_d1: bool = False,
+    assert_is_question: bool = False,
     assert_run_reason: str | None = None,
     assert_run_reason_not: str | None = None,
 ) -> list[str]:
@@ -264,6 +273,26 @@ def evaluate_assertions(
         failures.append(
             "assert_not_d1: reply is (substantively) just the D1 fallback line — no real answer "
             "was given"
+        )
+    if assert_is_question and "?" not in text and "？" not in text:
+        # VT-759 — the SPEECH ACT, asserted structurally instead of by vocabulary.
+        #
+        # The scenario that needed this asserted `assert_contains: ['sure']` to pin a re-confirm
+        # question ("are you sure you want this sent?"). That literal can only pass when the Manager
+        # happens to answer in English: these conversations are code-mixed on purpose (CL-443), so
+        # the assert was deciding on WHICH LANGUAGE the reply drifted into, not on what it did.
+        #
+        # A synonym list is not the fix — the standing no-lists rule is explicit that natural-language
+        # phrasing is infinite and enumerating it is the wrong shape. "Did the turn ASK something?" is
+        # finite, structural and language-agnostic: '?' is the same character in English, Hinglish and
+        # Devanagari (U+FF1F is the full-width form some IMEs emit).
+        #
+        # This is narrower than "asked the RIGHT question" on purpose. The rest of the requirement is
+        # already carried by observables that cannot drift with vocabulary: assert_not_contains for the
+        # false-send claim, and expect_sent_count for the send itself.
+        failures.append(
+            "assert_is_question: the reply asks the owner NOTHING — it neither re-confirms nor "
+            "hands the decision back (no '?' anywhere in the assistant text)"
         )
     if assert_run_reason is not None:
         failures.append(
@@ -539,7 +568,9 @@ def assert_route(
         want = "delegation to Sales-Recovery" if expect_sr_delegation else "NO delegation"
         return [
             f"assert_route: expected {want} this turn, observed route={route!r} "
-            f"(campaigns row {'exists' if delegated else 'absent'})"
+            f"(campaigns row {'exists' if delegated else 'absent'}) — NOTE: route here is a PROXY, "
+            f"campaigns-row existence joined to this turn, not a recorded route column (VT-753 "
+            f"scope 3). Read it as 'a Sales-Recovery campaign was/wasn't attributable to this turn'."
         ]
     return []
 
@@ -608,26 +639,55 @@ def assert_side_effects(
                 )
 
     if expect_sent_count is not None or expect_sent_count_at_least is not None:
-        n = 0
-        if campaign_id is not None:
-            row = conn.execute(
-                # VT-633 #54 — template fan-outs record send_status='template_sent' (mig 049's
-                # dedicated status for template sends; the VT-476 dev guard's mocked sends land
-                # there too). Counting only 'sent' made a fully-successful campaign read as 0.
-                "SELECT count(*) FROM campaign_messages WHERE tenant_id = %s "
-                "AND send_status IN ('sent', 'template_sent') AND idempotency_key LIKE %s",
-                (tenant_id, f"{campaign_id}:%"),
-            ).fetchone()
-            n = int(row[0] if not isinstance(row, dict) else row["count"])
+        # VT-758 — A SAFETY ASSERT MUST QUERY. ALWAYS.
+        #
+        # This used to read `n = 0` and only count `if campaign_id is not None`. So when no campaign
+        # was attributable to the turn, `expect_sent_count: 0` held TRIVIALLY — the no-send safety
+        # line reported PASS without ever touching the database, and a vacuous pass is
+        # indistinguishable from a real one in the report. Measured in gate (d): 1 of 10 scenarios
+        # declaring `expect_sent_count: 0` passed that way, and it was `sr_l1_draft_only_no_autosend`
+        # — i.e. the vacuous pass landed on the run where the upstream work had ALREADY failed, which
+        # is exactly the run where an unexpected send would be least expected and most damaging.
+        #
+        # Now: campaign-scoped when a campaign is attributable (the precise question), TENANT-WIDE
+        # otherwise (the safe question). "I could not find a campaign" must never satisfy "nothing was
+        # sent" — those are different claims, and only one of them is about safety.
+        #
+        # The tenant-wide fallback is time-fenced to the tenant's own lifetime for the same reason
+        # `_campaign_id_for_run` fences its tenant-wide branch (VT-682): `--dirty` seeds accumulated
+        # residue BACKDATED ~14d before the tenant row, and counting that as "this turn sent" would
+        # trade a false pass for a false failure.
+        row = conn.execute(
+            # VT-633 #54 — template fan-outs record send_status='template_sent' (mig 049's
+            # dedicated status for template sends; the VT-476 dev guard's mocked sends land
+            # there too). Counting only 'sent' made a fully-successful campaign read as 0.
+            "SELECT count(*) FROM campaign_messages WHERE tenant_id = %s "
+            "AND send_status IN ('sent', 'template_sent') "
+            + (
+                "AND idempotency_key LIKE %s"
+                if campaign_id is not None
+                else "AND created_at >= (SELECT created_at FROM tenants WHERE id = %s)"
+            ),
+            (tenant_id, f"{campaign_id}:%" if campaign_id is not None else tenant_id),
+        ).fetchone()
+        n = int(row[0] if not isinstance(row, dict) else row["count"])
+        # VT-758: name the scope in the failure text. "found 0" is a different claim when it means
+        # "this campaign sent nothing" than when it means "this tenant sent nothing since setup", and
+        # a reader triaging a money-path failure needs to know which one they are looking at.
+        _scope = (
+            f"campaign-scoped to {campaign_id}"
+            if campaign_id is not None
+            else "TENANT-WIDE (no campaign attributable to this turn)"
+        )
         if expect_sent_count is not None and n != expect_sent_count:
             failures.append(
                 f"assert_side_effects: expected {expect_sent_count} sent campaign_messages, "
-                f"found {n}"
+                f"found {n} [{_scope}]"
             )
         if expect_sent_count_at_least is not None and n < expect_sent_count_at_least:
             failures.append(
                 f"assert_side_effects: expected >= {expect_sent_count_at_least} sent "
-                f"campaign_messages, found {n}"
+                f"campaign_messages, found {n} [{_scope}]"
             )
     return failures
 
@@ -1523,7 +1583,12 @@ def cmd_setup(args: argparse.Namespace) -> int:
                 "(tenant_id, waba_id, phone_number_id, phone_number, display_name, status) "
                 "VALUES (%s, 'harness-waba', 'harness-pnid', %s, %s, 'live') "
                 "ON CONFLICT (tenant_id) DO UPDATE SET status = 'live'",
-                (tenant_id, f"+1555{tenant_id[:7].replace('-', '')}", name),
+                # VT-742: this number is now a REAL sender — resolve_sender reads it and the
+                # transport asserts E.164 on `from_`. The old `+1555{tenant_id[:7]}` form carried
+                # the uuid's hex letters (`+1555470fea5`), which is not E.164, so every harness
+                # customer send would fail closed. Derive DIGITS from the same uuid prefix so the
+                # number stays stable per tenant and unique enough for mig 207's live-phone UNIQUE.
+                (tenant_id, f"+1555{int(tenant_id[:8], 16) % 10**9:09d}", name),
             )
             if args.flow:
                 # VT-582 calibration fix — arm the __flow__ sentinel (_maybe_handle_post_profile_flow)
@@ -1680,9 +1745,32 @@ def _evaluate_db_asserts(
     return failures
 
 
-# VT-633 async-settle budgets (see run_scenario_steps): the enforce loop's out-of-band beats are
-# arm-wait ≤96s + reaction poll ≤15s + the fan-out — 150s covers the chain with headroom.
-_DB_ASSERT_SETTLE_S = 150.0
+# VT-753 — SETTLE TO TERMINAL, NOT TO A CLOCK.
+#
+# The VT-633 budget here was 150s, justified as "arm-wait ≤96s + reaction poll ≤15s + the fan-out,
+# with headroom". MEASURED on deployed dev 2026-08-14 (VT-752), the same chain takes **382 / 416 /
+# 373s** — the budget was 4x stale, and every deadline in the system was calibrated below the real
+# work: this settle 150s, the step timeout 180s, the product's own in-turn D1 wait ~96s.
+#
+# The consequence was not "some flaky failures". It was a WRONG KIND OF VERDICT: the settle loop
+# expired, `assert_route` read "no campaigns row", and the harness reported
+# `expected delegation ... observed route='none'` — a ROUTING claim derived from a LATENCY fact. In
+# the S1 gate (c) pass-1 re-drive that claim was FALSE for 3 of the 4 scenarios it flagged: all
+# three had a campaigns row minutes later, status=proposed, task waiting_owner, nothing sent. The
+# retracted 24%/33%/40% delegation figures are very likely this artifact.
+#
+# A BUDGET IS THE WRONG PRIMITIVE. It encodes an assumption about latency, and that assumption goes
+# stale silently — the comment above claimed headroom right up until it was 4x short. So the loop
+# now polls the WORK, not the clock: it keeps settling while this turn's manager_task is still
+# PRODUCING, and stops the moment the task reaches terminal. The ceiling below is a HANG-STOP only,
+# deliberately far above the measured chain, and reaching it reports INDETERMINATE — never a routing
+# failure. An unmeasured run must look unmeasured, not clean and not broken.
+_DB_ASSERT_SETTLE_CEILING_S = 900.0
+# How long "no manager_task exists for this turn yet" still counts as in-flight. dispatch_brain
+# spawns the task out-of-band, so a zero-task read immediately after the turn means "not spawned
+# yet", not "will never spawn". Past this, a still-taskless turn is genuinely not delegating and the
+# assert may decide.
+_DB_ASSERT_SPAWN_GRACE_S = 90.0
 _DB_ASSERT_SETTLE_POLL_S = 5.0
 _LATE_REPLY_SWEEP_CAP_S = 120.0
 _LATE_REPLY_SWEEP_POLL_S = 10.0
@@ -1696,6 +1784,109 @@ _LATE_REPLY_SWEEP_POLL_S = 10.0
 # 'planned' (triage_seam) and runs planned->running->emit->waiting_owner, so the draft is always captured.
 # Inlined (not imported from the dbos-heavy task_store) to keep the harness import light.
 _PRODUCING_TASK_STATUSES = ("planned", "running", "verifying")
+
+
+def _turn_work_in_flight(
+    dsn: str, tenant_id: str, turn_sid: str | None, *, spawn_grace_left: bool
+) -> bool:
+    """VT-753 — is the async work THIS turn kicked off still producing?
+
+    Scoped to the turn via ``manager_tasks.source_message_ref`` (the plan_store spawn stamp — the
+    same key ``_campaign_id_for_run`` follows), with a tenant-wide fallback for turns that carry no
+    sid (unit fakes, tenant-wide asserts). ``spawn_grace_left`` covers the window before
+    dispatch_brain has spawned anything: zero tasks then means "not yet", not "never".
+
+    FAIL-SOFT DIRECTION IS THE WHOLE POINT, and it is the OPPOSITE of
+    ``_tenant_has_producing_task``. That one returns False on error because the late-reply sweep just
+    loses a no-op. Here, False means "the work is done, so the assert may now declare a routing
+    verdict" — so a probe error that returned False would manufacture exactly the false routing
+    verdict VT-753 exists to stop. On any error this returns True: the settle keeps waiting, and the
+    worst case is the ceiling firing and the step reporting INDETERMINATE. Unmeasured, never wrong.
+    """
+    try:
+        with _connect(dsn) as conn:
+            _set_operator_claim(conn)
+            if turn_sid is not None:
+                producing = conn.execute(
+                    "SELECT 1 FROM manager_tasks WHERE tenant_id = %s AND source_message_ref = %s "
+                    "AND status = ANY(%s) LIMIT 1",
+                    (str(tenant_id), turn_sid, list(_PRODUCING_TASK_STATUSES)),
+                ).fetchone()
+                if producing is not None:
+                    return True
+                any_task = conn.execute(
+                    "SELECT 1 FROM manager_tasks WHERE tenant_id = %s AND source_message_ref = %s "
+                    "LIMIT 1",
+                    (str(tenant_id), turn_sid),
+                ).fetchone()
+                # A task exists and is not producing => terminal. Decide now.
+                if any_task is not None:
+                    return False
+                # No task for this turn at all: in-flight only while the spawn grace holds.
+                return spawn_grace_left
+            row = conn.execute(
+                "SELECT 1 FROM manager_tasks WHERE tenant_id = %s AND status = ANY(%s) LIMIT 1",
+                (str(tenant_id), list(_PRODUCING_TASK_STATUSES)),
+            ).fetchone()
+            return row is not None or spawn_grace_left
+    except Exception:  # noqa: BLE001 — see docstring: errors settle toward WAITING, never toward a verdict
+        return True
+
+
+def _settle_db_asserts(
+    dsn: str,
+    tenant_id: str,
+    run_id: str | None,
+    step: dict[str, Any],
+    *,
+    turn_sid: str | None,
+    db_failures: list[str],
+) -> tuple[list[str], str]:
+    """Re-poll failing DB asserts until the turn's async work reaches TERMINAL. VT-753.
+
+    Returns ``(remaining_failures, settle_state)`` where ``settle_state`` is:
+
+    - ``"settled"``  — the asserts came good while polling. Ordinary PASS.
+    - ``"terminal"`` — the work finished and the asserts STILL fail. This is a real verdict: the
+      product had its chance and did not do the thing.
+    - ``"indeterminate"`` — the ceiling fired with work STILL producing. NOT a verdict. The caller
+      must bucket this apart from both clean and failing (gate (b)).
+    """
+    started = time.time()
+    ceiling = started + _DB_ASSERT_SETTLE_CEILING_S
+    # VT-753 — the settle's scope must MATCH THE ASSERT'S scope. A `tenant_wide: true` assert can be
+    # satisfied by work on ANY task (that is the whole point of the flag: a campaign INSERTed on turn
+    # N's run, checked on turn N+1), so waiting only on THIS turn's task could stop while the work that
+    # would satisfy the assert is still running under another key. Observed on
+    # sr_always_confirm_first_contact_floor, whose step-0 asserts are all tenant_wide.
+    probe_sid = (
+        None
+        if any(
+            isinstance(step.get(k), dict) and step[k].get("tenant_wide")
+            for k in ("assert_route", "assert_side_effects", "assert_grounded_count")
+        )
+        else turn_sid
+    )
+    while db_failures and time.time() < ceiling:
+        in_flight = _turn_work_in_flight(
+            dsn,
+            tenant_id,
+            probe_sid,
+            spawn_grace_left=(time.time() - started) < _DB_ASSERT_SPAWN_GRACE_S,
+        )
+        if not in_flight:
+            # Close the race between the status flip and the row write: the task can reach terminal
+            # in the same instant its campaign INSERT commits, and reading only at the top of the
+            # loop would call that a failure one poll too early.
+            return (
+                _evaluate_db_asserts(dsn, tenant_id, run_id, step, turn_sid=turn_sid),
+                "terminal",
+            )
+        time.sleep(_DB_ASSERT_SETTLE_POLL_S)
+        db_failures = _evaluate_db_asserts(dsn, tenant_id, run_id, step, turn_sid=turn_sid)
+    if not db_failures:
+        return db_failures, "settled"
+    return db_failures, "indeterminate"
 
 
 def _tenant_has_producing_task(dsn: str, tenant_id: str) -> bool:
@@ -1810,6 +2001,7 @@ def run_scenario_steps(
                 assert_contains=step.get("assert_contains"),
                 assert_not_contains=step.get("assert_not_contains"),
                 assert_not_d1=bool(step.get("assert_not_d1", False)),
+                assert_is_question=bool(step.get("assert_is_question", False)),
                 assert_run_reason=step.get("assert_run_reason"),
                 assert_run_reason_not=step.get("assert_run_reason_not"),
             )
@@ -1825,15 +2017,57 @@ def run_scenario_steps(
             # side-effect assert that fails on the first read re-polls until it settles or the
             # budget runs out — a genuinely-failing assert still fails, just honestly late.
             # Gated on the step DECLARING side-effect asserts: text-only steps pay nothing.
-            if db_failures and (step.get("assert_side_effects") or step.get("assert_grounded_count")):
-                _settle_deadline = time.time() + _DB_ASSERT_SETTLE_S
-                while db_failures and time.time() < _settle_deadline:
-                    time.sleep(_DB_ASSERT_SETTLE_POLL_S)
-                    db_failures = _evaluate_db_asserts(
-                        dsn, tenant_id, turn.run_id, step, turn_sid=turn.message_sid
-                    )
+            # VT-738 — `assert_route` belongs in this list and was missing. The route observation is
+            # itself a side-effect read (`_observed_route` returns 'sales_recovery' iff a campaigns
+            # row joins the turn), so an assert_route-only step read the DB once, the instant the
+            # run left 'running', and never re-polled — while SR delegation routinely completes
+            # after the triggering turn's run does. Two gate steps show the shape directly: their
+            # step-0 draft only appears in the step-1 transcript.
+            #
+            # Note what this does NOT fix: a campaign attributed to the PREVIOUS turn's run_id is not
+            # reachable by THIS turn's run-scoped assert, however long it polls
+            # (`routing_db_proof_finance_vs_sr [1/3] step1`) — a longer deadline is not the answer.
+            #
+            # CORRECTED 2026-08-15: this comment used to say such a campaign "will NEVER satisfy this
+            # turn's assert", and gate (d) falsified that — the same scenario FAILED in pass 1 and
+            # PASSED in pass 2 on an identical build. The reason is the VT-683 P2d keying two branches
+            # up: a run-scoped lookup ALSO resolves via `manager_tasks.source_message_ref = <this
+            # turn's sid>` -> the task's `awaiting_approval_run_id`. So it passes when the drafting task
+            # is keyed to THIS turn's sid and fails when it is keyed to the previous turn's — which
+            # depends on which message spawned the task, i.e. on TIMING, not on impossibility.
+            #
+            # Keep the operational conclusion (a longer deadline does not fix it) and drop the
+            # certainty: "never" was asserted from a single observation, which is exactly the kind of
+            # claim a x3 run exists to test.
+            #
+            # VT-753 — the settle no longer expires on a clock (see _DB_ASSERT_SETTLE_CEILING_S). It
+            # polls until this turn's manager_task reaches terminal, and a ceiling hit reports
+            # INDETERMINATE instead of inventing a routing failure.
+            settle_state = "settled"
+            if db_failures and (
+                step.get("assert_side_effects")
+                or step.get("assert_grounded_count")
+                or step.get("assert_route")
+            ):
+                db_failures, settle_state = _settle_db_asserts(
+                    dsn, tenant_id, turn.run_id, step,
+                    turn_sid=turn.message_sid, db_failures=db_failures,
+                )
             failures = failures + db_failures
-            ok, xfail, label = classify_step(failures, expected_fail=step_xfail)
+            if db_failures and settle_state == "indeterminate":
+                # NOT a verdict, so it must not be classified as one — not FAIL, and not XFAIL
+                # either (a marked gap cannot be confirmed reproduced by an unfinished run). ok=False
+                # keeps an unmeasured step out of the green count; the distinct label keeps it out of
+                # the miss rate. This is VT-753 gate (b).
+                failures = [
+                    f"INDETERMINATE: the async work for this turn was still producing when the "
+                    f"{_DB_ASSERT_SETTLE_CEILING_S:.0f}s settle ceiling fired, so these DB asserts "
+                    f"never got a terminal state to judge — this is NOT a routing or side-effect "
+                    f"verdict, it is an unmeasured step. Bucket it apart from clean and from failing."
+                ] + failures
+                ok, xfail, label = False, False, "INDETERMINATE"
+            else:
+                ok, xfail, label = classify_step(failures, expected_fail=step_xfail)
 
         if verbose:
             print(f"\n  [step {i}] {label}  (run_status={turn.run_status}, reason={turn.ingress_reason})")
@@ -1884,6 +2118,7 @@ def run_scenario_steps(
                 # confirmation is the loop's outcome report, which the sweep just recovered).
                 if _r.label != "FAIL" or not (
                     _step.get("assert_contains") or _step.get("assert_not_d1")
+                    or _step.get("assert_is_question")
                     or any(f.startswith("assert_no_silent") for f in _r.reasons)
                 ):
                     continue
@@ -1894,6 +2129,7 @@ def run_scenario_steps(
                     assert_contains=_step.get("assert_contains"),
                     assert_not_contains=_step.get("assert_not_contains"),
                     assert_not_d1=bool(_step.get("assert_not_d1", False)),
+                    assert_is_question=bool(_step.get("assert_is_question", False)),
                     assert_run_reason=_step.get("assert_run_reason"),
                     assert_run_reason_not=_step.get("assert_run_reason_not"),
                 )
@@ -1973,10 +2209,15 @@ def cmd_script(args: argparse.Namespace) -> int:
     xpassed = sum(1 for r in results if r.label == "XPASS")
     failed = sum(1 for r in results if r.label == "FAIL")
     timed_out = sum(1 for r in results if r.label == "TIMEOUT")
+    indeterminate = sum(1 for r in results if r.label == "INDETERMINATE")
     print(f"\n=== summary: {passed} PASS, {xfailed} XFAIL (known gap), {xpassed} XPASS, {failed} FAIL, "
-          f"{timed_out} TIMEOUT ===")
+          f"{timed_out} TIMEOUT, {indeterminate} INDETERMINATE ===")
     if xpassed:
         print("    note: XPASS = a marked-gap step unexpectedly passed — the gap may have closed; re-check the mark.")
+    if indeterminate:
+        print("    note: INDETERMINATE (VT-753) = the turn's async work was STILL PRODUCING when the "
+              "settle ceiling fired. Not a routing/side-effect verdict and not a pass — an UNMEASURED "
+              "step. Never fold these into a miss rate; report the bucket.")
     if timed_out:
         print("    note: TIMEOUT = the run hadn't completed within --timeout — NOT a silent drop; re-run "
               "with a larger --timeout before treating this as a regression.")
@@ -2154,14 +2395,14 @@ def build_parser() -> argparse.ArgumentParser:
     se.add_argument("tenant_id")
     se.add_argument("message")
     se.add_argument("--ingress-url", default=None, help="deployed dev orchestrator base URL")
-    se.add_argument("--timeout", type=float, default=90.0, help="per-turn run-completion timeout (s)")
+    se.add_argument("--timeout", type=float, default=180.0, help="per-turn run-completion timeout (s) — must exceed runner._D1_INTURN_WAIT (~96s) or a slow-task turn reads as TIMEOUT by construction")
     se.set_defaults(func=cmd_send)
 
     sc = sub.add_parser("script", help="run an ordered scenario file with per-step assertions")
     sc.add_argument("tenant_id")
     sc.add_argument("file")
     sc.add_argument("--ingress-url", default=None, help="deployed dev orchestrator base URL")
-    sc.add_argument("--timeout", type=float, default=90.0, help="per-turn run-completion timeout (s)")
+    sc.add_argument("--timeout", type=float, default=180.0, help="per-turn run-completion timeout (s) — must exceed runner._D1_INTURN_WAIT (~96s) or a slow-task turn reads as TIMEOUT by construction")
     sc.add_argument(
         "--json-report", default=None, metavar="PATH",
         help="VT-598: append this scenario's machine-readable transcript bundle (FULL multi-line "

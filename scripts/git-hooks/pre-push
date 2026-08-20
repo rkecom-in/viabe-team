@@ -197,8 +197,14 @@ if [ "$ORCH_CHANGED" = 1 ] && [ "${VIABE_PREPUSH_SKIP_DB:-0}" != 1 ]; then
     # flake (test_dbos_auto_resumes_after_sigkill) — a flaky test must not gate
     # every push; CI still runs it (Cowork ruling VT-260).
     say "  migrations job"
+    # --isolated for the SAME reason VT-337 added it to the smoke above: without it a LOCAL run
+    # resolves heavy deps (langgraph/anthropic/psycopg) from the uv CACHE, so a test that imports
+    # one passes here and fails on CI's clean runner — which installs only psycopg + pytest for this
+    # job. That is exactly how a VT-723 test importing `registry_seed` passed the hook twice and
+    # then failed CI with `ModuleNotFoundError: langgraph`. CI needs no flag because its runner has
+    # no cache; local does.
     ( cd apps/team-orchestrator \
-      && DATABASE_URL="$DBURL" uv run --no-project --with 'psycopg[binary]' --with pytest \
+      && DATABASE_URL="$DBURL" uv run --no-project --isolated --with 'psycopg[binary]' --with pytest \
          pytest tests/test_migrations.py -q ) \
       || { err "migrations job (pre-push DB coverage)"; FAIL=1; }
     say "  orchestrator job (-k 'not sigkill')"

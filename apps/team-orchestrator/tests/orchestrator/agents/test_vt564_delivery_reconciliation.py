@@ -259,7 +259,14 @@ def test_delivered_callback_records_no_alert(substrate, monkeypatch):  # type: i
 
 
 @requires_db
-def test_read_callback_maps_to_delivered(substrate, monkeypatch):  # type: ignore[no-untyped-def]
+def test_read_callback_records_read_not_delivered(substrate, monkeypatch):  # type: ignore[no-untyped-def]
+    """VT-741: 'read' is its OWN state now (mig 200), no longer folded into 'delivered'.
+
+    This test previously asserted the opposite. That was correct under VT-564, where the CHECK
+    admitted only ('delivered','failed','undelivered') and collapsing read was the honest thing to
+    do with a value the column could not hold. Fazal's ratified frequency rule (2026-08-10) gives
+    the read signal a job — Tier B keys on "read or clicked or replied" — so the column was widened
+    and the collapse removed. The old behaviour is not being 'fixed'; its premise expired."""
     _spy_dispatch(monkeypatch)
     tenant = _seed_tenant(substrate.dsn)
     customer = _seed_customer(substrate.dsn, tenant)
@@ -268,8 +275,51 @@ def test_read_callback_maps_to_delivered(substrate, monkeypatch):  # type: ignor
 
     result = customer_send.reconcile_customer_send_delivery(tenant, sid, "read")
 
-    assert result.delivery_status == "delivered"
-    assert _contact_delivery(substrate.dsn, tenant, sid)[0] == "delivered"
+    assert result.delivery_status == "read"
+    assert _contact_delivery(substrate.dsn, tenant, sid)[0] == "read"
+
+
+@requires_db
+def test_delivered_then_read_upgrades_but_read_then_delivered_does_not(substrate, monkeypatch):  # type: ignore[no-untyped-def]
+    """The half that makes the signal reachable at all.
+
+    A real message produces TWO callbacks, delivered then read. The reconcile UPDATE is
+    first-write-wins, so without the explicit delivered->read upgrade the first callback claims the
+    row and every read callback in production silently no-ops — the tier would be fed by a column
+    that never once contained 'read'. The reverse must NOT hold: nothing may downgrade a read."""
+    _spy_dispatch(monkeypatch)
+    tenant = _seed_tenant(substrate.dsn)
+    customer = _seed_customer(substrate.dsn, tenant)
+
+    sid = "SM" + uuid4().hex[:30]
+    _seed_contact(substrate.dsn, tenant, customer, sid)
+    customer_send.reconcile_customer_send_delivery(tenant, sid, "delivered")
+    customer_send.reconcile_customer_send_delivery(tenant, sid, "read")
+    assert _contact_delivery(substrate.dsn, tenant, sid)[0] == "read", "delivered -> read must upgrade"
+
+    other = "SM" + uuid4().hex[:30]
+    _seed_contact(substrate.dsn, tenant, customer, other)
+    customer_send.reconcile_customer_send_delivery(tenant, other, "read")
+    customer_send.reconcile_customer_send_delivery(tenant, other, "delivered")
+    assert _contact_delivery(substrate.dsn, tenant, other)[0] == "read", "read must never downgrade"
+
+
+@requires_db
+def test_a_recorded_failure_is_never_overwritten_by_a_late_positive_callback(substrate, monkeypatch):  # type: ignore[no-untyped-def]
+    """The asymmetry, pinned. Losing a read costs one tier of politeness; letting a late
+    'delivered'/'read' erase a recorded failure would tell us a message landed when it did not."""
+    _spy_dispatch(monkeypatch)
+    tenant = _seed_tenant(substrate.dsn)
+    customer = _seed_customer(substrate.dsn, tenant)
+
+    for late in ("delivered", "read"):
+        sid = "SM" + uuid4().hex[:30]
+        _seed_contact(substrate.dsn, tenant, customer, sid)
+        customer_send.reconcile_customer_send_delivery(tenant, sid, "failed")
+        customer_send.reconcile_customer_send_delivery(tenant, sid, late)
+        assert _contact_delivery(substrate.dsn, tenant, sid)[0] == "failed", (
+            f"a late '{late}' callback must not overwrite a recorded failure"
+        )
 
 
 # --- reconciler: fail-soft + terminal-safety ---------------------------------

@@ -65,8 +65,8 @@ def _new_tenant(dsn: str, *, name: str = "DSR purge test") -> UUID:
             # have real PII to scrub (owner_phone is UNIQUE-indexed → keep it
             # unique per tenant; locality + owner_contact carry subject PII).
             "INSERT INTO tenants (business_name, plan_tier, phase, "
-            "whatsapp_number, owner_phone, owner_contact, locality) "
-            "VALUES (%s, 'founding', 'paid_active', %s, %s, %s, %s) "
+            "whatsapp_number, owner_phone, owner_contact, locality, owner_email) "
+            "VALUES (%s, 'founding', 'paid_active', %s, %s, %s, %s, %s) "
             "RETURNING id",
             (
                 name,
@@ -74,6 +74,7 @@ def _new_tenant(dsn: str, *, name: str = "DSR purge test") -> UUID:
                 f"+9188{uuid4().int % 10**8:08d}",
                 "Owner Contact PII",
                 "Andheri West",
+                f"owner-{uuid4().hex[:8]}@example.test",  # VT-724: email joins the scrub set
             ),
         ).fetchone()
     assert row is not None
@@ -108,11 +109,16 @@ def _seed_full_tenant_data(dsn: str, tenant_id: UUID) -> dict[str, UUID]:
             "INSERT INTO knowledge_cards "
             "(card_key, version, claim, claim_key, claim_value, distillation_note, "
             " jurisdictions, effective_from, authority, confidence, scope, status, "
-            " retention_class, tainted, default_assignment) "
+            " retention_class, tainted, default_assignment, domain, source_class, usage_rights, "
+            " independence_cluster, provenance) "
             "VALUES (%s, 1, 'DSR assignment test claim', %s, "
             "'{\"value_type\":\"boolean\",\"value\":true}'::jsonb, 'DSR test', "
             "ARRAY['IN'], now(), 'verified_system', 'medium', 'global', 'candidate', "
-            "'lifecycle_managed', true, 'manager_global') RETURNING id",
+            "'lifecycle_managed', true, 'manager_global', 'operations', 't2', "
+            "'{\"status\":\"public_domain\"}'::jsonb, 'cluster:dsr-test', "
+            "'{\"source_ids\":[\"dsr-test\"],\"publisher\":\"DSR test\","
+            "\"retrieved_at\":\"2026-08-03T00:00:00Z\",\"tainted\":true}'::jsonb) "
+            "RETURNING id",
             (str(uuid4()), f"dsr|assignment|{uuid4()}|smb|all"),
         ).fetchone()[0]
         conn.execute(
@@ -417,7 +423,7 @@ def _tenant_row(dsn: str, tenant_id: UUID) -> dict[str, Any] | None:
     with psycopg.connect(dsn, autocommit=True) as conn:
         row = conn.execute(
             "SELECT business_name, whatsapp_number, opt_out, "
-            "owner_phone, owner_contact, locality FROM tenants "
+            "owner_phone, owner_contact, locality, owner_email FROM tenants "
             "WHERE id = %s",
             (str(tenant_id),),
         ).fetchone()
@@ -430,6 +436,7 @@ def _tenant_row(dsn: str, tenant_id: UUID) -> dict[str, Any] | None:
         "owner_phone": row[3],
         "owner_contact": row[4],
         "locality": row[5],
+        "owner_email": row[6],
     }
 
 
@@ -899,8 +906,9 @@ def test_vt160_anonymize_scrubs_all_identifying_columns(substrate):  # type: ign
     seeded_pii = {
         before["business_name"], before["whatsapp_number"],
         before["owner_phone"], before["owner_contact"], before["locality"],
+        before["owner_email"],
     }
-    for col in ("whatsapp_number", "owner_phone", "owner_contact", "locality"):
+    for col in ("whatsapp_number", "owner_phone", "owner_contact", "locality", "owner_email"):
         assert before[col], f"seed planted no PII in {col}"
 
     ticket_id = _open_dsr_ticket(substrate.dsn, tenant_id)
@@ -915,6 +923,7 @@ def test_vt160_anonymize_scrubs_all_identifying_columns(substrate):  # type: ign
     assert after["owner_phone"] is None
     assert after["owner_contact"] is None
     assert after["locality"] is None
+    assert after["owner_email"] is None  # VT-724 — the mig-185 column joins the scrub
     # No original PII survives anywhere on the row (no reversible token).
     surviving = {v for v in after.values() if isinstance(v, str)}
     leaked = (seeded_pii & surviving) - {"[deleted]"}
@@ -946,7 +955,9 @@ def test_vt160_anonymize_set_covers_every_anonymize_constant():
         "UPDATE. Hand-listing columns reintroduces the gap VT-160 closed."
     )
     # The 3 columns VT-160 added must be present in the constant set.
-    for col in ("owner_phone", "owner_contact", "locality"):
+    # VT-724: owner_email (mig 185, added AFTER the anonymize path existed) joins the pin —
+    # an erased tenant keeping their email was the recurring VT-366 class, caught pre-capture.
+    for col in ("owner_phone", "owner_contact", "locality", "owner_email"):
         assert col in dsr_purge._TENANT_ANONYMIZE, (
             f"VT-160: {col} (identifying PII) missing from _TENANT_ANONYMIZE"
         )

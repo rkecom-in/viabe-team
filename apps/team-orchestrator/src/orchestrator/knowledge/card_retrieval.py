@@ -50,6 +50,21 @@ _SOURCE_AUTHORITY = {
     SourceClass.T3_PRACTITIONER: 0.6,
     SourceClass.T4_EXPERIENTIAL: 0.3,
 }
+#: VT-725 — the hybrid weight vector.  ``RetrievalProfile.minimum_score`` is an EMPIRICAL floor
+#: fitted against exactly these weights and the metrics below them (cosine semantic, Jaccard
+#: lexical/entity).  Changing any weight, or any component's metric, moves the whole score scale and
+#: silently invalidates that floor — so `test_o8_floor_calibration.py` pins this vector and fails
+#: with a pointer to the re-derivation procedure rather than letting the floor rot unnoticed.
+SCORE_WEIGHTS: dict[str, float] = {
+    "semantic": 0.38,
+    "lexical": 0.24,
+    "entity": 0.10,
+    "authority": 0.12,
+    "applicability": 0.08,
+    "confidence": 0.05,
+    "recency": 0.03,
+}
+
 _CONFIDENCE = {
     EvidenceConfidence.LOW: 0.25,
     EvidenceConfidence.MEDIUM: 0.5,
@@ -86,10 +101,16 @@ class RetrievalBusinessContext(BaseModel):
 class ScoreComponents:
     semantic: float
     lexical: float
-    entity: float
+    #: VT-725 — ``None`` when the QUERY supplied no entity references at all, so there is nothing
+    #: for a card to match against and the dimension does not exist for this turn.  Scoring that
+    #: 0.0 docked every card equally for a fact about the query.
+    entity: float | None
     authority: float
     applicability: float
-    recency: float
+    #: VT-736 — ``None`` means the dimension does not APPLY to this card (an evergreen claim does
+    #: not age), which is different from 0.0 meaning "stale". The score renormalizes over the
+    #: applicable dimensions rather than folding an inapplicable one in as a zero.
+    recency: float | None
     confidence: float
 
 
@@ -190,7 +211,9 @@ class CardRetrievalEngine:
         effective_budget = min(token_budget or profile.token_budget, profile.token_budget)
         trusted_overrides = assignment_overrides or {}
         objective_tokens = _tokens(objective)
-        entity_tokens = set().union(*(_tokens(value) for value in entity_refs)) if entity_refs else set()
+        entity_tokens = (
+            set().union(*(_tokens(value) for value in entity_refs)) if entity_refs else set()
+        )
 
         scope_or_status_excluded = 0
         applicability_excluded = 0
@@ -208,9 +231,7 @@ class CardRetrievalEngine:
                         "assignment override tenant did not match retrieval context"
                     )
                 assignment = (
-                    override.scope
-                    if override.enabled
-                    else KnowledgeAssignmentScope.DISABLED.value
+                    override.scope if override.enabled else KnowledgeAssignmentScope.DISABLED.value
                 )
 
             # 1-2. Assignment, scope and lifecycle exclusions happen before ranking.
@@ -230,7 +251,6 @@ class CardRetrievalEngine:
                 or (card.status is CardStatus.DISPUTED and not profile.allow_disputed)
                 or (card.expires_at is not None and card.expires_at <= context.as_of)
                 or not card.retrieval_eligible
-                or not card.usage_rights.allows_retrieval
             ):
                 scope_or_status_excluded += 1
                 continue
@@ -245,7 +265,7 @@ class CardRetrievalEngine:
             # contribution outside the card's declared claim domain.
             card_text = f"{card.claim} {card.distillation_note} {card.claim_key.canonical}"
             lexical = _jaccard(objective_tokens, _tokens(card_text))
-            entity = _jaccard(entity_tokens, _tokens(card_text)) if entity_tokens else 0.0
+            entity = _jaccard(entity_tokens, _tokens(card_text)) if entity_tokens else None
             try:
                 card_embedding = card_embeddings[card.card_version_id]
             except KeyError as exc:
@@ -264,15 +284,29 @@ class CardRetrievalEngine:
             applicability_score = max(0.0, 1.0 - 0.15 * len(unknown_dimensions))
             recency = _recency(card, context.as_of)
             confidence = _CONFIDENCE[card.confidence]
-            score = (
-                0.38 * semantic
-                + 0.24 * lexical
-                + 0.10 * entity
-                + 0.12 * authority
-                + 0.08 * applicability_score
-                + 0.03 * recency
-                + 0.05 * confidence
-            )
+            # VT-736 — RENORMALIZE over the dimensions that actually apply. A component that is
+            # INAPPLICABLE (recency on an evergreen claim: `None`) is dropped along with its weight
+            # and the remainder is rescaled, rather than being folded in as a 0.0 that silently
+            # docks the card. Scoring "this dimension does not exist here" the same as "this
+            # dimension scores badly" is what put an entire curated corpus under the 0.62 bar.
+            # When nothing is inapplicable the weights sum to 1.0 and this is arithmetically
+            # identical to the previous expression — existing behaviour is untouched.
+            weighted: list[tuple[float, float]] = [
+                (SCORE_WEIGHTS["semantic"], semantic),
+                (SCORE_WEIGHTS["lexical"], lexical),
+                (SCORE_WEIGHTS["authority"], authority),
+                (SCORE_WEIGHTS["applicability"], applicability_score),
+                (SCORE_WEIGHTS["confidence"], confidence),
+            ]
+            # VT-725 extends the same rule to `entity`: a query that named no entities gives the
+            # dimension nothing to match, which is inapplicability, not a zero score. NOTE this is
+            # a property of the QUERY, so when it fires it drops the same weight for every card and
+            # cannot re-rank a result set — it only stops the whole set being uniformly depressed.
+            if entity is not None:
+                weighted.append((SCORE_WEIGHTS["entity"], entity))
+            if recency is not None:
+                weighted.append((SCORE_WEIGHTS["recency"], recency))
+            score = sum(w * v for w, v in weighted) / sum(w for w, _v in weighted)
             if score < profile.minimum_score:
                 below_score_excluded += 1
                 continue
@@ -502,6 +536,19 @@ def _cosine(left: Sequence[float] | None, right: Sequence[float] | None) -> floa
 def _dimension_match(
     values: Sequence[str], context_value: str | None, label: str
 ) -> tuple[bool, str | None]:
+    """Does this card apply on ONE dimension, and is anything about that uncertain?
+
+    NOTE (VT-736, deliberately NOT changed here): a card declaring no values is treated as UNKNOWN
+    on that dimension, not as unrestricted, so it scores below an explicitly ``universal=True`` card.
+    That is a real epistemics choice — an explicit universal claim has been curated and asserted,
+    while silence may just be an under-specified card — and `test_unknown_applicability_is_penalized_
+    and_hedged_while_universal_matches` protects it. It is also why the whole VT-727 corpus sits at
+    the applicability floor: all 64 cards declare nothing AND are not marked universal. Redefining
+    silence as universal here would score 64 cards as applying to every industry, size and maturity
+    on the strength of nobody having said otherwise. Whether those cards ARE universal is a claim
+    about the knowledge — governance's call, not the scorer's — so it is surfaced with numbers rather
+    than assumed away.
+    """
     if not values:
         return True, f"unknown_{label}"
     if context_value is None:
@@ -539,16 +586,26 @@ def _applicability(
     return True, tuple(unknown)
 
 
-def _recency(card: KnowledgeCard, as_of: datetime) -> float:
+def _recency(card: KnowledgeCard, as_of: datetime) -> float | None:
+    """Recency in [0,1], or **None when the card has no recency dimension at all**.
+
+    VT-736: this used to return 0.0 for an evergreen claim (non-regulatory, no effective_to, no
+    expires_at). That reads as "maximally stale" when the truth is "ageing does not apply to this
+    claim" — a durable business principle is not less true this year than last. Scoring it 0.0
+    silently docked the full recency weight from every evergreen card, which is most of a curated
+    business corpus. Returning None lets the caller drop the weight and renormalize, so an
+    inapplicable dimension neither helps nor hurts.
+    """
     if (
-        card.source_class
-        not in {SourceClass.T1_REGULATORY, SourceClass.T1_VENDOR_POLICY}
+        card.source_class not in {SourceClass.T1_REGULATORY, SourceClass.T1_VENDOR_POLICY}
         and card.applicability.effective_to is None
         and card.expires_at is None
     ):
-        return 0.0
+        return None
     reference = card.applicability.effective_from or card.provenance.retrieved_at
-    age_days = max(0.0, (as_of.astimezone(UTC) - reference.astimezone(UTC)).total_seconds() / 86_400)
+    age_days = max(
+        0.0, (as_of.astimezone(UTC) - reference.astimezone(UTC)).total_seconds() / 86_400
+    )
     return max(0.0, 1.0 - age_days / (5 * 365))
 
 

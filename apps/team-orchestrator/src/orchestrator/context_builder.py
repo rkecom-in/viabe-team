@@ -673,23 +673,94 @@ def _build_dormant_cohort(tenant_id: UUID) -> tuple[list[CustomerFactBundle], bo
         from orchestrator.memory.l0_writer import _owner_inputs_enabled
 
         if not _owner_inputs_enabled(tenant_id):
+            # VT-763: this return was SILENT — indistinguishable from an empty cohort from outside.
+            _audit_cohort(tenant_id, "consent_gate_closed", candidates=0, bundles=0)
             return [], False
     except Exception:  # noqa: BLE001 — never surface PII on an unknown consent state
         logger.warning(
             "VT-490: owner_inputs consent check failed (tenant=%s); fail-closed",
             tenant_id,
         )
+        _audit_cohort(tenant_id, "consent_check_failed", candidates=0, bundles=0)
         return [], False
 
-    with tenant_connection(tenant_id) as conn:
-        candidates = detect_lapsed_customers(
-            tenant_id, conn=conn, limit=DEFAULT_DETECTION_LIMIT
+    # VT-755 scope 4 — INSTRUMENT THE COUNT. Three very different outcomes are otherwise
+    # indistinguishable from outside, and the difference decides where to look:
+    #
+    #   (a) the consent gate closed          -> returns above, already logged
+    #   (b) the gate was OPEN and the cohort read returned ZERO candidates
+    #   (c) the read RAISED (e.g. _phone_hash_salt() fail-loud on an unset salt)
+    #
+    # Why this had to be added: on dev 2026-08-14 a tenant with 8 customers, 8 consents, 8 'sale'
+    # ledger rows, 6 of them lapsed >45d and `tenants.owner_inputs` TRUE still produced an empty
+    # cohort — and the specialist then returned `insufficient_data`, which is the head of the VT-755
+    # chain (an unanswerable question, never delivered, on a task that wedges the tenant). FOUR
+    # external hypotheses for that zero were tested and refuted, and the reason none could be
+    # confirmed is that the deciding predicate — the consent phone-token join, which hashes with a
+    # SEALED salt — cannot be evaluated from outside the container. Only the product can report it.
+    #
+    # `review.py`'s own comment on the branch that consumes this already calls the cohort read flaky
+    # ("the cohort read is separately flaky — RV-1"); this is what turns that into a number.
+    #
+    # Counts only, never a customer id/phone/name (CL-390).
+    try:
+        with tenant_connection(tenant_id) as conn:
+            candidates = detect_lapsed_customers(
+                tenant_id, conn=conn, limit=DEFAULT_DETECTION_LIMIT
+            )
+            bundles = [
+                build_customer_fact_bundle(tenant_id, cand.customer_id, conn=conn)
+                for cand in candidates
+            ]
+    except Exception:
+        # Deliberately NOT swallowed into safe-empty: re-raised after logging. A cohort read that
+        # blew up is not the same fact as "this tenant has no lapsed customers", and silently
+        # conflating them is what made this un-diagnosable. The consent gate above fail-closes on
+        # purpose (no PII on an unknown consent state); this is a different failure and stays loud.
+        logger.exception(
+            "VT-755: dormant-cohort read RAISED for tenant=%s (consent gate was OPEN) — the brain "
+            "will see no candidates; this is a READ FAILURE, not an empty cohort",
+            tenant_id,
         )
-        bundles = [
-            build_customer_fact_bundle(tenant_id, cand.customer_id, conn=conn)
-            for cand in candidates
-        ]
+        raise
+    if not bundles:
+        logger.warning(
+            "VT-755: dormant cohort is EMPTY for tenant=%s with the consent gate OPEN — "
+            "detect_lapsed_customers returned 0 candidates. The specialist will report "
+            "insufficient_data. If the tenant has lapsed customers, the consent phone-token join "
+            "(db.wrappers._LAPSED_CANDIDATES_SQL, salted with TEAM_PHONE_HASH_SALT) is the predicate "
+            "to check — it is the only one unverifiable from outside the container.",
+            tenant_id,
+        )
+    else:
+        logger.info(
+            "VT-755: dormant cohort built for tenant=%s — %d candidate(s), %d bundle(s)",
+            tenant_id, len(candidates), len(bundles),
+        )
+    _audit_cohort(tenant_id, "built", candidates=len(candidates), bundles=len(bundles))
     return bundles, bool(bundles)
+
+
+def _audit_cohort(tenant_id: UUID, outcome: str, *, candidates: int, bundles: int) -> None:
+    """VT-763 — the dormant-cohort outcome as a DURABLE tm_audit row (counts only, CL-390).
+
+    The INFO line in ``_build_dormant_cohort`` is INVISIBLE on deployed dev (the log stream carries
+    WARNING+ only), the consent-gate return was silent, and the empty-cohort WARNING did not fire on a
+    kept tenant whose specialist still returned ``insufficient_data``. So the one fact that decides
+    where to look — "was the cohort empty, or full and the model refused?" — could be read from
+    neither the logs nor the row. Fail-soft: audit is a courtesy, never a break in the context build.
+    """
+    try:
+        from orchestrator.observability.tm_audit import emit_tm_audit
+
+        emit_tm_audit(
+            event_layer="knows", event_kind="dormant_cohort_built", actor="team_manager",
+            tenant_id=tenant_id,
+            summary=f"dormant cohort {outcome}: {candidates} candidate(s), {bundles} bundle(s)",
+            result={"outcome": outcome, "candidates": candidates, "bundles": bundles},
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("VT-763: dormant-cohort audit emit failed (fail-soft) tenant=%s", tenant_id)
 
 
 # --- the bundle constructor --------------------------------------------------

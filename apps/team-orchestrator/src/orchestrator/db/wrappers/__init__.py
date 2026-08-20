@@ -88,6 +88,11 @@ LIMIT %(limit)s
 """
 
 
+#: VT-754 scope 4 — the attribution window, imported from its single definition so the arm below and
+#: the join in ``billing/attribution_writer`` can never drift to two different sevens.
+from orchestrator.billing.attribution_writer import ATTRIBUTION_WINDOW_DAYS  # noqa: E402
+
+
 class CustomersWrapper(TenantScopedTable):
     _table = "customers"
 
@@ -507,6 +512,48 @@ class CustomersWrapper(TenantScopedTable):
             return None
         return dict(row).get("display_name")
 
+    def recipient_phone_tokens(
+        self,
+        tenant_id: UUID | str,
+        campaign_id: UUID | str,
+        *,
+        salt: str,
+        conn: Any = None,
+    ) -> list[str]:
+        """VT-754 / ruling D-C — the ``wa_conversations.phone_token`` values for one campaign's
+        recipients, so attribution can ask "did this recipient REPLY to us before they purchased".
+
+        It lives here rather than in ``billing/attribution_writer`` for two reasons, both hard:
+
+        1. ``customers`` is in the ``no-direct-tenant-db-access`` watched set (VT-72/306). The
+           writer's own docstring notes its other tables are NOT watched, and joining ``customers``
+           there would trip the gate — correctly.
+        2. The token is a SALTED SHA-256 keyed on the phone, and ``wa_conversations`` stores only
+           the token. The salt rides as a BOUND PARAMETER (never interpolated), exactly as
+           ``lapsed_candidates`` and ``agent_optout_attribution`` already do — drift between those
+           three expressions fails CLOSED (no match), never open.
+
+        Returns [] when the campaign has no recipients with phones, which makes the reply half of
+        attribution find nothing. That is the ruling's direction: err UNDER.
+        """
+        tid = self._uuid(tenant_id)
+        with self._conn(tid, conn) as c:
+            rows = c.execute(
+                """
+                SELECT DISTINCT 'phone_tok_' || encode(
+                           sha256(convert_to(%(salt)s || ':' || c.phone_e164, 'UTF8')), 'hex'
+                       ) AS phone_token
+                  FROM campaign_recipients cr
+                  JOIN customers c
+                    ON c.tenant_id = cr.tenant_id AND c.id = cr.customer_id
+                 WHERE cr.tenant_id = %(tenant_id)s
+                   AND cr.campaign_id = %(campaign_id)s
+                   AND c.phone_e164 IS NOT NULL
+                """,
+                {"tenant_id": str(tid), "campaign_id": str(campaign_id), "salt": salt},
+            ).fetchall()
+        return [dict(r)["phone_token"] for r in rows]
+
     def agent_optout_attribution(
         self,
         tenant_id: UUID | str,
@@ -636,6 +683,88 @@ class CampaignsWrapper(TenantScopedTable):
         self._validate(out, tid)
         return out
 
+    def effect_state_rollup(
+        self, tenant_id: UUID | str, *, delivered_statuses: tuple[str, ...],
+        limit: int = 50, conn: Any = None,
+    ) -> list[dict[str, Any]]:
+        """VT-634 — per-campaign intended-vs-delivered, for diagnosing a failed workflow.
+
+        ``intended`` = ``campaign_recipients`` (who the campaign was for); ``delivered`` =
+        ``campaign_messages`` rows whose ``send_status`` means a message actually REACHED someone.
+        Attempts that did not deliver are counted separately rather than folded into either — an
+        attempt counted as delivered would make a campaign look complete and erase un-messaged
+        customers from the remainder, which is the direction that causes a real person to be
+        forgotten.
+
+        Tenant-predicated on all three tables (RLS + explicit WHERE), so this cannot see another
+        tenant's sends — the diagnosis reads through the wrapper layer for the same reason
+        everything else does, rather than taking a service-role shortcut because it happens to be
+        an ops tool.
+
+        **The join does NOT use ``campaign_messages.campaign_id``.** That column is never
+        populated — ``send_whatsapp_template._write_campaign_message`` omits it and nothing
+        UPDATEs it — so joining on it finds zero rows for EVERY campaign, real sends included.
+        This module already documents that trap on ``has_approved_campaign_with_no_messages``; the
+        join here goes via ``idempotency_key``'s documented ``{campaign_id}:{customer_id}`` prefix
+        (``campaign/execute.py`` D1), exactly as that method does.
+
+        **And that prefix does not cover everything**, which is why ``unattributable_delivered``
+        is returned rather than assumed to be zero: the agent draft-send path keys its sends
+        ``agent:{draft_id}`` (``agents/customer_send.py``), which carries no campaign id at all. A
+        caller that treats ``delivered == 0`` as "nothing reached a customer" without checking
+        ``unattributable_delivered`` will emit a false all-clear on the money path.
+        """
+        tid = self._uuid(tenant_id)
+        with self._conn(tid, conn) as c:
+            rows = c.execute(
+                """
+                SELECT c.id::text AS campaign_id,
+                       (SELECT count(*) FROM campaign_recipients r
+                         WHERE r.tenant_id = c.tenant_id AND r.campaign_id = c.id) AS intended,
+                       -- VT-740: prefer the real column now that it is populated at write time;
+                       -- the idempotency-prefix arm remains ONLY for rows written before that
+                       -- change, which are permanently NULL and cannot be back-filled honestly.
+                       -- Once no pre-VT-740 rows are in scope this collapses to the first arm.
+                       (SELECT count(*) FROM campaign_messages m
+                         WHERE m.tenant_id = c.tenant_id
+                           AND (m.campaign_id = c.id
+                                OR (m.campaign_id IS NULL
+                                    AND m.idempotency_key LIKE c.id::text || ':%%'))
+                           AND m.send_status = ANY(%(delivered)s))                 AS delivered,
+                       (SELECT count(*) FROM campaign_messages m
+                         WHERE m.tenant_id = c.tenant_id
+                           AND (m.campaign_id = c.id
+                                OR (m.campaign_id IS NULL
+                                    AND m.idempotency_key LIKE c.id::text || ':%%'))
+                           AND NOT (m.send_status = ANY(%(delivered)s)))           AS attempted
+                  FROM campaigns c
+                 WHERE c.tenant_id = %(tenant)s
+                 ORDER BY c.created_at DESC
+                 LIMIT %(limit)s
+                """,
+                {"tenant": str(tid), "delivered": list(delivered_statuses), "limit": limit},
+            ).fetchall()
+            # Delivered messages this tenant has that no campaign prefix claims — the agent-path
+            # sends. Their existence means a zero `delivered` above cannot be read as "nothing
+            # went out"; it can only be read as "nothing this join can see".
+            orphan = c.execute(
+                """
+                SELECT count(*) AS n FROM campaign_messages m
+                 WHERE m.tenant_id = %(tenant)s
+                   AND m.send_status = ANY(%(delivered)s)
+                   AND m.campaign_id IS NULL
+                   AND NOT EXISTS (SELECT 1 FROM campaigns c
+                                    WHERE c.tenant_id = m.tenant_id
+                                      AND m.idempotency_key LIKE c.id::text || ':%%')
+                """,
+                {"tenant": str(tid), "delivered": list(delivered_statuses)},
+            ).fetchone()
+        out = [dict(r) for r in rows]
+        unattributable = int((dict(orphan) if orphan else {}).get("n") or 0)
+        for row in out:
+            row["unattributable_delivered"] = unattributable
+        return out
+
     def has_any_since(
         self, tenant_id: UUID | str, *, within_minutes: int, conn: Any = None
     ) -> bool:
@@ -678,13 +807,36 @@ class CampaignsWrapper(TenantScopedTable):
     def set_status(
         self, tenant_id: UUID | str, campaign_id: str, status: str, *, conn: Any = None
     ) -> int:
-        """Set a campaign's status (tenant-predicated). Returns rows updated."""
+        """Set a campaign's status (tenant-predicated). Returns rows updated.
+
+        VT-754 scope 4 — **arming ``attribution_close_at`` on the flip to ``sent``.** The
+        attribution sweep scans ``WHERE attribution_close_at IS NOT NULL AND <= now()``
+        (``scheduled_triggers``), and NOTHING in ``src/`` ever set that column: 1 of 34 campaigns on
+        dev had it. So even a perfectly correct attribution join would never have run on schedule —
+        the fix to the join alone would have left the number at zero for a second, independent
+        reason, and it would have looked like the join was still wrong.
+
+        ``send_at + 7d`` is the ``campaign_plan`` schema's own documented validator
+        (``attribution_close_at == send_at + 7d``) and matches
+        ``attribution_writer.ATTRIBUTION_WINDOW_DAYS``, so no new number enters the system. Set ONLY
+        on the transition to ``sent`` and only when NULL, so a re-send or a status correction never
+        moves a window that is already running.
+        """
         tid = self._uuid(tenant_id)
         with self._conn(tid, conn) as c:
-            cur = c.execute(
-                "UPDATE campaigns SET status = %s WHERE tenant_id = %s AND id = %s",
-                (status, str(tid), str(campaign_id)),
-            )
+            if status == "sent":
+                cur = c.execute(
+                    "UPDATE campaigns SET status = %s, "
+                    "       attribution_close_at = COALESCE("
+                    "           attribution_close_at, now() + make_interval(days => %s)) "
+                    " WHERE tenant_id = %s AND id = %s",
+                    (status, ATTRIBUTION_WINDOW_DAYS, str(tid), str(campaign_id)),
+                )
+            else:
+                cur = c.execute(
+                    "UPDATE campaigns SET status = %s WHERE tenant_id = %s AND id = %s",
+                    (status, str(tid), str(campaign_id)),
+                )
             return cur.rowcount if cur.rowcount is not None else 0
 
     def get_status(
@@ -1250,17 +1402,42 @@ class PendingApprovalsWrapper(TenantScopedTable):
         ``timeout_at = now() + timeout_hours`` on a still-open row whose clock has not started
         (``timeout_at IS NULL`` — mig 179; the arm inserts NULL). Idempotent: a redelivery can
         never reset an already-running clock, and a resolved row is never touched. Tenant-
-        predicated by-PK. Returns rows updated (0 = clock already running / row gone)."""
+        predicated by-PK. Returns rows updated (0 = clock already running / row gone).
+
+        VT-734 (mig 190): the SAME write records ``presented_at = now()`` — the instant the ask
+        actually reached the owner. Deliberately the same statement rather than a second call, so
+        the presentation instant and the decision clock can never disagree; the resolution invariant
+        reads it to refuse any inbound that predates the ask."""
         tid = self._uuid(tenant_id)
         with self._conn(tid, conn) as c:
             cur = c.execute(
                 "UPDATE pending_approvals "
-                "SET timeout_at = now() + make_interval(hours => %s) "
+                "SET timeout_at = now() + make_interval(hours => %s), "
+                "    presented_at = COALESCE(presented_at, now()) "
                 "WHERE tenant_id = %s AND id = %s "
                 "  AND resolved_at IS NULL AND timeout_at IS NULL",
                 (int(timeout_hours), str(tid), str(approval_id)),
             )
             return cur.rowcount if cur.rowcount is not None else 0
+
+    def presented_or_armed_at(
+        self, tenant_id: UUID | str, approval_id: UUID | str, *, conn: Any = None
+    ) -> Any:
+        """VT-734 — the instant an inbound must be NEWER than to count as this approval's decision.
+
+        ``presented_at`` when the ask was delivered (mig 190), else ``requested_at`` (the arm) for
+        rows armed before that column existed. Returns None when the row is gone — the caller treats
+        an unknown boundary as "cannot verify", which fails CLOSED (no resolution)."""
+        tid = self._uuid(tenant_id)
+        with self._conn(tid, conn) as c:
+            row = c.execute(
+                "SELECT COALESCE(presented_at, requested_at) AS boundary "
+                "FROM pending_approvals WHERE tenant_id = %s AND id = %s",
+                (str(tid), str(approval_id)),
+            ).fetchone()
+        if row is None:
+            return None
+        return row["boundary"] if isinstance(row, dict) else row[0]
 
     def count_recent_campaign_requests(
         self, tenant_id: UUID | str, *, days: int = 7, conn: Any = None

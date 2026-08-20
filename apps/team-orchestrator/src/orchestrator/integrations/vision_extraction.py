@@ -13,10 +13,12 @@ Consent (CL-390 / CL-342; Cowork VT-52 review 2026-06-01)
     consent covers customer PII to a sub-processor under DPDP is VT-269 (Fazal
     production-enablement gate); dev/canary run SYNTHETIC data only (CL-422).
 
-Model (VT-52 row + CL-248/274)
-    Sonnet 4.6 production / Haiku 4.5 canary, via
-    ``config/models.yaml[vision_extraction][slot]`` resolved by ``VIABE_ENV``
-    (same convention as sales_recovery / self_evaluate / owner_input_classifier).
+Model (VT-52 row + CL-248/274, superseded by VT-732)
+    The SPECIALIST tier (``TEAM_MODEL_SPECIALIST``), resolved per call. The old
+    ``config/models.yaml[vision_extraction][VIABE_ENV-slot]`` pin is retired: a
+    per-environment tier var already IS the prod/dev split the yaml encoded, and
+    two governance surfaces meant a model could be "changed" in the env while the
+    yaml quietly kept picking another. The tier must point at a MULTIMODAL model.
 
 Pillars
     P4 retrieve-don't-calculate: an unreadable field -> ``value=None`` with low
@@ -34,8 +36,8 @@ module adds NO parallel threshold logic.
 Retention (CL-330): the raw image is transmitted and dropped — never persisted
 by this module.
 
-Tracing (CL-56): ``logfire.instrument_anthropic()`` (configured at startup)
-auto-instruments the SDK call; no extra wiring needed here.
+Tracing (CL-56): the seam's own callbacks record the call on the VT-619 cost
+ledger; logfire's LangChain instrumentation covers the span.
 """
 
 from __future__ import annotations
@@ -44,24 +46,16 @@ import base64
 import io
 import json
 import logging
-import os
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 from uuid import UUID
 
-import yaml
-from anthropic import Anthropic
 from pydantic import BaseModel, ConfigDict, Field
 
 from orchestrator.integrations.field_mapping import RoutingDecision, _route
 
 logger = logging.getLogger(__name__)
-
-# config/models.yaml — apps/team-orchestrator/config/models.yaml.
-# file = src/orchestrator/integrations/vision_extraction.py
-# parents: [0]=integrations [1]=orchestrator [2]=src [3]=team-orchestrator
-_MODELS_YAML = Path(__file__).resolve().parents[3] / "config" / "models.yaml"
 
 # Anthropic vision input limits (cost + API): downscale long edge to 1568px
 # (the documented sweet-spot above which the API downsamples anyway) and keep
@@ -126,17 +120,51 @@ def route_field(field: ExtractedField) -> RoutingDecision:
     return _route(field.confidence)
 
 
-def _resolve_vision_model() -> str:
-    """Model id for ``vision_extraction`` per ``VIABE_ENV`` (prod Sonnet / else Haiku).
+# VT-732 — the SPECIALIST tier (TEAM_MODEL_SPECIALIST), replacing the
+# ``config/models.yaml[vision_extraction][VIABE_ENV-slot]`` pin. The yaml's whole
+# job was "a capable model in prod, a cheap one everywhere else", which is what a
+# per-ENVIRONMENT tier var already expresses — one governance surface, not two.
+# CAPABILITY NOTE: this call sends an IMAGE, so whatever a deployed env points the
+# specialist tier at must be MULTIMODAL (gpt-5.6 / gemini / claude are; a text-only
+# tier value would fail here and nowhere else).
+_VISION_TIER = "specialist"
 
-    Unset/test/dev/canary -> ``test`` slot (Haiku); never silently Sonnet/Opus in
-    a non-production environment.
-    """
-    env = os.environ.get("VIABE_ENV", "test").lower()
-    slot = "production" if env == "production" else "test"
-    with open(_MODELS_YAML) as f:
-        config = yaml.safe_load(f)
-    return cast(str, config["vision_extraction"][slot])
+
+def _resolve_vision_model() -> str:
+    """The concrete model id the vision tier resolves to — for the ExtractionResult's
+    ``model`` label and the observability line, never for choosing it here."""
+    from orchestrator.llm import resolve_model_id
+
+    return resolve_model_id(_VISION_TIER)
+
+
+def _image_turn(b64: str, media_type: str, prompt: str) -> Any:
+    """One user turn carrying the image + the extraction prompt, as STANDARD langchain content
+    blocks. Each provider adapter renders these into its own wire shape (verified against the
+    installed pins: anthropic ``source``/base64, OpenAI Responses ``input_image`` data-URL), so the
+    image path is provider-portable without this module knowing any provider's format."""
+    from langchain_core.messages import HumanMessage
+
+    return HumanMessage(
+        content=[
+            {"type": "image", "source_type": "base64", "data": b64, "mime_type": media_type},
+            {"type": "text", "text": prompt},
+        ]
+    )
+
+
+def _default_image_call(tier: str, **kwargs: Any) -> Any:
+    """The real transport (lazy import — this module is imported by dep-less paths)."""
+    from orchestrator.llm.structured import messages_call
+
+    return messages_call(tier, **kwargs)
+
+
+def _response_text(resp: Any) -> str:
+    """Text of a seam response, tolerating both a plain string and a block list."""
+    from orchestrator.llm.structured import response_text
+
+    return response_text(resp)
 
 
 def _maybe_register_heif() -> bool:
@@ -233,8 +261,8 @@ def extract_from_image(
     target_fields: list[str],
     acquired_via: str,
     media_type: str = "image/jpeg",
-    client: Anthropic | None = None,
-    model: str | None = None,
+    call: Callable[..., Any] | None = None,
+    tier: str | None = None,
     consent_check: Callable[[UUID], bool] | None = None,
 ) -> ExtractionResult:
     """Extract ``target_fields`` from ``image_bytes`` with per-field confidence.
@@ -246,8 +274,9 @@ def extract_from_image(
         target_fields: canonical field names the caller wants read.
         acquired_via: VT-6 source tag stamped on the result for observability.
         media_type: caller's content-type hint (drives HEIC handling).
-        client: optional Anthropic client (tests inject a mock).
-        model: optional model override (else resolved by VIABE_ENV).
+        call: optional transport override (tests inject a double; defaults to the
+            multi-provider seam's ``messages_call``).
+        tier: optional tier override (defaults to the specialist/vision tier).
         consent_check: optional consent predicate (tests/canary inject); defaults
             to ``l0_writer._owner_inputs_enabled`` (reads ``tenants.owner_inputs``).
 
@@ -274,38 +303,22 @@ def extract_from_image(
     # 2. Preprocess (HEIC convert / downscale / corrupt-detect).
     payload, payload_media_type = _preprocess_image(image_bytes, media_type)
 
-    # 3. Transmit to the vision model. Raw anthropic SDK (image content block),
-    #    mirroring classify_owner_message's standalone-tool pattern.
-    if client is None:
-        client = Anthropic()
-    resolved_model = model or _resolve_vision_model()
+    # 3. Transmit to the vision model through the tier seam (VT-732). The image rides a
+    #    STANDARD langchain image block, which each provider adapter translates into its
+    #    own wire format (anthropic source/base64, OpenAI input_image data-URL, …).
+    resolved_model = _resolve_vision_model()
 
     b64 = base64.standard_b64encode(payload).decode("ascii")
-    resp = client.messages.create(
-        model=resolved_model,
+    resp = (call or _default_image_call)(
+        tier or _VISION_TIER,
+        messages=[_image_turn(b64, payload_media_type, _build_prompt(target_fields))],
         max_tokens=_MAX_OUTPUT_TOKENS,
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": payload_media_type,
-                            "data": b64,
-                        },
-                    },
-                    {"type": "text", "text": _build_prompt(target_fields)},
-                ],
-            }
-        ],
+        agent="vision_extraction",
+        call_site="extract_from_image",
+        tenant_id=tenant_id,
     )
 
-    text_blocks = [
-        b.text for b in resp.content if getattr(b, "type", "") == "text"
-    ]
-    raw = "".join(text_blocks).strip()
+    raw = _response_text(resp).strip()
     # Tolerate a ```json fence if the model adds one; do NOT regex-scrub the
     # field VALUES (P8) — this only unwraps an outer fence before json.loads.
     if raw.startswith("```"):
@@ -382,8 +395,8 @@ def extract_entries_from_image(
     target_fields: list[str],
     acquired_via: str,
     media_type: str = "image/jpeg",
-    client: Anthropic | None = None,
-    model: str | None = None,
+    call: Callable[..., Any] | None = None,
+    tier: str | None = None,
     consent_check: Callable[[UUID], bool] | None = None,
 ) -> list[ExtractionResult]:
     """Multi-entry extraction: one ExtractionResult per row in the image.
@@ -407,33 +420,19 @@ def extract_entries_from_image(
         )
 
     payload, payload_media_type = _preprocess_image(image_bytes, media_type)
-    if client is None:
-        client = Anthropic()
-    resolved_model = model or _resolve_vision_model()
+    resolved_model = _resolve_vision_model()
     b64 = base64.standard_b64encode(payload).decode("ascii")
-    resp = client.messages.create(
-        model=resolved_model,
+    resp = (call or _default_image_call)(
+        tier or _VISION_TIER,
         max_tokens=4096,  # multi-entry → larger budget than the single-record path
+        agent="vision_extraction",
+        call_site="extract_entries_from_image",
+        tenant_id=tenant_id,
         messages=[
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": payload_media_type,
-                            "data": b64,
-                        },
-                    },
-                    {"type": "text", "text": _build_entries_prompt(target_fields)},
-                ],
-            }
+            _image_turn(b64, payload_media_type, _build_entries_prompt(target_fields)),
         ],
     )
-    raw = "".join(
-        b.text for b in resp.content if getattr(b, "type", "") == "text"
-    ).strip()
+    raw = _response_text(resp).strip()
     if raw.startswith("```"):
         raw = raw.strip("`")
         if raw.lower().startswith("json"):

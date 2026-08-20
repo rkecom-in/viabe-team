@@ -62,12 +62,18 @@ class SendWhatsappTemplateInput(BaseModel):
     language: Literal["en", "hi"]
     template_params: dict[str, str] = Field(default_factory=dict)
     idempotency_key: str = Field(..., min_length=1)
+    # VT-740: the campaign this send belongs to, when there IS one. NULL is the honest value for an
+    # agent draft-send (the freeform class mig 049 describes), NOT a missing field. Populating it
+    # retires the {campaign_id}:{customer_id} idempotency-prefix workaround that effect-state had
+    # to use because this column was never written -- a join that finds zero rows for EVERY
+    # campaign, real sends included.
+    campaign_id: str | None = None
 
 
 class SendWhatsappTemplateOutput(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    status: Literal["sent", "dry_run", "rate_limited", "unauthorized", "error"]
+    status: Literal["sent", "dry_run", "rate_limited", "unauthorized", "skipped", "error"]
     message_sid: str | None = None
     customer_id: str | None = None
     sent_at: datetime | None = None
@@ -467,18 +473,30 @@ def _write_campaign_message(
     message_sid: str | None,
     send_status: str,
     idempotency_key: str,
+    campaign_id: str | None = None,
 ) -> None:
-    """Insert campaign_messages row for the template send (VT-45 context)."""
+    """Insert campaign_messages row for the template send (VT-45 context).
+
+    VT-740: ``campaign_id`` is now written. It never was — this INSERT omitted the column and
+    nothing UPDATEd it, so ``campaign_messages.campaign_id`` was NULL for every row ever written
+    and any join on it found zero rows for every campaign, real sends included. Effect-state (is
+    this a partial send? may this workflow be re-driven?) had to fall back to matching the
+    ``{campaign_id}:{customer_id}`` idempotency-key prefix, which does not cover the agent path.
+
+    NULL remains correct for an agent draft-send: mig 049 defines campaign_id NULL as the freeform
+    class. The composite FK is MATCH SIMPLE, so it is enforced only when the value is set.
+    """
     cur.execute(
         """
         INSERT INTO campaign_messages
-            (tenant_id, customer_id, idempotency_key, message_sid, send_status,
+            (tenant_id, customer_id, campaign_id, idempotency_key, message_sid, send_status,
              message_type)
-        VALUES (%s, %s, %s, %s, %s, 'template')
+        VALUES (%s, %s, %s, %s, %s, %s, 'template')
         """,
         (
             tenant_id,
             customer_id,
+            campaign_id,
             idempotency_key,
             message_sid,
             send_status,
@@ -487,6 +505,24 @@ def _write_campaign_message(
             # For now, idempotency_key is the cross-reference.
         ),
     )
+
+
+def _frequency_suppressed(
+    cur: Any, tenant_id: str, customer_id: str, phone_e164: str | None
+) -> tuple[bool, str]:
+    """VT-740 — thin adapter so the choke's gate stack reads uniformly and the frequency policy
+    stays in one module. Fail-CLOSED on any error: an exception here suppresses the send, because
+    the alternative is a database blip becoming a duplicate message to a real person."""
+    try:
+        from orchestrator.agents.send_frequency import is_suppressed
+
+        return is_suppressed(tenant_id, customer_id, conn=cur, phone_e164=phone_e164)
+    except Exception:  # noqa: BLE001 — see the docstring; never fail OPEN on this path
+        logger.warning(
+            "send_whatsapp_template: frequency gate raised tenant=%s customer=%s — suppressing",
+            tenant_id, customer_id, exc_info=True,
+        )
+        return True, "frequency_check_error"
 
 
 def send_whatsapp_template(
@@ -650,6 +686,40 @@ def send_whatsapp_template(
                         ),
                     )
 
+                # --- VT-740 per-recipient frequency suppression ---
+                # Placed at the CHOKE deliberately. Three paths automatically re-drive a task
+                # (the hourly reaper wake, approval_resume.redrive_task, an operator redrive) and
+                # none consults what already went out; idempotency does not cover them because its
+                # key is per-DRAFT and a re-drive mints new drafts. Gating those paths one at a
+                # time means getting all of them right forever — this guard is path-independent:
+                # it does not care WHY a second send was attempted.
+                #
+                # SUPPRESSION, never authorization: it can only stop a send. Every gate above
+                # (opt-out, complaint, and the opt-in check below) still binds unchanged.
+                # VT-741: pass the phone this handler ALREADY resolved. Re-reading `customers`
+                # inside the frequency module was both a VT-72 wrapper-layer violation and an
+                # avoidable round trip per recipient on a pool near the Supavisor client cap.
+                suppressed, suppress_reason = _frequency_suppressed(
+                    cur, payload.tenant_id, payload.customer_id, customer.get("phone_e164"),
+                )
+                if suppressed:
+                    logger.info(
+                        "send_whatsapp_template: frequency_suppressed tenant=%s customer=%s "
+                        "reason=%s", payload.tenant_id, payload.customer_id, suppress_reason,
+                    )
+                    return SendWhatsappTemplateOutput(
+                        status="skipped",
+                        customer_id=payload.customer_id,
+                        error_envelope=ErrorEnvelope(
+                            code="recipient_recently_messaged",
+                            message=(
+                                "Customer was already delivered a message inside the minimum "
+                                f"contact interval ({suppress_reason}). Send suppressed to "
+                                "prevent a duplicate (VT-740)."
+                            ),
+                        ),
+                    )
+
                 # VT-301 / CL-429 (Fazal ruling 2026-06-02): gate ALL business-initiated
                 # sends on a recorded WhatsApp opt-in — enforced just below, once the phone
                 # is resolved (the consent surface is phone_token-keyed). owner_inputs
@@ -762,6 +832,7 @@ def send_whatsapp_template(
                         cur, payload.tenant_id, payload.customer_id,
                         payload.template_id, payload.template_params,
                         None, "error", payload.idempotency_key,
+                        payload.campaign_id,
                     )
                     return SendWhatsappTemplateOutput(
                         status="error",
@@ -784,6 +855,7 @@ def send_whatsapp_template(
                         cur, payload.tenant_id, payload.customer_id,
                         payload.template_id, payload.template_params,
                         None, "error", payload.idempotency_key,
+                        payload.campaign_id,
                     )
                     return SendWhatsappTemplateOutput(
                         status="error",
@@ -806,6 +878,7 @@ def send_whatsapp_template(
                     cur, payload.tenant_id, payload.customer_id,
                     payload.template_id, payload.template_params,
                     message_sid, "template_sent", payload.idempotency_key,
+                        payload.campaign_id,
                 )
 
                 logger.info(

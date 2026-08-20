@@ -67,9 +67,7 @@ def card(**updates: object) -> KnowledgeCard:
         "authority": EvidenceAuthority.VERIFIED_SYSTEM,
         "confidence": EvidenceConfidence.MEDIUM,
         "independence_cluster": "study:collections-1",
-        "applicability": Applicability(
-            jurisdictions=("IN",), effective_from=NOW
-        ),
+        "applicability": Applicability(jurisdictions=("IN",), effective_from=NOW),
         "provenance": CardProvenance(
             source_ids=("source-1",), publisher="Example Institute", retrieved_at=NOW, tainted=True
         ),
@@ -135,23 +133,24 @@ def test_t4_may_leave_research_only_only_after_independent_corroboration() -> No
     assert corroborated.status is CardStatus.VALIDATED
 
 
-def test_retrieval_eligibility_requires_status_and_rights() -> None:
+def test_retrieval_eligibility_requires_status_but_not_source_licence() -> None:
     with pytest.raises(ValidationError, match="validated/disputed"):
         card(retrieval_eligible=True)
-    with pytest.raises(ValidationError, match="retrieval rights"):
-        card(
-            status=CardStatus.VALIDATED,
-            retrieval_eligible=True,
-            usage_rights=rights(
-                status=UsageRightsStatus.RESTRICTED,
-                allows_extraction=False,
-                allows_embedding=False,
-                allows_retrieval=False,
-            ),
-        )
+    eligible = card(
+        status=CardStatus.VALIDATED,
+        retrieval_eligible=True,
+        usage_rights=rights(
+            status=UsageRightsStatus.UNKNOWN,
+            allows_extraction=False,
+            allows_embedding=False,
+            allows_retrieval=False,
+        ),
+    )
+    assert eligible.retrieval_eligible is True
+    assert eligible.usage_rights.status is UsageRightsStatus.UNKNOWN
 
 
-def test_live_link_only_cannot_grant_extraction_or_embedding() -> None:
+def test_live_link_only_cannot_claim_permission_to_reproduce_source() -> None:
     with pytest.raises(ValidationError, match="cannot grant content use"):
         rights(status=UsageRightsStatus.LIVE_LINK_ONLY)
 

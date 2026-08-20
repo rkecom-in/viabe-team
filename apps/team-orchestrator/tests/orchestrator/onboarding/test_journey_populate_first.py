@@ -381,13 +381,19 @@ def test_empty_necessities_completes_after_card(substrate, monkeypatch, _stub_se
     journey.start_journey(tenant, [])  # pending lazy-start
 
     r = journey.maybe_handle_journey_reply(tenant, "hello", "SM-vt575-empty", recipient="+919999000102")
-    assert r is not None and r.get("done") is True
+    # VT-724: the budget-exempt owner_email ask now precedes the close (Fazal D6 — email at
+    # onboarding), so the card turn is NOT the completion turn; the journey stays active with
+    # the email as the one remaining (skippable, never-gating) question.
+    assert r is not None and r.get("done") is False
 
     row = _journey_row(substrate.dsn, tenant)
-    assert row is not None and row["status"] == "complete", "empty necessities → journey completes"
+    assert row is not None and row["status"] == "active", "the email ask precedes the close (VT-724)"
+    assert [q["field"] for q in row["question_queue"][row["cursor"]:]] == ["owner_email"]
     assert len(seam_calls) == 0, "the integration seam must NOT fire on completion (no burst)"
-    assert row["answers"].get("__flow__") == "profile_previewed", "the paced-flow sentinel is set"
-    assert _stub_sends and "profile" in _stub_sends[-1].lower(), "the card was sent as the closing message"
+    # VT-724: the paced-flow sentinel now sets at the ACTUAL completion (after the email
+    # answer/skip), not at the card turn.
+    assert row["answers"].get("__flow__") is None
+    assert _stub_sends and "profile" in _stub_sends[-1].lower(), "the card was sent"
 
 
 def test_edit_after_populate_repromotes_to_canonical(substrate, monkeypatch, _stub_sends):

@@ -474,15 +474,121 @@ def _extract_claims(text: str) -> set[str]:
     return {_normalise_claim(match) for match in _CLAIM_RE.findall(text or "")}
 
 
+#: Indian magnitude words. An advisor writing "₹4.2 lakh" for a supplied 420000 has restated a
+#: grounded figure in the register the owner actually speaks, not invented one.
+_MAGNITUDES = {"lakh": 100_000, "lakhs": 100_000, "crore": 10_000_000, "crores": 10_000_000}
+#: Two spellings, and the abbreviated one is the common one in practice: "₹4.2L". The bare-letter
+#: form REQUIRES the currency prefix, so "4.2 L" of something else is never read as lakh.
+_MAGNITUDE_RE = re.compile(
+    r"(?:₹|Rs\.?\s?)(\d[\d,]*(?:\.\d+)?)\s*(L|Cr)\b"
+    r"|(\d[\d,]*(?:\.\d+)?)\s*(lakhs?|crores?)",
+    re.IGNORECASE,
+)
+_MAGNITUDES_SHORT = {"l": 100_000, "cr": 10_000_000}
+#: A range writes the magnitude once: "a bridge of roughly ₹1–2L". Without this the leading term is
+#: read as a bare ₹1 and flagged, while the trailing one expands correctly.
+_MAGNITUDE_RANGE_RE = re.compile(
+    r"(?:₹|Rs\.?\s?)?(\d[\d,]*(?:\.\d+)?)\s*[–—-]\s*(\d[\d,]*(?:\.\d+)?)\s*(L|Cr|lakhs?|crores?)\b",
+    re.IGNORECASE,
+)
+#: Context-side extraction. Deliberately WITHOUT `\b`, because grounded numbers hide inside
+#: identifiers — `supplier_payments_due_in_30_days_inr` grounds 30, but `_` is a word character so
+#: `\b\d{2,}\b` can never match it. Being generous on the GROUNDED side can only remove false
+#: positives; it cannot invent one.
+_CONTEXT_NUMBER_RE = re.compile(r"\d[\d,]*(?:\.\d+)?")
+
+
+def _digits_only(claim: str) -> str:
+    return claim[:-1] if claim.endswith("%") else claim
+
+
+def _grounded_numbers(context: Mapping[str, Any], allowed: Iterable[str]) -> set[str]:
+    """Every number the advice is entitled to use, as bare digit strings.
+
+    Unit suffixes are dropped on BOTH sides. `gross_margin_percent: 11` grounds "11%" in the advice:
+    the number came from the case, and a hard failure that zeroes an entire case must fire on
+    *invented* numbers, not on an advisor attaching the correct unit to a supplied one. Nuance about
+    whether a figure was used sensibly is what the graded `evidence_grounding` dimension is for; a
+    binary kill-switch has to be near-zero-false-positive to be worth having.
+    """
+
+    text = json.dumps(context, default=str, ensure_ascii=False)
+    grounded = {
+        _normalise_claim(match) for match in _CONTEXT_NUMBER_RE.findall(text)
+    }
+    grounded.update(_digits_only(_normalise_claim(item)) for item in allowed)
+    grounded = {_digits_only(value) for value in grounded if value}
+
+    # Arithmetic over supplied facts is reasoning, not fabrication: "₹4,20,000 cash plus ₹3,30,000
+    # receivables is ₹7,50,000" states no new fact. Bounded to PAIRS so the allowance stays small
+    # and explainable rather than becoming "any number reachable from the inputs".
+    numeric: list[float] = []
+    for value in grounded:
+        try:
+            numeric.append(float(value))
+        except ValueError:
+            continue
+    derived: set[str] = set()
+    # `numeric[i:]` includes the self-pair on purpose: "two months of ad spend is ₹4,80,000" doubles
+    # a supplied 2,40,000 and is the same arithmetic as adding two different supplied figures.
+    for i, left in enumerate(numeric):
+        for right in numeric[i:]:
+            for combined in (left + right, abs(left - right)):
+                derived.add(_normalise_claim(f"{combined:.4f}".rstrip("0").rstrip(".")))
+    grounded.update(_digits_only(value) for value in derived if value)
+    return grounded
+
+
 def find_fabricated_numbers(
     advice: str,
     context: Mapping[str, Any],
     *,
     allowed_numeric_claims: Iterable[str] = (),
 ) -> list[str]:
-    grounded = _extract_claims(json.dumps(context, default=str, ensure_ascii=False))
-    grounded.update(_normalise_claim(item) for item in allowed_numeric_claims)
-    return sorted(_extract_claims(advice) - grounded)
+    """Numbers in ``advice`` that the case never supplied and no pair of supplied facts yields.
+
+    This is a HARD FAILURE: one hit zeroes the case's entire score regardless of how it was judged.
+    That severity is only defensible if the check is precise, and it was not — measured against the
+    O11 development set it flagged correct arithmetic over supplied facts, unit-suffixed
+    restatements of supplied facts, numbers living inside context KEY names, and lakh notation. One
+    case scored 0.85-0.95 on all ten dimensions and came out 0.0. Worse, the miscounting was
+    ARM-BIASED: an answer that used MORE of the supplied material had a larger numeric surface to
+    trip on, so the metric punished exactly the behaviour it exists to encourage.
+    """
+
+    grounded = _grounded_numbers(context, allowed_numeric_claims)
+    # Compare on bare digits, but REPORT the claim as written ("23%", not "23") — the unit is what
+    # makes a flag diagnosable when someone reads the failure list.
+    claimed: dict[str, str] = {}
+    for claim in _extract_claims(advice):
+        claimed.setdefault(_digits_only(claim), claim)
+    # A range shares one magnitude across both ends: "₹1–2L". Expand each end against it.
+    for low, high, unit in _MAGNITUDE_RANGE_RE.findall(advice or ""):
+        multiplier = _MAGNITUDES_SHORT.get(unit.lower()) or _MAGNITUDES.get(unit.lower())
+        for end in (low, high):
+            try:
+                expanded = float(end.replace(",", "")) * (multiplier or 0)
+            except ValueError:
+                continue
+            if expanded and _normalise_claim(
+                f"{expanded:.4f}".rstrip("0").rstrip(".")
+            ) in grounded:
+                claimed.pop(_digits_only(_normalise_claim(end)), None)
+
+    # "₹4.2 lakh" is the grounded 420000 written the way an Indian owner reads it.
+    for short_amount, short_unit, long_amount, long_unit in _MAGNITUDE_RE.findall(advice or ""):
+        amount = short_amount or long_amount
+        unit = (short_unit or long_unit).lower()
+        multiplier = _MAGNITUDES_SHORT.get(unit) or _MAGNITUDES.get(unit)
+        if not multiplier:
+            continue
+        try:
+            expanded = float(amount.replace(",", "")) * multiplier
+        except ValueError:
+            continue
+        if _normalise_claim(f"{expanded:.4f}".rstrip("0").rstrip(".")) in grounded:
+            claimed.pop(_digits_only(_normalise_claim(amount)), None)
+    return sorted(token for digits, token in claimed.items() if digits not in grounded)
 
 
 @dataclass(frozen=True, slots=True)

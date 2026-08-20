@@ -528,6 +528,22 @@ def vtr_ownership_decision(
     verified = body.decision == "verified"
     note = _scrub_reason(body.note)         # free-text hygiene (CL-390)
     evidence = (body.evidence or "")[:500]  # URL/reference — clamp only
+    # B7 residue (Clau audit 2026-08-10): `ownership_verified` is a NON-BYPASSABLE execute gate —
+    # flipping it true is what makes a tenant able to message its customers. Both `note` and
+    # `evidence` were optional, so a VTR could verify with the fields blank and the audit trail
+    # would record only booleans: WHO flipped it and WHEN, never WHAT they saw. That is
+    # unreviewable after the fact and unanswerable if a tenant's ownership is ever disputed.
+    # Required on the VERIFY direction only — a rejection needs no proof of a thing that was
+    # not established, and demanding one would push VTRs toward leaving bad tenants unreviewed.
+    if verified and not evidence.strip():
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "ownership evidence is required to VERIFY (what you checked — e.g. the document "
+                "reference or portal URL). Verification flips a non-bypassable send gate; an "
+                "audit row recording only who-and-when cannot be reviewed later."
+            ),
+        )
     with get_pool().connection() as conn, conn.transaction():
         cur = conn.cursor()
         cur.execute(
@@ -1019,6 +1035,58 @@ def vtr_llm_limits_global(
     _invalidate_budget_cache(None)  # global cap changed → every tenant's cached verdict is stale
     logger.info("vtr_llm_limits_global OK operator=%s enabled=%s", operator, body.enabled)
     return {"ok": True, "enabled": body.enabled}
+
+
+@router.get("/api/orchestrator/ops/vtr-failed-workflows")
+def vtr_failed_workflows(
+    operator_id: str = Query(...),
+    x_internal_secret: str | None = Header(default=None, alias="X-Internal-Secret"),
+    x_operator_jwt: str | None = Header(default=None, alias="X-Operator-Jwt"),
+) -> dict[str, Any]:
+    """VT-634 — failed/orphaned manager_task workflows, worst-first, with EFFECT-STATE.
+
+    The third of Fazal's contain -> diagnose -> surface. ``prod_workflow_diagnosis`` computes
+    exactly what a VTR needs to decide between re-running and disabling a crashed workflow, and it
+    was finished code called by NOTHING -- no route, no CLI, no schedule. This is the route.
+
+    READ-ONLY, and structurally so: the module it calls performs no writes and never touches DBOS.
+    It CONTAINS nothing and REPAIRS nothing -- the VTR takes the action, because silently
+    auto-resolving an effectful failure is what the spec forbids.
+
+    ``diagnosis_available: false`` is returned DISTINCTLY from an empty list. A console that renders
+    "cannot see" and "nothing wrong" identically tells a VTR the money path is clear while it is
+    blind -- the single most dangerous thing this surface could say.
+
+    Cross-tenant by nature (an orphan belongs to any tenant), so exception-tier only.
+    """
+    # Cross-tenant read (an orphaned workflow belongs to any tenant), so there is no assignment to
+    # scope to — the same shape as the platform-wide LLM caps: exception tier (Fazal=VTR#1) only.
+    verify_internal_secret(x_internal_secret)
+    claim = verify_operator_jwt(x_operator_jwt)
+    operator = str(claim["operator_id"])
+    if operator_id != operator:
+        raise HTTPException(status_code=403, detail="operator_id != JWT claim")
+    require_exception_tier(operator)
+
+    from orchestrator.prod_workflow_diagnosis import (
+        DiagnosisUnavailable,
+        diagnose_failed_workflows,
+    )
+
+    try:
+        findings = diagnose_failed_workflows()
+    except DiagnosisUnavailable as exc:
+        return {
+            "diagnosis_available": False,
+            "reason": str(exc),
+            "findings": [],
+            "needs_human": 0,
+        }
+    return {
+        "diagnosis_available": True,
+        "findings": [f.as_dict() for f in findings],
+        "needs_human": sum(1 for f in findings if f.requires_human),
+    }
 
 
 @router.get("/api/orchestrator/ops/vtr-llm-usage")

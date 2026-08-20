@@ -117,6 +117,10 @@ _TENANT_ANONYMIZE = {
     # method / verified_at are non-PII operational flags, left intact.
     "verified_business_name": None,
     "gstin": None,
+    # VT-724 (mig 185 added the column; VT-715): the owner's email — a direct PII anchor. The
+    # anonymize path predates the column, so without this line an erased tenant kept their email
+    # (the recurring VT-366 class, caught by Clau's row-note before any real capture existed).
+    "owner_email": None,
 }
 
 # FK-safe deletion order. Children before parents — pipeline_steps /
@@ -161,6 +165,16 @@ _PURGE_ORDER: tuple[str, ...] = (
     "agent_draft_batches",
     "agent_work_items",
     "agent_customer_contacts",
+    # VT-741 (mig 201): the customer-attributed hook-link binding + click state. It links a
+    # /r/<token> link to an identified end customer and records their click behaviour — subject
+    # data, a DIFFERENT privacy class from hook_links (which is deny-all + PII-free by design and
+    # is NOT swept, see the note in integrations/hook_links.py). Its FKs are composite ones to
+    # customers/hook_links; the tenants row is ANONYMIZED not deleted on DSR, so no cascade ever
+    # reaches it and this sweep is the only erasure path. Registered in the SAME change as the
+    # migration, deliberately — the exact omission that already shipped on episodic_events and the
+    # L2 surfaces. Ordered before agent_drafts' neighbours is irrelevant (nothing FKs to it); it
+    # sits next to agent_customer_contacts because that is the other per-customer engagement table.
+    "customer_hook_links",
     # VT-369 PR-2: the per-(tenant, agent) autonomy state (trust counters + grant evidence link).
     # Leaf (FK tenants only; CASCADE never fires — the tenant row is anonymized, not deleted).
     "tenant_agent_autonomy",
@@ -174,6 +188,11 @@ _PURGE_ORDER: tuple[str, ...] = (
     # anonymized, not deleted), so a tenant DSR-delete MUST sweep it here or the policy grant survives
     # the purge (the tenant_business_autonomy lesson, on the new single-row-per-tenant table).
     "tenant_business_policy",
+    # VT-721 (mig 188): the rolling 7-day plan chain — the Manager's plan for the tenant's
+    # business (objectives + actions + why-notes = tenant business context). Leaf-ish (self-ref
+    # prev_plan_id is SET NULL; FK tenants CASCADE never fires — tenant anonymized, not deleted),
+    # so a tenant DSR-delete MUST sweep it here or the plans survive the purge.
+    "tenant_week_plans",
     # VT-719 (mig 187): the Manager's asserted-facts ledger — what the Manager has TOLD the owner
     # (fact values + the said sentences). Leaf-ish (self-ref superseded_by is SET NULL; FK tenants
     # CASCADE never fires — tenant anonymized, not deleted), so a tenant DSR-delete MUST sweep it

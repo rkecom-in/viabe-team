@@ -2,15 +2,16 @@
 
 Two phases per Package 3's diagram ("consume structured result -> Manager review decision"):
 
-  1. STRUCTURED EXTRACTION — ONE sonnet-5 LLM call (amendment A5: "manager triage + review nodes
-     default to the Sonnet-5 tier"). A specialist's raw graph output (messages / tool calls /
-     campaign_plan) is not itself a validated return — real specialists emit whatever their own
+  1. STRUCTURED EXTRACTION — ONE LLM call on the manager's review tier (amendment A5: "manager triage
+     + review nodes default to the Sonnet-5 tier" — VT-732 makes that a TIER, so which model the tier
+     means is the env's call, per environment). A specialist's raw graph output (messages / tool calls
+     / campaign_plan) is not itself a validated return — real specialists emit whatever their own
      sub-graph produces. ``extract_specialist_return`` reads that raw output + the step's
      acceptance_criteria and produces a ``PlanSpecialistReturn`` (manager/plan_models.py) — a
-     grounded, "trust but verify" read of what actually happened. Mirrors
-     ``agent.tools.classify_owner_message``'s house pattern EXACTLY: a raw ``Anthropic().messages.
-     create`` call + JSON parse + pydantic validation (NOT ``with_structured_output`` — unused
-     anywhere in this codebase; this keeps one convention, testable with a mock client).
+     grounded, "trust but verify" read of what actually happened. Mirrors ``manager.triage``'s house
+     pattern EXACTLY: ``structured_text_call`` + JSON parse + pydantic validation (NOT
+     ``with_structured_output`` — unused anywhere in this codebase; this keeps one convention,
+     testable by injecting ``text_call``).
 
   2. DETERMINISTIC DECISION SEAM — no LLM. The extracted ``PlanSpecialistReturn`` bridges (amendment
      A1's adapter, ``to_legacy_specialist_return``) into ``roster.SpecialistReturn`` (the LIVE,
@@ -32,14 +33,13 @@ import dataclasses
 import json
 import logging
 import re
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 from uuid import UUID
 
-from anthropic import Anthropic
-
 from orchestrator.agent.schemas.campaign_plan import CampaignStatus
-from orchestrator.llm_config import sampling_kwargs
+from orchestrator.llm.structured import structured_text_call
 from orchestrator.manager import plan_store, task_store
 from orchestrator.manager.decision import ManagerDecision, ManagerDecisionKind, decide_next_action
 from orchestrator.manager.plan_models import EffectIntent, EvidenceRef, PlanSpecialistReturn
@@ -54,11 +54,11 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("orchestrator.manager.review")
 
-# A5: the manager's triage + review nodes default to the Sonnet-5 tier. SAME model id as
-# agent.dispatch._BRAIN_MODEL_SONNET (single source of truth would import it, but dispatch.py has
-# heavy langgraph/langchain deps this module must stay free of for the dep-less smoke suite — the
-# id string is the actual contract, pinned here + asserted equal to dispatch's constant by a test).
-_REVIEW_MODEL = "claude-sonnet-5"
+# A5: the manager's triage + review nodes run on the SAME tier (parity with manager.triage's
+# _TRIAGE_TIER, which is what the "same model as the brain" assertion was really pinning). VT-732 —
+# the tier NAME is the contract now; the concrete model comes from TEAM_MODEL_COMPLEX at call time,
+# so dev and prod can differ without a code change and neither can drift from the brain by accident.
+_REVIEW_TIER = "complex"
 _MAX_TOKENS = 600
 
 _PROMPT_PATH = Path(__file__).parent / "prompts" / "manager_review_extraction.md"
@@ -80,14 +80,17 @@ def extract_specialist_return(
     desired_outcome: str,
     acceptance_criteria: list[str],
     raw_output: str,
-    client: Anthropic | None = None,
+    text_call: Callable[..., str] | None = None,
 ) -> PlanSpecialistReturn:
-    """The ONE sonnet-5 LLM call: turn a specialist's raw output into a grounded, validated
+    """The ONE review-tier LLM call: turn a specialist's raw output into a grounded, validated
     ``PlanSpecialistReturn``. Raises ``ValueError`` on non-JSON / schema-invalid output — the
     caller (``manager_review``) treats an extraction failure as fail-closed ``blocked`` (never a
-    silent guess at what happened)."""
-    if client is None:
-        client = Anthropic()
+    silent guess at what happened).
+
+    VT-732 — ``text_call`` replaces the old injectable ``client``: the transport is now the
+    multi-provider seam (which also owns sampling: temperature is pinned only where the resolved
+    model accepts it), so a test injects a callable, not an SDK stub."""
+    _call = text_call or structured_text_call
 
     user_content = (
         f"## Situation\n{situation}\n\n"
@@ -96,17 +99,14 @@ def extract_specialist_return(
         + "\n".join(f"- {c}" for c in acceptance_criteria)
         + f"\n\n## Specialist raw output\n{raw_output}"
     )
-    resp = client.messages.create(
-        model=_REVIEW_MODEL,
-        max_tokens=_MAX_TOKENS,
-        # VT-628 — pin temp=0 only where accepted (haiku). _REVIEW_MODEL is sonnet-5, which
-        # DEPRECATES temperature (400), so this resolves to {} for it.
-        **sampling_kwargs(_REVIEW_MODEL),
+    raw = _call(
+        _REVIEW_TIER,
         system=_EXTRACTION_SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": user_content}],
-    )
-    text_blocks = [b.text for b in resp.content if getattr(b, "type", "") == "text"]
-    raw = "".join(text_blocks).strip()
+        user=user_content,
+        max_tokens=_MAX_TOKENS,
+        agent="manager_review",
+        call_site="specialist_return_extraction",
+    ).strip()
     if not raw:
         raise ValueError("extract_specialist_return: model returned empty content")
     raw = _strip_code_fence(raw)
@@ -288,15 +288,57 @@ def adapt_campaign_plan_to_specialist_return(
             outcome_summary=plan.out_of_scope_reason,
             reason_code="out_of_scope",
         )
-    # INSUFFICIENT_DATA
+    # INSUFFICIENT_DATA — VT-738 RV-2.
+    #
+    # This used to return status='blocked' with proposed_outcome="address the following before
+    # retrying: <gaps>". That string is not an OUTCOME the manager can re-frame toward, it is a
+    # list of things that are missing — but the adapter above maps any blocked-with-a-proposed-
+    # outcome onto pushback=True, and decide_next_action maps pushback-with-a-proposal onto REVISE.
+    # So the manager reframed the step and re-dispatched it, the specialist found the same data
+    # still missing, and it looped until `max_revisions_per_step_seq` blocked the task and triage
+    # cancelled the plan. Observed on deployed dev 2026-08-10: three identical revisions, three
+    # identical `insufficient_data` returns, task blocked, plan cancelled, owner told nothing
+    # useful. **Re-framing a step cannot create data that does not exist, so that loop could never
+    # converge** — it was not a tuning problem, it was the wrong branch.
+    #
+    # Missing data is the owner's to supply, so this is exactly what `needs_owner_input` exists
+    # for: it routes through decide_next_action's CLARIFY branch, parks the task durably, and asks.
+    # A spurious ask (the cohort read is separately flaky — RV-1) costs the owner one question; the
+    # old path cost them the whole plan, silently.
     gaps = "; ".join(
         f"{item.category}: {item.description} (suggest: {item.suggested_remediation})"
         for item in plan.missing_data
     )
+    remediations = [
+        r for r in (str(item.suggested_remediation or "").strip() for item in plan.missing_data) if r
+    ]
+    if remediations:
+        # VT-755 scope 1, ruling D-A (Fazal 2026-08-15) — RAW MODEL REMEDIATION NEVER REACHES AN
+        # OWNER. This used to splice `suggested_remediation` straight into the owner's message:
+        #
+        #     "Could you help with this: {'; '.join(remediations)}?"
+        #
+        # `MissingDataItem.suggested_remediation` is free text the model writes for an ENGINEERING
+        # audience, which is how "backfill the customer table" reaches a shop owner in Hinglish.
+        #
+        # The replacement does not classify the model's prose — the model's account of what is
+        # missing is exactly what may not reach the owner. It asks the TENANT'S OWN STATE (is a
+        # source connected, are there customers, is there purchase history) and says that, from a
+        # closed vocabulary of sentences we wrote. `gaps` still carries the model's words into
+        # `outcome_summary`, which is INTERNAL (the task's own record) and never owner-facing.
+        from orchestrator.manager.owner_ask import compose_owner_need
+
+        return PlanSpecialistReturn(
+            status="needs_owner_input",
+            outcome_summary=f"insufficient data to propose a campaign: {gaps}",
+            owner_question=compose_owner_need(tenant_id),
+            reason_code="insufficient_data",
+        )
+    # No remediation the owner could act on → there is genuinely no path here. Return blocked with
+    # NO proposed_outcome so decide_next_action ESCALATES (an honest closure) rather than looping.
     return PlanSpecialistReturn(
         status="blocked",
         outcome_summary=f"insufficient data to propose a campaign: {gaps}",
-        proposed_outcome=f"address the following before retrying: {gaps}",
         reason_code="insufficient_data",
     )
 
@@ -348,6 +390,40 @@ class ManagerReviewResult:
         )
 
 
+def _apply_escalate_effect(
+    tenant_id: UUID | str, task_id: UUID | str, step_id: UUID | str, *, reason: str | None
+) -> UUID | None:
+    """The escalate EFFECT — step failed, task blocked, incident raised to tier 2.
+
+    Extracted (VT-755) because the undelivered-question path must escalate IDENTICALLY, not
+    approximately. Inlining a second copy would have set the two statuses and quietly skipped the
+    incident, producing a blocked task nobody was paged about — the same silence VT-746 closed.
+
+    ``create_incident`` is idempotent per (run_id, incident_kind); ``task_id`` is a soft (no-FK)
+    correlation key reused in the run_id slot, so a repeat escalate for the SAME task never
+    double-creates (mirrors ``specialist_return._enforce_escalate``).
+    """
+    task_store.set_step_status(tenant_id, step_id, "failed", expected_from=("running",))
+    task_store.set_task_status(
+        tenant_id, task_id, "blocked", expected_from=tuple(task_store.TASK_NON_TERMINAL)
+    )
+    iid = create_incident(
+        tenant_id,
+        incident_kind="other",
+        run_id=task_id,
+        severity="warning",
+        detail={
+            "source": "manager_review",
+            "task_id": str(task_id),
+            "step_id": str(step_id),
+            "reason": reason,
+        },
+    )
+    if iid is not None:
+        escalate_incident(tenant_id, iid, to_tier=2)
+    return iid
+
+
 def manager_review(
     tenant_id: UUID | str,
     task_id: UUID | str,
@@ -358,7 +434,7 @@ def manager_review(
     acceptance_criteria: list[str],
     raw_output: str,
     has_next_step: bool,
-    client: Anthropic | None = None,
+    text_call: Callable[..., str] | None = None,
     campaign_plan: "CampaignPlan | None" = None,
     run_id: UUID | str | None = None,
     module_result: "ModuleResult | None" = None,
@@ -369,10 +445,10 @@ def manager_review(
 
     ``campaign_plan`` (VT-607, Loop Package 6): when the just-dispatched step is Sales Recovery and
     it produced a structured ``CampaignPlan``, the deterministic ``adapt_campaign_plan_to_
-    specialist_return`` grounding + adapter REPLACES the sonnet-5 ``extract_specialist_return``
+    specialist_return`` grounding + adapter REPLACES the review-tier ``extract_specialist_return``
     call entirely for THIS step (no LLM re-interpretation of already-structured, already-validated
     output — see that function's own docstring for the full grounding rationale). Every other
-    specialist (``campaign_plan is None``) is completely unaffected — the sonnet-5 extraction path
+    specialist (``campaign_plan is None``) is completely unaffected — the review-tier extraction path
     below runs exactly as before.
 
     ``run_id`` (§7D): the caller's ACTIVE ObservabilityContext.run_id — NOT ``state['run_id']``.
@@ -392,7 +468,7 @@ def manager_review(
                 desired_outcome=desired_outcome,
                 acceptance_criteria=acceptance_criteria,
                 raw_output=raw_output,
-                client=client,
+                text_call=text_call,
             )
         except ValueError as exc:
             logger.warning(
@@ -456,38 +532,46 @@ def manager_review(
         # and records the decision.
         task_store.set_step_status(tenant_id, step_id, "pending", expected_from=("running",))
     elif outcome == "ask_owner":
-        task_store.set_step_status(tenant_id, step_id, "waiting", expected_from=("running",))
-        task_store.set_task_status(tenant_id, task_id, "waiting_owner", expected_from=("running",))
+        # VT-755 scope 0 — ASK, THEN ACTUALLY ASK. This branch used to write the question row and
+        # park `waiting_owner` with nothing ever sent: the durable loop then waited for an answer to
+        # a question the owner had never seen, which can only end at the poll ceiling hours later.
+        # The emitter goes through the SINGLE owner-emission choke (never a second send path — the
+        # Manager is ONE voice) and stamps `delivered_at` only on a real send, because that stamp is
+        # what makes the question answerable (scope 0b).
+        delivered = False
         if ret.owner_question:
             from orchestrator.manager import pending_questions
+            from orchestrator.manager.owner_ask import deliver_pending_question
 
-            pending_questions.ask(
+            question_id = pending_questions.ask(
                 tenant_id, ret.owner_question, task_id=task_id, question_kind="clarification",
             )
+            delivered = deliver_pending_question(tenant_id, question_id, ret.owner_question)
+
+        if delivered:
+            task_store.set_step_status(tenant_id, step_id, "waiting", expected_from=("running",))
+            task_store.set_task_status(
+                tenant_id, task_id, "waiting_owner", expected_from=("running",)
+            )
+        else:
+            # UNDELIVERED — do NOT park. A task parked on a question the owner never received is the
+            # immortal wedge scope 3 had to build a detector for; refusing the park here removes the
+            # condition instead of alerting on it. `escalate` is the honest branch: the loop's
+            # escalate handler arms an owner closure at the tail, so the turn ends with the owner
+            # told something rather than waiting on silence.
+            logger.warning(
+                "VT-755: ask_owner question undelivered tenant=%s task=%s — escalating instead of "
+                "parking on an unasked question",
+                tenant_id, task_id,
+            )
+            outcome = "escalate"
+            incident_id = _apply_escalate_effect(
+                tenant_id, task_id, step_id, reason="ask_owner_undelivered"
+            )
     elif outcome == "escalate":
-        task_store.set_step_status(tenant_id, step_id, "failed", expected_from=("running",))
-        task_store.set_task_status(
-            tenant_id, task_id, "blocked", expected_from=tuple(task_store.TASK_NON_TERMINAL)
+        incident_id = _apply_escalate_effect(
+            tenant_id, task_id, step_id, reason=ret.reason_code or decision.reason
         )
-        # incident_store.create_incident is idempotent per (run_id, incident_kind); task_id is a
-        # soft (no-FK) correlation key — reused here as the "run_id" slot so a repeat escalate for
-        # the SAME task never double-creates (mirrors specialist_return._enforce_escalate's use of
-        # the SAME incident_store seam, one tier further: to_tier=2 goes straight to VTR).
-        iid = create_incident(
-            tenant_id,
-            incident_kind="other",
-            run_id=task_id,
-            severity="warning",
-            detail={
-                "source": "manager_review",
-                "task_id": str(task_id),
-                "step_id": str(step_id),
-                "reason": ret.reason_code or decision.reason,
-            },
-        )
-        if iid is not None:
-            escalate_incident(tenant_id, iid, to_tier=2)
-            incident_id = iid
 
     emit_tm_audit(
         event_layer="decides",

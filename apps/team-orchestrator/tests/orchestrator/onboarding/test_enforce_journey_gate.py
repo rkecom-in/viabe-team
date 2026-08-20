@@ -60,6 +60,11 @@ def spies(monkeypatch):
         "orchestrator.owner_surface.freeform_acks.send_freeform_ack",
         lambda tenant_id, recipient, body: calls["sends"].append(body) or True,
     )
+    # VT-720 (S4): the status route now composes via the brain and falls back to its deterministic
+    # line. Default the composer to UNAVAILABLE so every pre-existing assertion below keeps testing
+    # exactly what it was written to test — the FALLBACK line — and no unit run can reach the network.
+    # The composed path has its own explicit tests (test_status_ask_prefers_composed_reply et al).
+    monkeypatch.setattr(eg, "_compose_status_via_brain", lambda *a, **k: None)
     return calls
 
 
@@ -429,3 +434,118 @@ def test_completed_non_flow_chatter_falls_to_brain(spies, monkeypatch, _no_live_
     spies["journey"] = _completed_flow_journey("plan_kicked")
     assert _run("Yes let's connect") is None
     assert spies["sends"] == []
+
+
+# --- VT-720 (S4) route unification: the status route CLASSIFIES, the composer SPEAKS -----------
+
+
+def _journey_with_pending_city_confirm() -> dict:
+    """The measured 3/3 shape (efficient_collection_incremental_no_reask,
+    multi_field_single_message_hinglish): the draft HOLDS the city and the queue head is the CONFIRM
+    of that value — "we found your shop is in Surat — is that right?"."""
+    return {
+        "status": "active",
+        "question_queue": [
+            {"field": "city", "kind": "confirm", "draft_value": "Surat",
+             "prompt_en": "We found your shop is in Surat — is that right?", "prompt_hi": ""},
+            {"field": "operating_hours", "kind": "gap", "prompt_en": "What are your hours?", "prompt_hi": ""},
+        ],
+        "cursor": 0,
+        "answers": {"business_type": "hardware", "about": "construction and home hardware tools",
+                    "__flow__": "profile_previewed"},
+        "skipped": [],
+    }
+
+
+def test_classification_splits_known_pending_confirm_and_missing():
+    c = eg._classify_status_turn(_journey_with_pending_city_confirm(), "journey_status")
+    assert c.facts_known == {
+        "business_type": "hardware", "about": "construction and home hardware tools"
+    }, "recorded answers are KNOWN; internal '__'-marker keys are never facts about the business"
+    assert c.facts_pending_confirm == {"city": "Surat"}, "a held value awaiting yes is NOT missing"
+    assert c.facts_missing == ("operating_hours",), "only genuine gaps may be asked for"
+
+
+def test_classification_block_forbids_re_asking_a_held_fact():
+    from orchestrator.manager.route_classification import render_classification_block
+
+    block = render_classification_block(
+        eg._classify_status_turn(_journey_with_pending_city_confirm(), "journey_status")
+    )
+    assert "Surat" in block and "city" in block
+    assert "never ask for these again" in block
+    assert "NEVER ask for the field as though you did not know it" in block
+
+
+def test_fallback_line_confirms_the_value_never_re_asks_the_field(spies):
+    """The measured defect, pinned: with a pending city CONFIRM the fallback must name the VALUE.
+    'which city' is the exact string the two casebook scenarios assert against."""
+    spies["journey"] = _journey_with_pending_city_confirm()
+    res = _run("ab bas ho gaya kya sab kuch?")
+    assert res is not None and res["routed_kind"] == "journey_status"
+    sent = spies["sends"][0]
+    assert "which city" not in sent.lower(), "a held city may never be re-asked as unknown"
+    assert "Surat" in sent, "the confirm names the value it is confirming"
+    assert "2 quick details to go" in sent
+
+
+def test_status_ask_prefers_composed_reply(spies, monkeypatch):
+    """The route hands off: when the composer speaks, its text is what goes on the wire — and the
+    deterministic line is not sent alongside it (one voice, one message)."""
+    seen = {}
+
+    def _compose(tenant_id, text, g, intent, locale):
+        seen.update({"intent": intent, "locale": locale, "text": text})
+        return "Almost there — just confirm Surat is right and tell me your hours."
+
+    spies["journey"] = _journey_with_pending_city_confirm()
+    monkeypatch.setattr(eg, "_compose_status_via_brain", _compose)
+    res = _run("ab bas ho gaya kya sab kuch?")
+    assert res is not None and res["routed_kind"] == "journey_status"
+    assert spies["sends"] == ["Almost there — just confirm Surat is right and tell me your hours."]
+    assert seen["intent"] == "journey_status" and seen["locale"] == "en"
+
+
+def test_composer_failure_falls_back_to_the_deterministic_line(spies, monkeypatch):
+    spies["journey"] = _journey_with_pending_city_confirm()
+    monkeypatch.setattr(eg, "_compose_status_via_brain", lambda *a, **k: None)
+    res = _run("are we set up now?")
+    assert res is not None
+    assert len(spies["sends"]) == 1 and "Not quite yet" in spies["sends"][0]
+
+
+def test_composer_never_runs_for_opt_out(spies, monkeypatch):
+    """A floor still wins outright: opt-out is never composed, never answered here."""
+    called = []
+    monkeypatch.setattr(eg, "_compose_status_via_brain", lambda *a, **k: called.append(1) or "hi")
+    monkeypatch.setattr(
+        "orchestrator.pre_filter_gate.matches_opt_out_or_dsr", lambda text: True
+    )
+    assert _run("are we set up now? also STOP") is None
+    assert called == [] and spies["sends"] == []
+
+
+def test_compose_classified_reply_discards_extractions_and_is_none_without_key(monkeypatch):
+    """The composer is compose-ONLY: no key → None (never a live call); with a plan, only the text
+    comes back — a status turn may not record, confirm or advance anything."""
+    from orchestrator.onboarding import turn_brain
+
+    monkeypatch.setattr(turn_brain, "_anthropic_key_present", lambda: False)
+    assert turn_brain.compose_classified_reply({}, {}, "are we set up?", None) is None
+
+    monkeypatch.setattr(turn_brain, "_anthropic_key_present", lambda: True)
+    monkeypatch.setattr(turn_brain, "_build_prompts", lambda *a, **k: ("sys", "usr"))
+    seen_timeout = {}
+
+    def _fake_invoke(system, user, *, timeout_s=None):
+        seen_timeout["t"] = timeout_s
+        return '{"reply_text": "Almost done."}'
+
+    monkeypatch.setattr(turn_brain, "_invoke_llm", _fake_invoke)
+    plan_fields = turn_brain.compose_classified_reply(
+        {}, {}, "are we set up?", eg._classify_status_turn(_journey_with_pending_city_confirm(), "x")
+    )
+    assert plan_fields == "Almost done.", "only the composed TEXT crosses the seam"
+    assert seen_timeout["t"] == turn_brain._CLASSIFIED_TIMEOUT_S, (
+        "a converted route composes on the TIGHTER budget — it is additive to an already-spent turn"
+    )

@@ -168,6 +168,12 @@ def profile_collection_complete(
         revisit_skipped=False,
         llm_fn=llm_fn,
     )
+    # VT-724 boundary (the row's hard rule): the owner_email compliance capture NEVER gates
+    # completion — it is asked while the journey runs, but a journey whose only remaining
+    # question is the email is COMPLETE (the ask is skippable and can also land post-hoc via
+    # the web form; email presence must never hold onboarding or activation hostage).
+    if decision.next_question is not None and decision.next_question.field == "owner_email":
+        return True
     return decision.next_question is None
 
 

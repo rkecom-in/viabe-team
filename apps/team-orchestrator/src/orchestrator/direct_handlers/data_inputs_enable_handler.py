@@ -27,6 +27,7 @@ deferred). This is the minimal end-to-end enable loop.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from dbos import DBOS
@@ -35,6 +36,8 @@ from orchestrator.db import tenant_connection
 from orchestrator.state import SubscriberState
 from orchestrator.types import WebhookEvent
 from orchestrator.utils.twilio_send import send_freeform_message
+
+logger = logging.getLogger(__name__)
 
 # VT-700 (Fazal 2026-07-23: after the go-ahead "the owner must be able to choose from the
 # list of specialist agents to activate") — the grant confirm IS the agent chooser: one
@@ -111,6 +114,21 @@ def data_inputs_enable_handler(
                     _set_flow(state["tenant_id"], _FLOW_AGENT_CHOICE)
             except Exception:  # noqa: BLE001
                 pass
+            # VT-722: the chooser message just STATED the trial terms to the owner — record the
+            # commitment at the presentation site (deterministic + mode-independent: this direct
+            # handler runs in every loop mode, unlike the walker beats). Fail-soft.
+            if sid:
+                try:
+                    from orchestrator.manager.asserted_facts import record_assertion
+
+                    record_assertion(
+                        state["tenant_id"], "trial_terms",
+                        {"months": 1, "auto_charge": False, "cancel_anytime": True},
+                        statement_text=_CONFIRM, surface="system", message_sid=sid,
+                        derived_from={"site": "data_inputs_enable_chooser"},
+                    )
+                except Exception:  # noqa: BLE001 — the ledger never breaks the confirm
+                    logger.warning("VT-722: trial-terms assertion failed (fail-soft)")
         except Exception as exc:  # noqa: BLE001 — honest send outcome, never crash the pipeline
             error = repr(exc)
     else:

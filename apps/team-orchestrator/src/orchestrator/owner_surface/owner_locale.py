@@ -78,12 +78,26 @@ def template_register(locale: str) -> str:
     """The Meta-TEMPLATE register for a resolved locale (D1):
 
       - 'hi'       → 'hi'  (existing Devanagari template variants)
-      - 'hinglish' → 'en'  (EN fallback until the hi-Latn template variants are Meta-approved;
-                            NEVER Devanagari for a hinglish-preference tenant)
+      - 'hinglish' → 'en'  (NEVER Devanagari for a hinglish-preference tenant)
       - 'en'/other → 'en'
 
     Free-form agent-initiated copy does NOT go through this — a hinglish owner gets the hi-Latn
     register directly there (no Meta constraint on in-session free-form).
+
+    **Why hinglish still maps to 'en' here, 2026-08-10.** The old reason ("until the hi-Latn
+    template variants are Meta-approved") is STALE — `team_welcome4` and `team_wakeup2` have had
+    approved `hing` SIDs since 2026-07-18. The reason it stays is different and still binding: this
+    function's only caller is `monthly_report.py`, and the template whitelist (Fazal 2026-07-18)
+    deliberately gives monthly_report NO `hing` variant — the minimal owner-template surface is
+    OTP + welcome + wake-up, everything else rides the 24h session. So 'en' is correct here, not a
+    leftover.
+
+    **Do not "flip" this to a blanket hinglish → hing.** A template without a hing variant would
+    raise `UnknownLanguageVariantError` at resolve time. Templates that DO have one resolve it
+    per-template with an existence check and an 'en' fallback — see `wakeup.py::wakeup_language`,
+    which is the pattern to copy. The one template still carrying a `hing` SID that must NEVER be
+    sent is `team_wakeup` (v1) — Meta force-converted it to MARKETING — so "has a hing variant" is
+    not by itself a licence to route to it.
     """
     return "hi" if locale == "hi" else "en"
 

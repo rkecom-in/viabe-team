@@ -34,6 +34,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -78,14 +79,22 @@ class InboundResult:
     phone_token: str
 
 
-def _default_send(body: str, recipient_phone: str) -> str:
+def _default_send(body: str, recipient_phone: str, *, tenant_id: str | None = None) -> str:
     from orchestrator.utils.twilio_send import send_freeform_message
 
     # VT-460 gap (c)+(d): the VT-287 inbound class is a CUSTOMER session send (intro / opt-in /
     # opt-out acks) — flag it so the transport's structural choke admits it (handle_customer_inbound
     # enters customer_send_context around the dispatch). is_customer_session=True also classes it
     # explicitly as the SESSION_OPTIN audit class, distinct from marketing.
-    return send_freeform_message(body, recipient_phone, is_customer_session=True)
+    #
+    # VT-742: the tenant is REQUIRED here now. A customer send resolves its `from_` to the tenant's
+    # OWN live WABA number, because the customer's reply is routed by the number they answered TO —
+    # so a send that cannot name the tenant has no sender the customer could reply on. This path had
+    # been calling the transport with no tenant at all (the pre-push suite caught it), which meant
+    # every intro/opt-in/opt-out ack left from the shared number.
+    return send_freeform_message(
+        body, recipient_phone, is_customer_session=True, tenant_id=tenant_id
+    )
 
 
 def _touch_conversation(tenant_id: str, phone_token: str, *, mark_intro: bool) -> None:
@@ -133,8 +142,11 @@ def handle_customer_inbound(
     first-contact (intro-once). Sends gated by the shared onboarded + WABA-live pre-gate
     (VT-460); state always recorded.
     """
-    send = send_fn or _default_send
     tid = str(tenant_id)
+    # VT-742: bind the tenant into the DEFAULT sender only. An injected ``send_fn`` keeps the
+    # two-positional-argument ``SendFn`` contract every test fixture is written against, while the
+    # real transport gets the tenant it now needs to resolve this tenant's OWN WABA sender.
+    send = send_fn if send_fn is not None else partial(_default_send, tenant_id=tid)
     token = hash_phone(customer_phone)
     norm = " ".join(body.split()).casefold()
 

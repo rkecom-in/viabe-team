@@ -1,0 +1,50 @@
+# VT-733 slice B — non-LLM vendor rates, in USD per unit.
+#
+# CONFIG, not code (the VT-732 lesson wearing a price tag): a hardcoded rate is a second governance
+# surface that drifts from the invoice exactly the way config/models.yaml drifted from the env tiers.
+# Rates change; this file changes with them, and every recorded event persists the rate it actually
+# used so a later edit never rewrites history.
+#
+# `estimated: true` means the RATE is our best knowledge rather than a contracted number — the
+# recorded rows inherit that flag, and slice C's repricing brief must report estimated and measured
+# spend separately. A repricing decision built on estimates that look like measurements is the
+# failure this whole row exists to prevent.
+#
+# As-of: 2026-08-06. Currency: USD per unit (the ledger stores USD, like llm_call_events; the
+# INR-facing views convert at the same fixed FX the paise attribution uses).
+
+twilio:
+  # WhatsApp Business pricing is per-conversation, category-dependent, and country-specific. These
+  # are India-route marketing/utility approximations — deliberately flagged estimated until an actual
+  # Twilio invoice is reconciled against a month of recorded rows.
+  template_message:
+    usd: 0.0125
+    estimated: true
+  session_message:
+    usd: 0.005
+    estimated: true
+
+voyage:
+  # Embeddings, per 1k tokens. The caller passes quantity in THOUSANDS of tokens.
+  embedding_1k_tokens:
+    usd: 0.00012
+    estimated: false
+
+sarvam:
+  # Indic ASR (saarika), per audio second.
+  asr_seconds:
+    usd: 0.0002
+    estimated: true
+
+apify:
+  # Actor runs bill on opaque compute units, so the run COUNT is what we can know at call time.
+  # Estimated by construction — recorded so the magnitude is visible, never presented as measured.
+  actor_run:
+    usd: 0.05
+    estimated: true
+
+scrapingbee:
+  # Per successful request (credit-based; the standard-credit approximation).
+  request:
+    usd: 0.002
+    estimated: true

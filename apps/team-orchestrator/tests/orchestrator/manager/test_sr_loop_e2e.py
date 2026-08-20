@@ -183,13 +183,16 @@ def test_sr_through_the_loop_full_acceptance(substrate: Any, monkeypatch: pytest
 
         monkeypatch.setattr(dispatch_mod, "_resolve_model", _fake_resolve_model)
 
-        # The completion-verification checkpoint's own Anthropic call — a canned 'verified'.
+        # The completion-verification checkpoint's own model call — a canned 'verified'.
+        # VT-732: it goes through the multi-provider seam, so the patch point is that seam.
         import orchestrator.manager.verification as verification_mod
 
         monkeypatch.setattr(
             verification_mod,
-            "Anthropic",
-            lambda: _FakeVerifyClient({"verdict": "verified", "reason": "test: objective met"}),
+            "structured_text_call",
+            lambda tier, **kwargs: json.dumps(
+                {"verdict": "verified", "reason": "test: objective met"}
+            ),
         )
 
         # --- create the durable plan task (NOT claimed here — the workflow itself claims it) ---

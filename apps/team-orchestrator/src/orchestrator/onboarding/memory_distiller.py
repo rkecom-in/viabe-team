@@ -30,10 +30,10 @@ from orchestrator.db import tenant_connection
 
 logger = logging.getLogger(__name__)
 
-# The house gap/extraction tier — parity with question_brain._GAP_MODEL. Distillation is a small,
-# structured fold (older turns → ≤120-word memory); Haiku is the right, cheap tool, and this runs in a
-# background workflow so its latency never touches the owner-inbound reply.
-_DISTILL_MODEL = "claude-haiku-4-5-20251001"
+# The house ROUTINE tier (VT-732: env-resolved, never a literal). Distillation is a small, structured
+# fold (older turns → ≤120-word memory) rather than a classification, and it runs in a background
+# workflow so its latency never touches the owner-inbound reply.
+_DISTILL_TIER = "routine"
 _DISTILL_MAX_TOKENS = 400  # ≤120 words of summary + slack; never a wall of text
 _DISTILL_TIMEOUT_S = 20.0  # off the hot path (bg workflow) — a generous but real bound
 
@@ -72,17 +72,18 @@ def _build_distill_prompt(transcript: str, prior_summary: str | None) -> str:
 
 
 def _invoke_distill(prompt: str) -> str:
-    """The single Haiku call (lazy anthropic import — keeps the module's import dep-less for the smoke
-    suite; tests monkeypatch THIS so the prompt-build + parse path stays pure)."""
-    from anthropic import Anthropic
+    """The single fold call through the tier seam (lazy import — keeps the module's import dep-less for
+    the smoke suite; tests monkeypatch THIS so the prompt-build + parse path stays pure)."""
+    from orchestrator.llm.structured import structured_text_call
 
-    resp = Anthropic().messages.create(
-        model=_DISTILL_MODEL,
+    return structured_text_call(
+        _DISTILL_TIER,
+        user=prompt,
         max_tokens=_DISTILL_MAX_TOKENS,
-        messages=[{"role": "user", "content": prompt}],
-        timeout=_DISTILL_TIMEOUT_S,
+        agent="onboarding_memory_distiller",
+        call_site="distill",
+        timeout_s=_DISTILL_TIMEOUT_S,
     )
-    return resp.content[0].text if resp.content else ""
 
 
 def distill_evicted_turns(

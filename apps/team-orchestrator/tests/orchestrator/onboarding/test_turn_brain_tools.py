@@ -1,34 +1,44 @@
-"""VT-570 — unit tests for the turn-brain TOOL BELT (bounded agentic loop, MOCKED Anthropic).
+"""VT-570 — unit tests for the turn-brain TOOL BELT (bounded agentic loop, MOCKED model seam).
 
 No network, no DB: the loop's model-call seam ``_invoke_llm_tools`` is monkeypatched to return canned
-response objects, so the loop mechanics (client-tool dispatch → tool_result → re-call → final parse),
+response objects, so the loop mechanics (client-tool dispatch → tool result → re-call → final parse),
 the iteration cap, host-pinning, and the read_journey_history payload are all exercised deterministically.
 The tenant_id gate (present → loop; absent → the classic VT-569 single call, exercised by the untouched
 ``test_turn_brain.py``) is pinned here too, so the two paths never diverge.
+
+VT-732 — the loop now speaks LANGCHAIN messages through the tier seam instead of raw Anthropic blocks,
+so a canned response is an ``AIMessage`` (``.tool_calls`` / ``.content``) and a tool answer is a
+``ToolMessage``. The loop's BEHAVIOUR is what these tests pin, and it is unchanged; only the transport
+moved. The two ex-SDK regressions (empty betas, the cached system block) are pinned at the seam
+boundary now — see the bottom of this file and ``tests/test_llm_structured.py``.
 """
 
 from __future__ import annotations
 
 import json
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
-from orchestrator.onboarding import turn_brain
-from orchestrator.onboarding.turn_brain import TurnPlan, compose_turn
+pytest.importorskip("langchain_core")
+
+from langchain_core.messages import AIMessage  # noqa: E402
+
+from orchestrator.onboarding import turn_brain  # noqa: E402
+from orchestrator.onboarding.turn_brain import TurnPlan, compose_turn  # noqa: E402
 
 
-def _text_block(text: str) -> Any:
-    return SimpleNamespace(type="text", text=text)
+def _tool_call(name: str, tool_id: str, args: dict[str, Any] | None = None) -> dict[str, Any]:
+    return {"name": name, "args": args or {}, "id": tool_id, "type": "tool_call"}
 
 
-def _tool_use_block(name: str, tool_id: str, tool_input: dict[str, Any] | None = None) -> Any:
-    return SimpleNamespace(type="tool_use", name=name, id=tool_id, input=tool_input or {})
-
-
-def _resp(stop_reason: str, *blocks: Any) -> Any:
-    return SimpleNamespace(stop_reason=stop_reason, content=list(blocks))
+def _resp(stop_reason: str, *, text: str = "", tool_calls: list[dict[str, Any]] | None = None) -> Any:
+    """A canned model response in the shape the seam returns (langchain ``AIMessage``)."""
+    return AIMessage(
+        content=text,
+        tool_calls=tool_calls or [],
+        response_metadata={"stop_reason": stop_reason},
+    )
 
 
 _FINAL = {
@@ -50,21 +60,21 @@ def test_loop_executes_client_tool_then_finalizes(monkeypatch):
     model call, and the final text parses into an unchanged TurnPlan."""
     calls: list[dict[str, Any]] = []
 
-    def _fake(system_prompt, messages, tools, betas):
-        calls.append({"messages": messages, "tools": tools})
+    def _fake(system_prompt, messages, tools, betas, native_tools=None):
+        calls.append({"messages": list(messages), "tools": tools})
         if len(calls) == 1:
-            return _resp("tool_use", _tool_use_block("read_journey_history", "tu_1"))
-        return _resp("end_turn", _text_block(json.dumps(_FINAL)))
+            return _resp("tool_use", tool_calls=[_tool_call("read_journey_history", "tu_1")])
+        return _resp("end_turn", text=json.dumps(_FINAL))
 
     monkeypatch.setattr(turn_brain, "_invoke_llm_tools", _fake)
     plan = compose_turn(_STATE, {}, "how's it going?", locale="en", tenant_id="t-1")
     assert isinstance(plan, TurnPlan)
     assert plan.reply_text == "All set — thanks!"
     assert len(calls) == 2, "one tool round-trip, then the final call"
-    # the read_journey_history tool_result was fed back on the 2nd call and carries the window + answers
-    tool_result = calls[1]["messages"][-1]["content"][0]
-    assert tool_result["type"] == "tool_result"
-    payload = json.loads(tool_result["content"])
+    # the read_journey_history result was fed back on the 2nd call and carries the window + answers
+    tool_msg = calls[1]["messages"][-1]
+    assert tool_msg.type == "tool" and tool_msg.tool_call_id == "tu_1"
+    payload = json.loads(tool_msg.content)
     assert payload["answers"] == {"city": "Pune"}
     assert payload["recent_turns"] and payload["recent_turns"][0]["text"] == "hi"
 
@@ -74,11 +84,11 @@ def test_iteration_cap_forces_finalization(monkeypatch):
     forces a final NO-TOOLS call (``tools == []``) and parses that answer."""
     calls: list[list[Any]] = []
 
-    def _fake(system_prompt, messages, tools, betas):
+    def _fake(system_prompt, messages, tools, betas, native_tools=None):
         calls.append(tools)
         if tools:  # still offering tools → the model keeps requesting one
-            return _resp("tool_use", _tool_use_block("read_journey_history", f"tu_{len(calls)}"))
-        return _resp("end_turn", _text_block(json.dumps(_FINAL)))  # forced final (tools == [])
+            return _resp("tool_use", tool_calls=[_tool_call("read_journey_history", f"tu_{len(calls)}")])
+        return _resp("end_turn", text=json.dumps(_FINAL))  # forced final (tools == [])
 
     monkeypatch.setattr(turn_brain, "_invoke_llm_tools", _fake)
     plan = compose_turn(_STATE, {}, "hi", locale="en", tenant_id="t-1")
@@ -92,9 +102,9 @@ def test_immediate_final_no_tool_call(monkeypatch):
     """Most turns need no tool: a first response with no tool_use parses straight through (one call)."""
     calls: list[Any] = []
 
-    def _fake(system_prompt, messages, tools, betas):
+    def _fake(system_prompt, messages, tools, betas, native_tools=None):
         calls.append(tools)
-        return _resp("end_turn", _text_block(json.dumps(_FINAL)))
+        return _resp("end_turn", text=json.dumps(_FINAL))
 
     monkeypatch.setattr(turn_brain, "_invoke_llm_tools", _fake)
     plan = compose_turn(_STATE, {}, "just chatting", locale="en", tenant_id="t-1")
@@ -104,26 +114,35 @@ def test_immediate_final_no_tool_call(monkeypatch):
 
 def test_web_fetch_and_refresh_offered_only_when_domain_pinnable(monkeypatch):
     """web_fetch + refresh_discovery are offered only when the owner's own domains are pinnable (draft
-    website or a URL in the message); read_journey_history is ALWAYS on."""
-    captured: dict[str, list[str]] = {}
+    website or a URL in the message); read_journey_history is ALWAYS on.
 
-    def _fake(system_prompt, messages, tools, betas):
+    VT-732 — web_fetch is an Anthropic SERVER-side builtin, so it rides ``native_tools["anthropic"]``
+    (bound only when the tier resolves to anthropic) while the client tools stay portable."""
+    captured: dict[str, Any] = {}
+
+    def _fake(system_prompt, messages, tools, betas, native_tools=None):
         captured["names"] = [t.get("type") or t.get("name") for t in tools]
-        return _resp("end_turn", _text_block(json.dumps(_FINAL)))
+        captured["native"] = [
+            t.get("type") or t.get("name")
+            for specs in (native_tools or {}).values()
+            for t in specs
+        ]
+        captured["betas"] = list(betas)
+        return _resp("end_turn", text=json.dumps(_FINAL))
 
     monkeypatch.setattr(turn_brain, "_invoke_llm_tools", _fake)
 
     compose_turn(_STATE, {"website": "https://mysite.in"}, "hi", locale="en", tenant_id="t-1")
-    names = captured["names"]
-    assert any("web_fetch" in str(n) for n in names), "web_fetch offered when a domain is pinnable"
-    assert "refresh_discovery" in names
-    assert "read_journey_history" in names
+    assert any("web_fetch" in str(n) for n in captured["native"]), "web_fetch when a domain is pinnable"
+    assert captured["betas"] == [turn_brain._WEB_FETCH_BETA]
+    assert "refresh_discovery" in captured["names"]
+    assert "read_journey_history" in captured["names"]
 
     compose_turn(_STATE, {}, "hi", locale="en", tenant_id="t-1")  # no website, no URL in body
-    names = captured["names"]
-    assert not any("web_fetch" in str(n) for n in names), "no web_fetch without a pinnable domain"
-    assert "refresh_discovery" not in names
-    assert "read_journey_history" in names, "read_journey_history is always on"
+    assert captured["native"] == [], "no web_fetch without a pinnable domain"
+    assert captured["betas"] == [], "no web-fetch beta either (VT-662: empty stays empty)"
+    assert "refresh_discovery" not in captured["names"]
+    assert "read_journey_history" in captured["names"], "read_journey_history is always on"
 
 
 def test_refresh_discovery_rejects_unpinned_host():
@@ -189,87 +208,71 @@ def test_pinnable_domains_from_website_and_message():
 # --- VT-662: empty-betas header regression (the turn-brain was silently dead on dev) ----------------
 
 
-def test_invoke_llm_tools_omits_empty_betas_header(monkeypatch):
-    """VT-662 — ``betas=[]`` must NOT be forwarded to ``beta.messages.create``. An empty list makes the
-    SDK emit an ``anthropic-beta:`` header with a blank value → API 400 ("Unexpected value(s) `` for the
+def test_invoke_llm_tools_omits_empty_betas(monkeypatch):
+    """VT-662 — ``betas=[]`` must NOT reach the client. An empty list makes the SDK emit an
+    ``anthropic-beta:`` header with a blank value → API 400 ("Unexpected value(s) `` for the
     `anthropic-beta` header"), which silently killed the turn-brain on EVERY no-web-fetch onboarding
-    turn (→ walker fallback → ignored_speech_act). Non-empty betas MUST still be forwarded."""
-    pytest.importorskip("anthropic")  # monkeypatching anthropic.Anthropic requires the module present
+    turn (→ walker fallback → ignored_speech_act). Non-empty betas MUST still be forwarded.
+
+    VT-732 — the omission now lives in the seam (``messages_call`` passes ``betas or None``, and
+    ``resolve_chat_model`` only sets the ctor field when non-empty); this pins the turn-brain's half
+    of that contract, ``tests/test_llm_structured.py`` pins the seam's."""
     captured: dict[str, Any] = {}
 
-    class _FakeMessages:
-        def create(self, **kwargs):
-            captured.clear()
-            captured.update(kwargs)
-            return SimpleNamespace(content=[SimpleNamespace(type="text", text='{"reply_text":"hi"}')])
+    def _fake_messages_call(tier, **kwargs):
+        captured.clear()
+        captured["tier"] = tier
+        captured.update(kwargs)
+        return _resp("end_turn", text='{"reply_text":"hi"}')
 
-    class _FakeClient:
-        beta = SimpleNamespace(messages=_FakeMessages())
+    monkeypatch.setattr("orchestrator.llm.structured.messages_call", _fake_messages_call)
 
-    monkeypatch.setattr("anthropic.Anthropic", lambda *a, **k: _FakeClient())
+    turn_brain._invoke_llm_tools("sys", ["x"], [], [])
+    assert captured["betas"] is None, "empty betas must not reach the client"
 
-    turn_brain._invoke_llm_tools("sys", [{"role": "user", "content": "x"}], [], [])
-    assert "betas" not in captured, "empty betas must be omitted (blank anthropic-beta header 400s)"
-
-    turn_brain._invoke_llm_tools("sys", [{"role": "user", "content": "x"}], [], ["web-fetch-2025-09-10"])
-    assert captured.get("betas") == ["web-fetch-2025-09-10"], "non-empty betas must be forwarded"
+    turn_brain._invoke_llm_tools("sys", ["x"], [], ["web-fetch-2025-09-10"])
+    assert captured["betas"] == ["web-fetch-2025-09-10"], "non-empty betas must be forwarded"
 
 
-# --- Cache batch 2026-07-18: both model seams pass the system as ONE cache_control block ------------
+# --- Cache batch 2026-07-18: both model seams ask the seam for the cached system block --------------
 
 
-def _assert_cached_system_shape(system: Any, expected_text: str) -> None:
-    """The block-list cache shape both seams must emit: ONE text block carrying the full system
-    string, marked ephemeral so the per-turn prefix is served from cache."""
-    assert isinstance(system, list) and len(system) == 1
-    block = system[0]
-    assert block["type"] == "text"
-    assert block["text"] == expected_text
-    assert block["cache_control"] == {"type": "ephemeral"}
-
-
-def test_invoke_llm_passes_system_as_cache_control_block(monkeypatch):
-    """Cache batch — the single-call seam sends ``system`` as a block LIST whose only block carries
-    ``cache_control: ephemeral`` and the FULL system string (locale sub included — it is per-owner
-    stable and belongs inside the cached prefix). Volatile content stays on the user prompt."""
-    pytest.importorskip("anthropic")
+def test_invoke_llm_asks_for_cached_system_on_the_conversational_tier(monkeypatch):
+    """Cache batch — the single-call seam sends the FULL system string (locale sub included: it is
+    per-owner stable and belongs inside the cached prefix) with ``cache_system=True``, on the
+    env-resolved conversational TIER rather than a hardcoded model. Volatile content stays on the
+    user prompt. The block shape itself is pinned in tests/test_llm_structured.py."""
     captured: dict[str, Any] = {}
 
-    class _FakeMessages:
-        def create(self, **kwargs):
-            captured.update(kwargs)
-            return SimpleNamespace(content=[SimpleNamespace(type="text", text='{"reply_text":"hi"}')])
+    def _fake_text_call(tier, **kwargs):
+        captured["tier"] = tier
+        captured.update(kwargs)
+        return '{"reply_text":"hi"}'
 
-    class _FakeClient:
-        messages = _FakeMessages()
-
-    monkeypatch.setattr("anthropic.Anthropic", lambda *a, **k: _FakeClient())
+    monkeypatch.setattr("orchestrator.llm.structured.structured_text_call", _fake_text_call)
 
     turn_brain._invoke_llm("SYSTEM en-locale", "USER volatile")
-    _assert_cached_system_shape(captured["system"], "SYSTEM en-locale")
-    assert captured["messages"] == [{"role": "user", "content": "USER volatile"}]
+    assert captured["tier"] == turn_brain._TURN_TIER == "complex"
+    assert captured["system"] == "SYSTEM en-locale"
+    assert captured["user"] == "USER volatile"
+    assert captured["cache_system"] is True
+    assert captured["timeout_s"] == turn_brain._TURN_TIMEOUT_S
 
 
-def test_invoke_llm_tools_passes_system_as_cache_control_block(monkeypatch):
-    """Cache batch — the tool-loop seam sends the SAME block-list cache shape (the caller-assembled
-    system string, _TOOLS_ADDENDUM included, inside the cached block) while the VT-662 empty-betas
-    omission stays intact."""
-    pytest.importorskip("anthropic")
+def test_invoke_llm_tools_asks_for_cached_system_on_the_conversational_tier(monkeypatch):
+    """Cache batch — the tool-loop seam makes the SAME request (caller-assembled system string with
+    _TOOLS_ADDENDUM already appended, cached, same tier) while the VT-662 empty-betas omission holds."""
     captured: dict[str, Any] = {}
 
-    class _FakeMessages:
-        def create(self, **kwargs):
-            captured.clear()
-            captured.update(kwargs)
-            return SimpleNamespace(content=[SimpleNamespace(type="text", text='{"reply_text":"hi"}')])
+    def _fake_messages_call(tier, **kwargs):
+        captured["tier"] = tier
+        captured.update(kwargs)
+        return _resp("end_turn", text='{"reply_text":"hi"}')
 
-    class _FakeClient:
-        beta = SimpleNamespace(messages=_FakeMessages())
+    monkeypatch.setattr("orchestrator.llm.structured.messages_call", _fake_messages_call)
 
-    monkeypatch.setattr("anthropic.Anthropic", lambda *a, **k: _FakeClient())
-
-    turn_brain._invoke_llm_tools(
-        "SYSTEM plus addendum", [{"role": "user", "content": "x"}], [], []
-    )
-    _assert_cached_system_shape(captured["system"], "SYSTEM plus addendum")
-    assert "betas" not in captured  # VT-662 guard undisturbed by the cache shape
+    turn_brain._invoke_llm_tools("SYSTEM plus addendum", ["x"], [], [])
+    assert captured["tier"] == turn_brain._TURN_TIER == "complex"
+    assert captured["system"] == "SYSTEM plus addendum"
+    assert captured["cache_system"] is True
+    assert captured["betas"] is None  # VT-662 guard undisturbed by the cache shape

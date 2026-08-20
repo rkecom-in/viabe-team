@@ -28,7 +28,7 @@ import { OwnershipStep } from './ownership-step'
 type Lang = 'en' | 'hi'
 type BizType = { key: string; label_en: string; label_hi: string }
 type MsgKey =
-  | 'title' | 'business_name' | 'owner_name' | 'whatsapp_number' | 'city'
+  | 'title' | 'business_name' | 'owner_name' | 'whatsapp_number' | 'city' | 'owner_email' | 'invalid_email'
   | 'business_type' | 'language' | 'consent_dpdpa' | 'consent_residency'
   | 'submit' | 'invalid_phone' | 'required' | 'duplicate' | 'generic' | 'success'
   | 'send_code' | 'code_sent' | 'enter_code' | 'verify_create' | 'invalid_code'
@@ -42,6 +42,8 @@ const MESSAGES: Record<Lang, Record<MsgKey, string>> = {
     owner_name: 'Your name',
     whatsapp_number: 'WhatsApp number (+91…)',
     city: 'City',
+    owner_email: 'Email (optional — we’ll send your consent record here)',
+    invalid_email: 'Enter a valid email address, or leave it empty.',
     business_type: 'Business type',
     language: 'Language',
     consent_dpdpa: 'I agree to the data-processing notice (DPDP).',
@@ -69,6 +71,8 @@ const MESSAGES: Record<Lang, Record<MsgKey, string>> = {
     owner_name: 'आपका नाम',
     whatsapp_number: 'WhatsApp नंबर (+91…)',
     city: 'शहर',
+    owner_email: 'Email (optional — आपका consent record यहीं भेजेंगे)',
+    invalid_email: 'सही email पता डालें, या खाली छोड़ दें।',
     business_type: 'व्यवसाय का प्रकार',
     language: 'भाषा',
     consent_dpdpa: 'मैं डेटा-प्रोसेसिंग सूचना (DPDP) से सहमत हूँ।',
@@ -93,6 +97,8 @@ const MESSAGES: Record<Lang, Record<MsgKey, string>> = {
 }
 
 const PHONE_RE = /^\+91[6-9]\d{9}$/
+// VT-724: optional email — validated only when non-empty (it routes the DPDP consent record).
+const EMAIL_RE = /^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/
 
 export function SignupForm() {
   const [lang, setLang] = useState<Lang>('en')
@@ -102,6 +108,7 @@ export function SignupForm() {
     owner_name: '',
     whatsapp_number: '',
     city: '',
+    owner_email: '',
     business_type: '',
     consent_dpdpa: false,
     consent_residency: false,
@@ -162,6 +169,10 @@ export function SignupForm() {
     }
     if (!PHONE_RE.test(form.whatsapp_number)) {
       setError(t.invalid_phone)
+      return
+    }
+    if (form.owner_email && !EMAIL_RE.test(form.owner_email.trim())) {
+      setError(t.invalid_email)
       return
     }
     setStep('entity')
@@ -377,6 +388,17 @@ export function SignupForm() {
             onChange={(e) => update('city', e.target.value)}
             maxLength={120}
             required
+            className={fieldInput}
+          />
+        </label>
+        <label className={fieldLabel}>
+          {t.owner_email}
+          <input
+            value={form.owner_email}
+            onChange={(e) => update('owner_email', e.target.value)}
+            maxLength={254}
+            inputMode="email"
+            placeholder="name@example.com"
             className={fieldInput}
           />
         </label>

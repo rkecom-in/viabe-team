@@ -707,3 +707,37 @@ def test_create_whatsapp_signup_tenant_duplicate_returns_existing(pool):
     second = create_whatsapp_signup_tenant(phone)
     assert first.created is True and second.created is False
     assert first.tenant_id == second.tenant_id
+
+
+def test_vt724_web_email_persists_and_invalid_rejects(pool):
+    """VT-724 — the web form's optional owner_email: persisted lowercased at create (the
+    consent-record hook then fires with an address present); an INVALID non-empty address is a
+    loud SignupError('invalid_email'); empty stays legal (email never gates signup)."""
+    from orchestrator.onboarding.signup import SignupError, run_signup
+
+    out = run_signup(
+        _valid_input(owner_email="Asha.Devi@Example.COM"),
+        welcome_send_fn=lambda *a, **k: True,
+        verify_search_fn=_active_search,
+    )
+    assert out.welcome_sent is True
+    with pool.connection() as c:
+        row = c.execute(
+            "SELECT owner_email FROM tenants WHERE id = %s", (str(out.tenant_id),)
+        ).fetchone()
+    assert row is not None and row["owner_email"] == "asha.devi@example.com"
+
+    with pytest.raises(SignupError) as ei:
+        run_signup(
+            _valid_input(owner_email="not-an-address", whatsapp_number=_wa_91()),
+            welcome_send_fn=lambda *a, **k: True,
+            verify_search_fn=_active_search,
+        )
+    assert ei.value.code == "invalid_email"
+
+    out2 = run_signup(
+        _valid_input(owner_email="", whatsapp_number=_wa_91()),
+        welcome_send_fn=lambda *a, **k: True,
+        verify_search_fn=_active_search,
+    )
+    assert out2.plan_tier == "founding"  # empty email never gates

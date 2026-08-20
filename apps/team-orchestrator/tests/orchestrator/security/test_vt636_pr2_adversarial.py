@@ -140,7 +140,6 @@ def test_a2_theme_prompt_adversarial_bilingual_injection():
 
 def test_a3_default_adjudicate_adversarial_bilingual_injection(monkeypatch):
     pytest.importorskip("pydantic")
-    anthropic = pytest.importorskip("anthropic")
 
     from orchestrator.onboarding import entity_resolution as er
 
@@ -151,28 +150,17 @@ def test_a3_default_adjudicate_adversarial_bilingual_injection(monkeypatch):
 
     captured: dict[str, Any] = {}
 
-    class _FakeMessages:
-        def create(self, **kwargs):
-            captured["kwargs"] = kwargs
+    def _fake_text_call(tier, **kwargs):
+        captured["tier"] = tier
+        captured["kwargs"] = kwargs
+        return (
+            '{"matched_candidate_index": null, "resolved_website": null, '
+            '"confidence": "low", "reasoning": "no match"}'
+        )
 
-            class _Block:
-                type = "text"
-                text = (
-                    '{"matched_candidate_index": null, "resolved_website": null, '
-                    '"confidence": "low", "reasoning": "no match"}'
-                )
-
-            class _Resp:
-                content = [_Block()]
-
-            return _Resp()
-
-    class _FakeAnthropic:
-        def __init__(self, *a, **k):
-            self.messages = _FakeMessages()
-
-    # bypass the actual model call — capture the prompt instead of hitting the network
-    monkeypatch.setattr(anthropic, "Anthropic", _FakeAnthropic)
+    # bypass the actual model call — capture the prompt instead of hitting the network.
+    # VT-732: the adjudicator calls the multi-provider seam, so THAT is the capture point.
+    monkeypatch.setattr("orchestrator.llm.structured.structured_text_call", _fake_text_call)
 
     anchors = er.OwnerAnchors(signup_name="RKECOM SERVICES")
     candidates = [
@@ -189,7 +177,7 @@ def test_a3_default_adjudicate_adversarial_bilingual_injection(monkeypatch):
     verdict = er._default_adjudicate(anchors, candidates)
     assert verdict is not None  # the fake LLM leg still returns valid JSON
 
-    prompt = captured["kwargs"]["messages"][0]["content"]
+    prompt = captured["kwargs"]["user"]
 
     # (a) FRAMING renders exactly once
     assert prompt.count(er.FRAMING) == 1

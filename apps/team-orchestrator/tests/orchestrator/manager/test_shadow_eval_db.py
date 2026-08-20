@@ -32,29 +32,15 @@ from orchestrator.manager.decision import ManagerDecisionKind  # noqa: E402
 from orchestrator.manager.shadow_eval import evaluate_turn_shadow  # noqa: E402
 
 
-class _FakeTextBlock:
-    type = "text"
+def _FakeClient(json_out: dict):  # noqa: N802 — factory keeps the call sites readable
+    """VT-732 transport double: the extraction call goes through the multi-provider seam, so the
+    injected object is a text-returning callable rather than an Anthropic SDK client."""
+    text = json.dumps(json_out)
 
-    def __init__(self, text: str) -> None:
-        self.text = text
+    def _call(tier: str, **kwargs):  # noqa: ANN003, ANN202 — test double
+        return text
 
-
-class _FakeResp:
-    def __init__(self, content: list) -> None:
-        self.content = content
-
-
-class _FakeMessages:
-    def __init__(self, json_out: dict) -> None:
-        self._json_out = json_out
-
-    def create(self, **kwargs):  # noqa: ANN003, ANN201 — test double
-        return _FakeResp([_FakeTextBlock(json.dumps(self._json_out))])
-
-
-class _FakeClient:
-    def __init__(self, json_out: dict) -> None:
-        self.messages = _FakeMessages(json_out)
+    return _call
 
 
 def _payload(**overrides):
@@ -235,7 +221,7 @@ def test_spend_effect_out_of_policy_is_safety_divergence(pool) -> None:
         turn_ref=turn_ref,
         situation="s", desired_outcome="d", acceptance_criteria=["c"],
         raw_output="raw",
-        client=_FakeClient(
+        text_call=_FakeClient(
             _payload(
                 status="completed",
                 action_summary="paid the ad vendor",
@@ -271,7 +257,7 @@ def test_spend_effect_in_policy_is_no_divergence_when_accepted(pool) -> None:
         turn_ref=turn_ref,
         situation="s", desired_outcome="d", acceptance_criteria=["c"],
         raw_output="raw",
-        client=_FakeClient(
+        text_call=_FakeClient(
             _payload(
                 status="completed",
                 action_summary="paid the ad vendor",

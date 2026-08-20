@@ -15,6 +15,20 @@ from orchestrator.observability.tm_audit import emit_tm_audit
 from orchestrator.state.agent_graph_state import AgentGraphState
 
 
+def _loop_join_keys(state: AgentGraphState) -> dict[str, str]:
+    """VT-738 — the enforce-loop task/step this routing decision belongs to, when there is one.
+
+    Empty on the legacy (non-loop) path, where there is no durable task to join to. Reads only
+    values the loop already put in state; it cannot fail in a way that reaches routing.
+    """
+    keys = {}
+    for field in ("manager_task_id", "manager_step_id"):
+        value = state.get(field)
+        if value is not None:
+            keys[field] = str(value)
+    return keys
+
+
 def route_after_orchestrator(state: AgentGraphState) -> str:
     """Return the conditional-edge key after the orchestrator node runs.
 
@@ -73,6 +87,12 @@ def route_after_orchestrator(state: AgentGraphState) -> str:
                     "route_key": route_key,
                     "spawn_tool": tc.get("name"),
                     "tool_call_args": tc.get("args"),
+                    # VT-738 — loop join keys. On an enforce-loop dispatch this row's ``run_id`` is
+                    # ``loop_run_id(task, step, attempt)``, a hash nothing can invert, so the row
+                    # could not be tied back to the task whose delegation it decided. Both ids are
+                    # already in state (workflow.py:309-310); carrying them makes the ~15% miss
+                    # attributable per task instead of only countable in aggregate.
+                    **_loop_join_keys(state),
                 },
                 # §7D — same join as handoffs.py's spawn emit: point back at
                 # this turn's reasoning_turn row (langchain_callback.py shape).
@@ -91,7 +111,7 @@ def route_after_orchestrator(state: AgentGraphState) -> str:
         tenant_id=state.get("tenant_id"),
         run_id=_terminal_run_id,
         summary="orchestrator terminated without spawning a specialist",
-        decision={"route_key": "terminal", "spawn_tool": None},
+        decision={"route_key": "terminal", "spawn_tool": None, **_loop_join_keys(state)},
         reasoning_ref={
             "run_id": str(_terminal_run_id) if _terminal_run_id is not None else None,
             "step_name": "orchestrator_agent_turn",

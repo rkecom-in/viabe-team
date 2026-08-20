@@ -32,6 +32,7 @@ never the owner phone. owner_message_sid (a Twilio SID) is allowed.
 from __future__ import annotations
 
 import logging
+import re
 import unicodedata
 from typing import Any
 from uuid import UUID
@@ -112,12 +113,51 @@ def find_open_approval_for_tenant(
     return PendingApprovalsWrapper().find_open_for_tenant(tenant_id, conn=conn)
 
 
+def is_repeat_of_request(reply: str, request: str | None) -> bool:
+    """VT-734 CONTENT RULE — is this reply substantively the owner's ORIGINAL REQUEST again?
+
+    Fazal, 2026-08-06: *"a repeated request is NEVER approval … a re-ask is 'you're being slow,'
+    never consent."* The ordering invariant already refuses a message sent before the ask; this
+    catches the other half — the owner re-sending "bhej do abhi" AFTER the ask, which the
+    deterministic classifier reads as an approval because ``bhej`` is in ``_APPROVE_VERB``. The
+    send verb is how an owner ASKS and how they CONSENT; only context separates them, and the
+    context is "does this repeat what they already said."
+
+    Deterministic and deliberately narrow: normalized token-set containment, not similarity
+    scoring. A reply whose meaningful tokens are a subset of (or equal to) the original request's,
+    with no NEW decision content, is a repeat. "haan bhej do" after a request for "sabko Diwali
+    offer bhej do" introduces "haan" — an affirmation the request did not contain — so it is NOT a
+    repeat and still approves. A verbatim re-send introduces nothing and is refused.
+    """
+    if not reply or not request:
+        return False
+    def _tokens(s: str) -> set[str]:
+        norm = unicodedata.normalize("NFC", s.strip().casefold()).replace("'", "").replace("’", "")
+        return {t for t in re.split(r"[\s,.!?;:।/\\-]+", norm) if t}
+
+    reply_tokens = _tokens(reply)
+    if not reply_tokens:
+        return False
+    novel = reply_tokens - _tokens(request)
+    # Tokens that carry DECISION meaning even when the rest is a repeat. A reply adding any of them
+    # is answering, not re-asking.
+    from orchestrator.owner_inputs.approval_reply import (
+        _NEGATION,
+        _REJECT_KW,
+        _STRONG_APPROVE,
+    )
+
+    decisive = novel & (_STRONG_APPROVE | _REJECT_KW | _NEGATION)
+    return not decisive
+
+
 def resolve_decision_from_reply(
     text: str,
     *,
     tenant_id: UUID | str,
     approval_type: str | None = None,
     classify_fn: Any | None = None,
+    original_request: str | None = None,
 ) -> str | None:
     """Resolve an owner approval reply to a decision verb.
 
@@ -146,6 +186,21 @@ def resolve_decision_from_reply(
     # collides with it. Free text — including sentences that merely CONTAIN a title — falls
     # through to the unchanged paths below.
     from orchestrator.owner_inputs.approval_reply import classify_button_decision
+
+    # VT-734 CONTENT RULE — checked FIRST, ahead of every classifier and every mode (deterministic,
+    # shadow, enforce). A repeated request is not a decision in ANY mode, so this cannot be a branch
+    # inside one of them. Scoped to customer-SEND approvals (the money surface the ruling names);
+    # refusing leaves the gate open, which costs the impatient owner one extra confirmation tap —
+    # the cost Fazal accepted explicitly rather than risk an unconsented send.
+    if approval_type in _CUSTOMER_SEND_APPROVAL_TYPES and is_repeat_of_request(
+        text, original_request
+    ):
+        logger.warning(
+            "VT-734: refusing to read a REPEATED REQUEST as approval (tenant=%s type=%s) — "
+            "gate stays open, owner is re-asked",
+            tenant_id, approval_type,
+        )
+        return None
 
     button = classify_button_decision(text)
     if button is not None:
@@ -309,6 +364,52 @@ def _audit_owner_skip_review(tenant_id: UUID | str, approval_type: str | None) -
         )
 
 
+class StaleApprovalDecisionError(RuntimeError):
+    """VT-734 — an inbound that PREDATES the approval ask tried to resolve it.
+
+    Raised by the resolution seam, never swallowed there: the caller decides whether to leave the
+    gate paused (the owner-reply path) or to re-raise. The name says the invariant, so a future
+    reader of a log line knows a message reached BACKWARDS rather than a classifier misfiring."""
+
+
+def _assert_decision_is_newer_than_the_ask(
+    conn: Any,
+    tenant_id: UUID | str,
+    approval_id: UUID | str,
+    owner_message_at: Any,
+) -> None:
+    """VT-734 ORDERING INVARIANT — a message that predates the ask can never be its decision.
+
+    Fazal, 2026-08-06 (CL-2026-08-06-repeated-request-is-never-approval): resolution requires the
+    resolving inbound to land strictly AFTER the approval was armed AND presented.
+
+    What this closes, observed on deployed dev: an owner sent the same campaign request twice while
+    the turn was slow; the second REQUEST (23:30:02) resolved a campaign_send approval created at
+    23:31:14 — 72 seconds later — and 19 customers were reported as messaged. The VT-633 D-A arm-wait
+    is what let the message reach forward: it deliberately holds a "clear owner decision" that lands
+    while the loop is still arming. That is right for a decision and catastrophic for a request, and
+    nothing distinguished them, because nothing compared the timestamps.
+
+    Fails CLOSED: an unknown boundary (row gone) or an unknown message time refuses the resolution.
+    The cost of a false refusal is one extra confirmation tap, which Fazal accepted explicitly; the
+    cost of a false acceptance is real customer messages the owner never approved.
+    """
+    if owner_message_at is None:
+        return  # system-initiated resolution (timeout sweep / supersede) — not an owner decision
+    boundary = PendingApprovalsWrapper().presented_or_armed_at(tenant_id, approval_id, conn=conn)
+    if boundary is None:
+        raise StaleApprovalDecisionError(
+            f"approval {approval_id} has no arm/presentation instant — cannot verify the inbound "
+            f"came after the ask; refusing to resolve (fail-closed)"
+        )
+    if owner_message_at <= boundary:
+        raise StaleApprovalDecisionError(
+            f"inbound at {owner_message_at.isoformat()} PREDATES approval {approval_id} "
+            f"(asked at {boundary.isoformat()}) — a message sent before the owner saw the plan "
+            f"cannot be consent to it"
+        )
+
+
 def mark_approval_resolved(
     conn: Any,
     tenant_id: UUID | str,
@@ -317,6 +418,7 @@ def mark_approval_resolved(
     *,
     owner_message_sid: str | None = None,
     owner_feedback: str | None = None,
+    owner_message_at: Any = None,
 ) -> bool:
     """Resolve (or, for a defer, EXTEND) the pending_approvals row. Returns True if the row was
     RESOLVED (the caller resumes the run), False if it was EXTENDED on a defer (the run STAYS
@@ -335,8 +437,15 @@ def mark_approval_resolved(
     ``agent_draft_batches`` row in the SAME transaction/connection (approved → 'approved';
     needs_changes → 'edit_requested' + owner_feedback + ONE-regeneration cap; rejected →
     'rejected'; timeout / exhausted-defer → 'cancelled'). ``owner_feedback`` is the raw owner
-    reply body — persisted on the RLS-protected batch row only, NEVER logged (CL-390)."""
+    reply body — persisted on the RLS-protected batch row only, NEVER logged (CL-390).
+
+    VT-734: ``owner_message_at`` is the resolving inbound's timestamp. Passing it enforces the
+    ordering invariant HERE — at the single choke point every owner-decision path already funnels
+    through — rather than as a patch on one approval_type. ``None`` means "not an owner decision"
+    (the timeout sweep, a supersede), which skips the check by design."""
     from orchestrator.observability.tm_audit import emit_tm_audit
+
+    _assert_decision_is_newer_than_the_ask(conn, tenant_id, approval_id, owner_message_at)
     if decision == "defer":
         new_count = PendingApprovalsWrapper().extend_on_defer(
             tenant_id, approval_id, timeout_hours=48, conn=conn
@@ -417,13 +526,22 @@ def _wake_waiting_workflow(conn: Any, tenant_id: UUID | str, approval_id: UUID |
     content-free hint on the owner-signal topic. The waiting loop's ``DBOS.recv`` returns early and
     RE-CHECKS the DB condition — the signal is a hint, never an authority, so a missed/duplicate
     send changes nothing but latency. Best-effort: any failure falls back to the poll ladder.
+
+    VT-747 sibling — SAVEPOINTED for the same reason as ``_ack_owner_stalled_campaign``. This was NOT
+    named in that row; it was found by the scope-2 audit ("enumerate every statement on the resolve
+    connection") and it has the identical shape: a read on the shared resolve ``conn`` inside a
+    fail-soft ``except``. A server-side error on that read aborts the owner's transaction, the except
+    swallows it, and the resolution is silently rolled back. ``DBOS.send`` stays outside the savepoint
+    — it is not a database statement on this connection.
     """
     try:
         from dbos import DBOS
 
         from orchestrator.manager import task_store
 
-        bound = task_store.find_task_for_resolved_approval(tenant_id, approval_id, conn=conn)
+        # SAVEPOINT — see the VT-747 note above.
+        with conn.transaction():
+            bound = task_store.find_task_for_resolved_approval(tenant_id, approval_id, conn=conn)
         if bound is None:
             return
         meta = bound.get("stall_metadata") or {}
@@ -506,13 +624,34 @@ def _guarantee_campaign_consumer(
     try:
         from orchestrator.manager import task_store
 
-        bound = task_store.find_task_for_resolved_approval(tenant_id, approval_id, conn=conn)
-        if bound is None or bound.get("approval_type") not in _LOOP_CONSUMER_APPROVAL_TYPES:
-            return  # no bound loop task (legacy graph-resume owns its own run), or not a loop send
-        status = str(bound["status"])
-        task_id = bound["id"]
+        # VT-747 sibling — SAVEPOINT. The docstring above promises this is "FULLY FAIL-SOFT: the
+        # owner's authoritative resolution must never be unwound by a consumer-guarantee error
+        # (Pillar 7)", but the ``except`` below could not deliver that: a server-side error on the
+        # find/redrive statements aborts the shared resolve transaction, and swallowing the Python
+        # exception then turns the owner's COMMIT into a silent ROLLBACK. Found by VT-747's scope-2
+        # audit, not named in the row.
+        #
+        # The redrive stays INSIDE this savepoint on purpose. A savepoint that completes releases into
+        # the enclosing transaction, so the documented "redrive commits atomically with the
+        # resolution" is preserved exactly; only the FAILURE path changes, from "unwind the owner's
+        # decision" to "abandon the redrive and keep the decision".
+        with conn.transaction():
+            bound = task_store.find_task_for_resolved_approval(tenant_id, approval_id, conn=conn)
+            if bound is None or bound.get("approval_type") not in _LOOP_CONSUMER_APPROVAL_TYPES:
+                return  # no bound loop task (legacy graph-resume owns its own run), or not a loop send
+            status = str(bound["status"])
+            task_id = bound["id"]
+            redriven = (
+                task_store.redrive_task(tenant_id, task_id, conn=conn)
+                if status in ("dead_letter", "blocked")
+                else False
+            )
         if status in ("dead_letter", "blocked"):
-            task_store.redrive_task(tenant_id, task_id, conn=conn)
+            # VT-740 — the effect-check this path never had. It REPORTS, it does not BLOCK: see
+            # _report_effect_on_redrive for why refusing here would be the wrong trade.
+            _report_effect_on_redrive(
+                conn, tenant_id, task_id, from_status=status, redriven=redriven
+            )
             _ack_owner_stalled_campaign(conn, tenant_id, reset=True)
         elif status in ("completed", "failed", "cancelled"):
             _ack_owner_stalled_campaign(conn, tenant_id, reset=False)
@@ -524,17 +663,160 @@ def _guarantee_campaign_consumer(
         )
 
 
+#: VT-740 — campaign statuses whose delivered-effect is worth surfacing when a redrive resumes a
+#: dead task.
+#:
+#: 'approved' is a campaign still mid-flight. **'failed' is here because the crashed-campaign sweep
+#: in the SAME change flips exactly 'approved' -> 'failed' after 2h** — and without it the two
+#: halves of this work cancelled each other out. The redrive path is only reached when the bound
+#: task is 'blocked' or 'dead_letter', which takes >= 1h to reach the first blocked rung and
+#: (per this module's own VT-668 note) around 6h to dead_letter. So in the canonical case — the
+#: owner replies hours after the crash, which is the whole reason this seam exists — the campaign
+#: has ALREADY been terminalized, the live set was empty, and the alert could never fire. Only a
+#: redrive landing inside a narrow ~1h window would ever have alerted.
+#:
+#: 'cancelled' and 'rejected' stay out: those are deliberate human decisions, not crashes.
+#: 'sent' stays out: a completed fan-out has no remainder to warn about. 'proposed' has no executor.
+#: Noise is bounded by the delivered-effect filter downstream — a campaign only surfaces here if it
+#: actually reached customers — so admitting 'failed' cannot make every tenant look effectful.
+_LIVE_CAMPAIGN_STATUSES = frozenset({"approved", "failed"})
+
+
+def _report_effect_on_redrive(
+    conn: Any,
+    tenant_id: UUID | str,
+    task_id: Any,
+    *,
+    from_status: str,
+    redriven: bool,
+) -> None:
+    """VT-740 — REPORT what already reached customers when an owner approval redrives a dead task.
+
+    WHY THIS REPORTS INSTEAD OF BLOCKING. This seam fires on the owner's EXPLICIT APPROVAL of a
+    ``campaign_send``. Refusing the redrive on an effect signal would convert an authorization into
+    silence — which is precisely the VT-668 failure this whole function exists to prevent, and it
+    would fail in the direction where the owner believes they authorized a send and nothing happens
+    and nobody says so. The customer-facing harm a block would buy (a real person messaged twice) is
+    already closed path-independently at the send choke by VT-740's per-recipient suppression, which
+    needs no campaign→task attribution — and attribution is exactly what this seam does not reliably
+    have (``manager_tasks.source_message_ref`` is a nullable pointer holding either a run_id or a
+    message_sid). So: proceed, and make sure a human can SEE it. If a block is ever wanted here it
+    must come with a bounded release path, or it recreates the VT-736 wedge.
+
+    WHY THE READ IS SAVEPOINTED. ``runner.try_resume_pending_approval`` wraps the whole resolution
+    in ``conn.transaction()``. A server-side error on this connection ABORTS that transaction; a
+    fail-soft ``except`` would then swallow the Python exception while the owner's COMMIT silently
+    became a ROLLBACK — the owner's authoritative decision, undone by an observability read. The
+    nested ``conn.transaction()`` is a SAVEPOINT, so a failure here rolls back to the savepoint and
+    the resolution survives. ``dispatch_alert`` runs OUTSIDE it, on its own pooled connection.
+
+    CL-390: campaign ids + counts only — never a customer id, phone, or message body.
+    """
+    try:
+        from orchestrator.prod_workflow_diagnosis import _DELIVERED, EffectState
+
+        effects: list[EffectState] = []
+        # SAVEPOINT — see the docstring. Everything that touches ``conn`` lives in here.
+        with conn.transaction():
+            from orchestrator.db.wrappers import CampaignsWrapper
+
+            wrapper = CampaignsWrapper()
+            live_ids = {
+                str(row.get("id"))
+                for row in wrapper.list_recent_basic(tenant_id, limit=50, conn=conn)
+                if str(row.get("status")) in _LIVE_CAMPAIGN_STATUSES
+            }
+            if live_ids:
+                for row in wrapper.effect_state_rollup(
+                    tenant_id, delivered_statuses=_DELIVERED, conn=conn
+                ):
+                    if str(row.get("campaign_id")) not in live_ids:
+                        continue
+                    effects.append(EffectState(
+                        campaign_id=str(row.get("campaign_id")),
+                        intended=int(row.get("intended") or 0),
+                        delivered=int(row.get("delivered") or 0),
+                        attempted_not_delivered=int(row.get("attempted") or 0),
+                        unattributable_delivered=int(row.get("unattributable_delivered") or 0),
+                    ))
+
+        effectful = [e for e in effects if e.kind != "no_effect"]
+        if not effectful:
+            # Nothing the ledger can attribute to a live campaign — the redrive is unremarkable.
+            logger.info(
+                "VT-740 redrive effect-check: no live-campaign effect for tenant=%s task=%s "
+                "(redrive proceeds)", tenant_id, task_id,
+            )
+            return
+
+        from orchestrator.alerts.dispatch import dispatch_alert
+        from orchestrator.alerts.triggers import Trigger, severity_for
+
+        worst = "partial_send" if any(e.kind == "partial_send" for e in effectful) else (
+            "unknown" if any(e.kind == "unknown" for e in effectful) else "complete"
+        )
+        remainder = sum(e.remainder for e in effectful)
+        delivered = sum(e.delivered for e in effectful)
+        dispatch_alert(Trigger(
+            tenant_id=tenant_id if isinstance(tenant_id, UUID) else UUID(str(tenant_id)),
+            trigger_kind="escalation",
+            severity=severity_for("escalation"),
+            message_text=(
+                f"Owner approved a campaign_send whose executor was '{from_status}'; the task was "
+                f"redriven (redriven={redriven}). The ledger shows {delivered} customer(s) "
+                f"ALREADY messaged on this tenant's live campaign(s) and {remainder} never "
+                f"messaged (effect={worst}). The redrive was NOT blocked — an owner authorization "
+                "must not resolve into silence — so confirm no duplicate send resulted and decide "
+                "the remainder."
+            ),
+            payload={
+                "task_id": str(task_id),
+                "from_status": from_status,
+                "redriven": bool(redriven),
+                "effect_kind": worst,
+                "delivered": delivered,
+                "remainder": remainder,
+                "campaign_ids": [e.campaign_id for e in effectful],
+                "detected_by": "vt740_redrive_effect_check",
+            },
+        ))
+    except Exception:  # noqa: BLE001 — visibility must never unwind the owner's resolution
+        logger.warning(
+            "VT-740 redrive effect-check failed (fail-soft; the redrive stands) tenant=%s task=%s",
+            tenant_id, task_id, exc_info=True,
+        )
+
+
 def _ack_owner_stalled_campaign(conn: Any, tenant_id: UUID | str, *, reset: bool) -> None:
     """VT-668 — the HONEST owner reply when an approved ``campaign_send`` resolves onto a dead
     executor. NEVER claims the send happened (the redriven task's dispatch step is already 'done',
     so the loop cannot auto-resume the send). Free-form (the owner just replied ⇒ inside the 24h
     window) via the SAME ``send_freeform_message`` primitive the owner-notification path uses — no
     new transport. FULLY FAIL-SOFT: an ack-send failure must never unwind the resolution. CL-390:
-    no owner phone / body logged."""
+    no owner phone / body logged.
+
+    VT-747 — WHY THE READ IS SAVEPOINTED, and why "fail-soft" was a lie without one.
+    ``runner.try_resume_pending_approval`` wraps the whole resolution in ``conn.transaction()``. A
+    SERVER-SIDE error on this connection aborts that transaction. The ``except`` below then swallows
+    the Python exception — so this function reported success while the owner's COMMIT silently became
+    a ROLLBACK. The owner said yes, was told nothing was wrong, and the decision was discarded, with
+    the fail-soft handler ensuring nobody found out. **A try/except cannot make a statement fail-soft
+    on a shared transaction; only a SAVEPOINT can.** Same fix, same reasoning, as
+    ``_report_effect_on_redrive``.
+
+    ``send_freeform_message`` stays OUTSIDE the savepoint: it touches no connection, and holding a
+    savepoint open across a network round-trip on the money path buys nothing.
+
+    (VT-747 scope 3 — considered and rejected: moving this read to its own pooled connection, which
+    would REMOVE the hazard rather than scope it. Rejected because the Seoul pooler caps at 15
+    connections and this is the money path. A savepoint costs nothing and protects the same invariant.)
+    """
     try:
-        row = conn.execute(
-            "SELECT owner_phone FROM tenants WHERE id = %s", (str(tenant_id),)
-        ).fetchone()
+        # SAVEPOINT — see the docstring. Everything that touches ``conn`` lives in here.
+        with conn.transaction():
+            row = conn.execute(
+                "SELECT owner_phone FROM tenants WHERE id = %s", (str(tenant_id),)
+            ).fetchone()
         owner_phone = (row["owner_phone"] if isinstance(row, dict) else row[0]) if row else None
         if not owner_phone:
             logger.warning("VT-668 stalled-campaign ack: no owner_phone tenant=%s", tenant_id)

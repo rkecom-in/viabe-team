@@ -221,10 +221,28 @@ def test_adapt_out_of_scope_plan_escalates():
     assert decision.kind is ManagerDecisionKind.ESCALATE
 
 
-def test_adapt_insufficient_data_plan_revises():
-    """INSUFFICIENT_DATA: the Manager CAN reframe or wait — decide_next_action must REVISE (a
-    proposed_outcome IS present, derived from the plan's own missing_data), governed by the
-    EXISTING per-step revision budget, never an immediate escalate. Pure — no DB."""
+def test_adapt_insufficient_data_plan_asks_the_owner():
+    """INSUFFICIENT_DATA now asks the OWNER (CLARIFY), not REVISE. VT-738 RV-2.
+
+    This test previously asserted the opposite, and that was a deliberate design choice, not an
+    oversight — its old docstring read: *"the Manager CAN reframe or wait — decide_next_action must
+    REVISE ... governed by the EXISTING per-step revision budget, never an immediate escalate."*
+    The premise was that the revision budget would contain the retries.
+
+    Deployed dev, 2026-08-10, disproved it. The budget did not contain anything; it was spent:
+
+        manager_review_decision reason=insufficient_data specialist_status=blocked -> revise_step
+        plan_step_replaced revision 1 -> 2      (identically, three times)
+        manager_task_limit_exceeded: max_revisions_per_step_seq:1 count=3 threshold=2
+        triage: cancel_task
+
+    Re-framing a step cannot create data that does not exist, so the loop could never converge —
+    the budget only decided how many times it would fail before the plan was cancelled. Missing
+    data is the owner's to supply, so it routes to the protocol's `needs_owner_input` channel.
+
+    The original "never an immediate escalate" intent is PRESERVED and in fact better served: an
+    owner-actionable gap now asks rather than escalating, and escalate is reserved for the case
+    where nothing is owner-actionable (see the test below). Pure — no DB."""
     from orchestrator.agent.schemas.campaign_plan import CampaignPlanInsufficientData, MissingDataItem
     from orchestrator.manager.decision import ManagerDecisionKind, decide_next_action
     from orchestrator.manager.review import (
@@ -242,11 +260,25 @@ def test_adapt_insufficient_data_plan_revises():
         ],
     )
     ret = adapt_campaign_plan_to_specialist_return(str(uuid4()), plan)
-    assert ret.status == "blocked"
+    assert ret.status == "needs_owner_input"
     assert ret.reason_code == "insufficient_data"
-    assert ret.proposed_outcome is not None
-    assert "customer_ledger" in ret.proposed_outcome
+    # VT-755 / ruling D-A: the question must NOT carry the model's remediation prose — that field is
+    # written for an engineering audience. It comes from the closed vocabulary in manager.owner_ask,
+    # composed from the tenant's verifiable state. The diagnostic still reaches an operator via
+    # outcome_summary (asserted below), which is exactly the split D-A asks for.
+    assert ret.owner_question, "needs_owner_input still requires a question"
+    assert "connect a POS/ledger integration" not in ret.owner_question, (
+        "model remediation prose reached the owner — VT-755/D-A forbids it"
+    )
+    assert "I can't build this yet" in ret.owner_question
+    # The fake proposal is what routed this to REVISE in the first place. It must not return.
+    assert ret.proposed_outcome is None
+    # The diagnostic detail still has to reach an operator, just not as a "proposed outcome".
+    assert "customer_ledger" in ret.outcome_summary
 
     legacy = to_legacy_specialist_return(ret)
     decision = decide_next_action(legacy, has_next_step=False)
-    assert decision.kind is ManagerDecisionKind.REVISE
+    assert decision.kind is ManagerDecisionKind.CLARIFY
+    assert decision.kind is not ManagerDecisionKind.REVISE, (
+        "a revise here re-dispatches an identical step against identically-absent data"
+    )

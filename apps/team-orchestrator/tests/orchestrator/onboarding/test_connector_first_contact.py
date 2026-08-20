@@ -118,12 +118,37 @@ def test_mint_check_failure_fails_soft_to_plain_mint(spies, monkeypatch):
     assert "accounts.google.com" in body_sent
 
 
-def test_bare_state_request_offers_setup_no_url(spies):
-    # "get this connected?" is a past-participle STATE phrasing with no imperative verb -> after the
-    # 2026-07-10 split it routes to the status/OFFER branch (no URL dump), NOT an immediate mint.
-    # The owner's next "yes, connect it" reply carries the imperative verb and mints. This is the
-    # deliberate trade to kill the status-question URL-dump loop.
+def test_participle_request_MINTS_reversing_the_2026_07_10_trade(spies):
+    """VT-761 — THIS TEST PREVIOUSLY ASSERTED THE OPPOSITE, deliberately. Recording why it turned.
+
+    The 2026-07-10 split routed "can we get this connected?" to the status/OFFER branch because it is
+    a past-participle phrasing with no imperative verb, and the comment here justified the trade like
+    this: *"The owner's next 'yes, connect it' reply carries the imperative verb and mints."*
+
+    Gate (d) falsified that assumption, deterministically, in all three passes
+    (i_sheets_mapping_confirm_happy_path). The owner's next reply was "Done, I've connected it" — and
+    because no mint had armed `phase_2_auth`, it never reached the resume gate. It landed on THIS
+    branch again and got the SAME sentence back, byte-for-byte:
+
+        No — your Google Sheet isn't connected yet. Want me to set it up?
+        No — your Google Sheet isn't connected yet. Want me to set it up?
+
+    So the trade cost more than a turn: it stranded the flow. The protection it bought is kept —
+    every genuine status question ("is it connected?", "did you get it connected?", "have you
+    connected it?") still routes to the OFFER branch with no URL, pinned in
+    test_vt761_participle_request_mints.py — only the causative-with-a-request-frame construction
+    moved.
+    """
     res = _run("I use a Google Sheet to track my shop. Can we get this connected?")
+    assert res is not None and res["routed"] == "sheets_first_contact_minted"
+    assert spies["sheets"] == 1
+    assert "https://" in spies["sends"][0], "a connect REQUEST must hand over the link (CL-421)"
+
+
+def test_bare_state_question_still_offers_setup_no_url(spies):
+    """The half of the 2026-07-10 split that was RIGHT, kept pinned: a pure status QUESTION is
+    answered from the DB and never answered with a URL dump — the dominant Tier-1 loop_stall."""
+    res = _run("Is my Google Sheet connected?")
     assert res is not None and res["routed"] == "connector_status_answered"
     assert spies["sheets"] == 0
     body_sent = spies["sends"][0]

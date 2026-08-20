@@ -22,7 +22,7 @@ from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
 
-_GAP_MODEL = "claude-haiku-4-5-20251001"
+_GAP_TIER = "classifier"  # VT-732: the cheap tier, resolved per call from TEAM_MODEL_CLASSIFIER
 _MAX_GAPS = 6  # minimal — never a 20-question dump
 # VT-693 (Fazal 2026-07-22, first-customer screenshots: "endless questions"): once ONLINE
 # discovery has produced a draft, the residual the owner is asked shrinks hard — the
@@ -240,7 +240,7 @@ def compose_onboarding_questions(
     # residual answer the owner has ALREADY given consumes one slot, so an answered question
     # can never refill the window with a fresh one. Identity captures (name/owner/GST card)
     # and confirm-style answers (fields the draft itself carries) are not residuals.
-    _non_residual = {"business_name", "owner_name", "gst_identity"}
+    _non_residual = {"business_name", "owner_name", "gst_identity", "owner_email"}
     _draft_canon = {_canonical_field(f) for f in draft_attrs}
     spent = sum(
         1 for f in answered_set
@@ -316,16 +316,46 @@ def compose_onboarding_questions(
         if len(gaps) >= max_gaps:
             break
 
+    # VT-724 (Fazal, resolves D6: email at ONBOARDING) — the owner_email capture is a
+    # deterministic, BUDGET-EXEMPT question asked LAST: it is a compliance capture (the DPDP
+    # consent record needs an address), not a profile residual, so it never consumes a gap slot
+    # and never counts as spent (_non_residual). Skip is legal — capture never gates anything.
+    if "owner_email" not in answered_set and "owner_email" not in {q.field for q in gaps}:
+        gaps.append(
+            Question(
+                field="owner_email",
+                kind="gap",
+                prompt_en=(
+                    "One last detail — what's your email address? We'll send your consent "
+                    "record there for your files. (Reply Skip if you'd rather not.)"
+                ),
+                prompt_hi=(
+                    "एक आख़िरी जानकारी — आपका email पता क्या है? आपका consent record वहीं "
+                    "भेजेंगे, आपके records के लिए। (नहीं देना हो तो Skip भेजें।)"
+                ),
+                suggestions_en=("Skip",),
+                suggestions_hi=("Skip",),
+                help_en=(
+                    "A copy of the consent you gave us, emailed to you as a record — like "
+                    "name@example.com."
+                ),
+                help_hi=(
+                    "आपने जो consent दिया उसकी एक copy आपको email पर मिलेगी — जैसे "
+                    "name@example.com."
+                ),
+            )
+        )
+
     return confirms + gaps
 
 
 def _llm_compose_gaps(
     business_type: str, draft_attrs: dict[str, Any], answered: list[str]
 ) -> list[dict[str, Any]]:
-    """Ask Haiku which required onboarding fields a business of ``business_type`` STILL needs (given
-    what's already known), as bilingual question objects. Returns [] on any failure (the confirm
-    questions still stand). CL-390: business context only — never ask for third-party PII."""
-    from anthropic import Anthropic
+    """Ask the classifier tier which required onboarding fields a business of ``business_type`` STILL
+    needs (given what's already known), as bilingual question objects. Returns [] on any failure (the
+    confirm questions still stand). CL-390: business context only — never ask for third-party PII."""
+    from orchestrator.llm.structured import structured_text_call
 
     # VT-693: give the model the VALUES, not just opaque field names — semantic coverage is
     # what stops "what do you sell?" after a GST nature_of_business already answered it. Values
@@ -356,15 +386,16 @@ def _llm_compose_gaps(
         'question with a concrete example>", "help_hi": "<same in Hindi>"}. JSON array only, no prose.'
     )
     try:
-        resp = Anthropic().messages.create(
-            model=_GAP_MODEL,
+        raw = structured_text_call(
+            _GAP_TIER,
+            user=prompt,
             max_tokens=700,
-            messages=[{"role": "user", "content": prompt}],
-            timeout=_COMPOSE_TIMEOUT_S,  # VT-367: bound the call — this runs on the owner-inbound hot
+            agent="onboarding_question_brain",
+            call_site="gap_compose",
+            timeout_s=_COMPOSE_TIMEOUT_S,  # VT-367: bound the call — this runs on the owner-inbound hot
             # path (the journey pending-fill branch); a hang must degrade to [] (confirms/opener), not
             # stall the webhook pipeline. try/except catches the timeout exception → [].
         )
-        raw = resp.content[0].text if resp.content else "[]"
         start, end = raw.find("["), raw.rfind("]")
         data = json.loads(raw[start : end + 1]) if start != -1 and end != -1 else []
         return data if isinstance(data, list) else []

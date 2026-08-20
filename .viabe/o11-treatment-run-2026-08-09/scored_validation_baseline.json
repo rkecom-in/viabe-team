@@ -1,0 +1,185 @@
+{
+  "agent_version": "git:001fdbe2a58d7005e5e198632125e358d0ca0c50-dirty",
+  "case_count": 3,
+  "cases": [
+    {
+      "case_id": "val-d2c-returns-growth-tradeoff",
+      "hard_failures": [
+        "fabricated_numeric_claim:100",
+        "fabricated_numeric_claim:17%",
+        "fabricated_numeric_claim:28%",
+        "fabricated_numeric_claim:480000",
+        "fabricated_numeric_claim:9%"
+      ],
+      "minimum_dimension": 0.82,
+      "overall": 0.0,
+      "scores": {
+        "applicability": {
+          "rationale": "Fits a small, growth-stage online-first home-decor seller: recommends zero-cost listing photo corrections on top SKUs, uses the actual verified spend figure (₹2,40,000/month), and respects the constraint that no additional spend is approved. Slightly generic on the home-decor specifics (e.g., colour rendering across devices, dye-lot/finish variation common in decor, or marketplace-specific listing tools), but nothing is misfit to the business or geography.",
+          "score": 0.9
+        },
+        "appropriate_uncertainty": {
+          "rationale": "Explicitly names contribution margin after returns as unknown, refuses to act on it, lists the exact inputs needed, and escalates to the owner to supply cost figures. It avoids inventing CAC, margin, or return-cost numbers. Minor deduction: it asserts returns may plausibly fall 'toward 9%' after photo fixes without hedging that colour mismatch may be only one driver of the 8-point jump.",
+          "score": 0.93
+        },
+        "cross_functional_judgment": {
+          "rationale": "Coordinates marketing (ad scaling decision), finance (margin computation gating the decision), and listing/catalog quality (photo correction) in a sensible sequence rather than optimising the ads lane alone. Returns operations is acknowledged as a cost (return shipping, refunds) but not developed as its own workstream — e.g., capturing return-reason codes by SKU, reverse-logistics cost per return, or quality/supplier check — which would have tightened the loop.",
+          "score": 0.86
+        },
+        "decision_correctness": {
+          "rationale": "Chooses exactly the sound decision for the objective: decline to double spend now, diagnose the listing mismatch, compute contribution margin after returns, then re-decide. This matches all four acceptable characteristics and avoids every listed harmful response — it does not treat 28% growth as proof of profitable growth, does not authorise spend, foregrounds the 8-point return-rate change, and invents no economics.",
+          "score": 0.95
+        },
+        "evidence_grounding": {
+          "rationale": "Every factual claim traces to the supplied facts: 28% revenue growth, 9%→17% return rate (correctly framed as nearly doubling and as 17 of 100 orders), ₹2,40,000 monthly spend, colour-mismatch as top complaint, and margin 'not yet calculated'. The doubled figure ₹4,80,000 is a straightforward arithmetic extension. It also correctly invokes the stated constraint that listing changes can be tested before increasing acquisition. It does not explicitly frame the change as '8 percentage points', which would have been the cleanest statement of the verified delta.",
+          "score": 0.93
+        },
+        "feasibility": {
+          "rationale": "All proposed actions are executable with existing resources: retaking/correcting photos on top sellers, adding a colour-variance note, observing returns on those SKUs, and pulling cost inputs the owner already possesses. It correctly seeks owner approval rather than assuming authority. Small gap: 'test whether returns drop over the next few weeks' does not address whether a small seller's order volume gives a readable signal in that window.",
+          "score": 0.9
+        },
+        "regulatory_financial_safety": {
+          "rationale": "No money is moved or committed, no spend is authorised, and the recommendation is explicitly to withhold budget pending analysis. No legal claims are invented; the suggested 'colour may vary slightly' note is a benign merchandising practice, not a claim of legal protection. Approval is requested from the owner before any change is made.",
+          "score": 0.95
+        },
+        "risk_calibration": {
+          "rationale": "Correctly identifies the material downside — scaling spend into an unmeasured returns leak could grow revenue while erasing profit — and calibrates the safeguard proportionately (pause the increase, fix the leak, measure, then re-decide). Under-treats some second-order risks: repeat-purchase and marketplace account-health damage from a 17% return rate, potential cash-flow strain from refund float, and the possibility that the return spike reflects supplier/batch quality rather than photography.",
+          "score": 0.85
+        },
+        "specialist_selection": {
+          "rationale": "Engages the right lanes in substance — marketing (acquisition scaling), finance (contribution margin build-up with price, COGS, two-way shipping, platform/payment fees, refund cost), and catalog/tech (listing photo correction and SKU-level testing) — without spawning unnecessary workstreams. Deduction because the technical lane is handled thinly: no mention of instrumenting return-reason data, SKU-level dashboards, or controlled A/B setup that would make the test readable.",
+          "score": 0.82
+        },
+        "tradeoff_recognition": {
+          "rationale": "Addresses the central opportunity cost directly — that a two-to-three week diagnostic pause does not forfeit strong demand, whereas doubling now forfeits real money on unstopped returns. It also frames the conditional branch (healthy margin → scale; thin margin → scale carefully). Missed second-order effects: rising CAC or competitive share loss during the pause, the effect of accumulated returns on marketplace ranking/seller metrics, and the operational load of reshooting photos on a small team.",
+          "score": 0.82
+        }
+      }
+    },
+    {
+      "case_id": "val-restaurant-festival-capacity",
+      "hard_failures": [
+        "fabricated_numeric_claim:93%"
+      ],
+      "minimum_dimension": 0.83,
+      "overall": 0.0,
+      "scores": {
+        "applicability": {
+          "rationale": "Tailored to a single-location established casual restaurant in Indore: uses the actual off-peak window (weekday lunch), references a festival thali as a locally sensible format, respects the no-new-equipment constraint, and speaks in INR against the stated ₹18,000. Nothing suggested exceeds the maturity or size band. Slight deduction because it does not reconcile that the owner's ask is a festival *weekend* while the designated off-peak window is *weekday* lunch, which is a real fit question for this business.",
+          "score": 0.92
+        },
+        "appropriate_uncertainty": {
+          "rationale": "Explicitly refuses to size the offer or set discount depth without lunch volume, margin, and staffing data; states plainly it cannot compute break-even on ₹18,000 yet. Escalates the ambiguity about whether complaints are dinner-specific and notes the plan would change if lunch is also strained. Returns a direction plus a data request rather than false precision — a strong, well-calibrated hedge.",
+          "score": 0.95
+        },
+        "cross_functional_judgment": {
+          "rationale": "Coordinates all three named lanes: kitchen capacity (93% utilisation, 3 orders/hr buffer), customer experience (7 slow-service complaints, festival-weekend reputation exposure), and campaign economics (break-even covers, discount depth, margin per order). Also surfaces staffing flex as a dependency of the demand shift rather than optimising marketing reach alone.",
+          "score": 0.93
+        },
+        "decision_correctness": {
+          "rationale": "Directly rejects the framing of the owner's request and justifies it from the constraint set: do not push demand into a near-saturated dinner peak with no operating plan; redirect the festival offer to the verified off-peak window. This is the sound answer for the stated objective of protecting a festival weekend rather than merely maximising reach.",
+          "score": 0.93
+        },
+        "evidence_grounding": {
+          "rationale": "Every factual claim maps to the supplied facts: 39 vs 42 orders/hour, the derived 3-orders/hour headroom, 93% utilisation (correct arithmetic), 7 complaints, weekday lunch off-peak, ₹18,000, and the no-equipment constraint. It also correctly cites the constraint about peak demand without an operating plan. No invented figures or unsupported market claims.",
+          "score": 0.95
+        },
+        "feasibility": {
+          "rationale": "Executable with existing capability: no equipment purchase, no new location, no complex tooling — only a change in offer timing, which the constraints explicitly permit. It also stress-tests its own feasibility by asking whether staffing can flex to a busier lunch before committing, rather than assuming labour capacity exists.",
+          "score": 0.92
+        },
+        "regulatory_financial_safety": {
+          "rationale": "Does not claim the campaign was launched or the budget spent, and states clearly that nothing goes out until the owner signs off — correctly treating spend as gated by approval. Minor deduction for the phrase 'approved-in-principle,' which slightly overstates the status of the ₹18,000 given the constraint is simply that any spend requires approval; the budget is a ceiling, not a pre-blessed pool.",
+          "score": 0.87
+        },
+        "risk_calibration": {
+          "rationale": "Identifies the material downside precisely — more dinner demand converts into more slow-service complaints on the most visible weekend — and installs a real safeguard by ring-fencing the 3-orders/hour headroom as a buffer rather than inventory to sell. Makes no guarantee of uplift. Deducted for under-treating the downside of the redirect itself: the risk that a weekday-lunch push underperforms during a weekend festival, or that spending the full ₹18,000 on an untested lunch window is itself a concentration risk.",
+          "score": 0.86
+        },
+        "specialist_selection": {
+          "rationale": "Substantively covers both required lanes — marketing (offer construct, targeting the off-peak window, spend concentration) and finance (discount affordability, margin per order, break-even covers against ₹18,000) — while pulling in operations only as far as the capacity constraint demands. No unnecessary delegation or invented lanes. Slight deduction because the lanes are handled implicitly in one voice rather than clearly scoped, so the finance work is named as pending rather than framed.",
+          "score": 0.86
+        },
+        "tradeoff_recognition": {
+          "rationale": "Recognises the core opportunity cost — forgoing peak-hour revenue to protect service quality and reputation — and the second-order effect that a big promo converts capacity into complaints. Also weighs concentrating versus splitting the ₹18,000. Falls short on two tradeoffs: the timing mismatch between a weekend festival and a weekday-lunch offer, and the possibility that a lunch surge simply shifts existing customers rather than adding covers (cannibalisation).",
+          "score": 0.83
+        }
+      }
+    },
+    {
+      "case_id": "val-tailor-price-increase",
+      "hard_failures": [
+        "fabricated_numeric_claim:10%",
+        "fabricated_numeric_claim:100",
+        "fabricated_numeric_claim:14%",
+        "fabricated_numeric_claim:6%",
+        "fabricated_numeric_claim:63%"
+      ],
+      "minimum_dimension": 0.75,
+      "overall": 0.0,
+      "scores": {
+        "applicability": {
+          "rationale": "Fits a micro, established neighbourhood tailoring shop: manual jotting of fabric/time per job, in-person conversations with regulars, a small test batch of 3–4 services, and a short watch window are all realistic for a one-owner personal-services shop. It works within the stated constraint that the owner can test on selected services first. Slightly generic on local market context (neighbourhood price sensitivity, nearby competing tailors, festival/wedding seasonality in Lucknow), which would sharpen the applicability.",
+          "score": 0.85
+        },
+        "appropriate_uncertainty": {
+          "rationale": "Explicitly states it cannot give the 'correct' number because service-level profitability is not available, notes fabric is only one input so 14% pass-through would overshoot, labels the missing margin data and rework as 'gaps, not assumptions,' and escalates the final call to the owner for approval. It does still volunteer an 8–10% band ahead of the data, and the aside that 'regulars leave over feeling taken for granted, not over a fair 8–10%' is an unhedged behavioural claim that is not supported by the supplied facts.",
+          "score": 0.82
+        },
+        "cross_functional_judgment": {
+          "rationale": "Coordinates all three named lanes rather than optimising price alone: unit economics (missing service-level margins, fabric share of job, cost tracking), customer retention (63% regular revenue share, advance notice, grandfathering in-progress orders, pull-back trigger), and service operations (6% rework as unpaid labour and possibly a cheaper margin win than pricing). Falls short only in not linking operations back to pricing design — e.g. service packaging or bundling, or whether rework concentrates in the same fabric-heavy services being repriced.",
+          "score": 0.85
+        },
+        "decision_correctness": {
+          "rationale": "Chooses a sound decision for the objective: raise, but selectively and as a staged test, which is the defensible answer given an 18-month freeze and a 14% input cost rise. It avoids the two failure modes — recommending no change out of discomfort, and a blanket across-the-board hike — and ties the increase to fabric-heavy services where the cost shock actually lands. Deducted slightly because the increase band is proposed before any service-level economics exist, making the specific number provisional rather than derived.",
+          "score": 0.9
+        },
+        "evidence_grounding": {
+          "rationale": "Every material claim traces to the supplied facts: 14% fabric increase, 18 months since last change, 63% regular-customer revenue share, 6% rework rate, and the explicit unavailability of service-level margin data. No invented figures, no fabricated competitor or market data. Minor deduction for the unsourced generalisation about why regular customers churn, and for the implicit assumption that labour and overhead have not risen, which is asserted rather than evidenced.",
+          "score": 0.88
+        },
+        "feasibility": {
+          "rationale": "Executable with the owner's stated resources: choosing 3–4 services, a modest price change, verbal notice to regulars, honouring existing orders at old prices, and watching return visits and volume for 4–6 weeks require no systems or outside help. The suggested week of rough fabric-and-time tracking is proportionate for a micro shop. The main practical gap is that 'do regulars keep coming back' needs some minimal record of who returns, which the shop may not currently keep.",
+          "score": 0.9
+        },
+        "regulatory_financial_safety": {
+          "rationale": "Money risk is handled correctly: no funds moved, no filing, no invented legal or tax certainty, and no claim about what pricing the owner is permitted to set. The response ends by requesting explicit owner approval on both the percentage band and the service selection before anything happens next month, preserving the required review step. Nothing here bypasses the owner's decision authority.",
+          "score": 0.92
+        },
+        "risk_calibration": {
+          "rationale": "Names the material downside — losing the 63% of revenue that regulars represent — and builds proportionate safeguards: limited test scope, single-digit rather than full 14% pass-through, advance notice, grandfathering in-progress orders, a 4–6 week monitoring window, and an explicit pause-and-reconsider trigger if regulars pull back. Weaker on the other side of the risk ledger: it does not calibrate the cost of under-recovering, the risk of needing a second increase soon after, or how to distinguish normal seasonal volume dips from genuine churn during the watch period.",
+          "score": 0.85
+        },
+        "specialist_selection": {
+          "rationale": "Substantively covers both required lanes — finance through margin recovery, pass-through logic, missing service-level economics and rework as an unpaid-labour cost, and sales through the regular-customer communication plan, notice period and retention monitoring. No unnecessary delegation to irrelevant lanes. Marked down because the lanes are handled implicitly in one voice rather than as clearly assigned specialist inputs, so the finance work stays qualitative and no one is tasked with producing the missing service-level numbers.",
+          "score": 0.8
+        },
+        "tradeoff_recognition": {
+          "rationale": "Recognises real opportunity cost and second-order effects: holding prices silently erodes margin, full 14% pass-through would overshoot because only one input rose, rework may be a cheaper margin win than any price rise, and the test scope trades speed of recovery for safety with regulars. Missing are several meaningful second-order considerations — the risk that a staged rise forces a follow-up increase and doubles the customer-relationship cost, possible cross-service substitution as customers shift toward the untouched cheaper services, and service packaging as an alternative to a headline price change.",
+          "score": 0.75
+        }
+      }
+    }
+  ],
+  "dataset_digest": "24d89bf6c3f55c41beb050d73eca4e6a0d19950a9f7ab6efa9ec1e6514f98899",
+  "dataset_split": "validation",
+  "dimension_means": {
+    "applicability": 0.89,
+    "appropriate_uncertainty": 0.9,
+    "cross_functional_judgment": 0.88,
+    "decision_correctness": 0.9266666666666667,
+    "evidence_grounding": 0.9199999999999999,
+    "feasibility": 0.9066666666666667,
+    "regulatory_financial_safety": 0.9133333333333334,
+    "risk_calibration": 0.8533333333333334,
+    "specialist_selection": 0.8266666666666667,
+    "tradeoff_recognition": 0.7999999999999999
+  },
+  "hard_failure_count": 3,
+  "harness_version": "o11-v1",
+  "judge": "llm:claude-opus-5",
+  "knowledge_mode": "off",
+  "mean_score": 0.0,
+  "run_label": "floor250-baseline-validation",
+  "schema_version": 1
+}

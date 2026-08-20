@@ -322,3 +322,500 @@ Fazal's definition, ratified verbatim as the canonical role contract. **THE MANA
 
 ## CL-2026-07-29-o8-engine-complete — the O8 knowledge engine is BUILT (inert): #543 + #545 merged; remaining gates are activation gates, not build work (CC merge under the O8 program grant, 2026-07-29)
 CC merged the Codex outer-ring stack in order — **#543** (VT-710: scanned ingestion + retrieval corpus, 118-card conversion with rights manifest) then **#545** (VT-711: inert learning loop, admission, rollout controls, specialist memory + card assignment; migration 186) — head `1de166c9` → dev `170b2b99`. **CC verification pass (beyond Clau's branch audit):** fresh-DB proof green — all 187 migrations apply (186 + CC's 187 coexist), DSR hard-delete canary passes (the append-only trigger's transaction-local `app.dsr_purge` GUC exception works; tenant roles remain RLS-blocked from deletes regardless), knowledge suite + asserted-facts suite green together (327 passed). Inert boundary held: no non-knowledge module imports the new O8 modules (only dsr_purge's purge inventory), rollout default `off`, and `off` mode structurally cannot carry dormant activation authority. No-effect-authority: no send-choke or effect gate reads cards. Numbers clean: 186 only (182/183/186 = the allocated Codex set; 187 = CC's VT-719, no collision — Codex rebased onto it). CI note: the single red on both PRs was `test_in_memory_retrieval_latency_is_bounded` (a 100ms wall-clock bound; 410ms on a loaded shared runner, green locally) — runner-noise class; flagged to Codex to loosen or mark advisory. **O8 is now BUILT. Remaining gates are not build work:** sealed set + O11 baseline (Clau) · rights position on the 96 unknown-rights cards (Fazal) · graduation thresholds (Fazal) · the activation flip (Fazal, per CL-2026-07-29-manager-owns-memory launch posture).
+
+## CL-2026-07-29-card-rights-licensed-sources — unknown-rights cards are REPLACED with licensed-source distillations, not shipped under a fair-use position (Fazal 2026-07-29, Standing)
+Fazal ruled on the 96 `unknown`-rights cards in the 118-card curated corpus (public accessibility was correctly NOT treated as a licence by Codex; those cards are `rights_blocked` from embedding and therefore cannot serve). **Ruling: REPLACE, don't risk.** Keep the cards with clean rights (3 `permission_granted` RKECOM-authored + the corroborated remainder); progressively replace `unknown`-rights cards with distillations from clearly-licensed sources — World Bank / NBER / J-PAL / IPA / government / RBI-SIDBI and equivalents. Rationale: zero legal exposure for a launching company; the licensed evidence base is stronger material anyway (primary studies beat practitioner retellings); and O11 will show which cards actually earn retrieval, so replacing weak-provenance cards costs less than defending them. **Consequence:** the launch corpus is SMALLER than 118 — that is accepted. Coverage grows as licensed distillations land. The 5 `live_link_only` cards remain reference-only (they already never claim the local synthesis is the source). Rostered: **VT-723** (licensed-source distillation programme). No fair-use position is taken or recorded anywhere.
+
+## CL-2026-07-29-graduation-thresholds-clau-proposes — Clau drafts the O8 graduation numbers, Fazal ratifies (Fazal 2026-07-29, process)
+Fazal's process ruling on the §6 graduation gate (minimum sample sizes, non-inferiority margins on safety-critical slices, confidence thresholds — which Codex deliberately left unset rather than guess): **Clau proposes concrete numbers grounded in the journey-pack's observed statistics; Fazal ratifies or adjusts.** He keeps the decision without performing the statistics. Binding sequencing: the proposal is only meaningful once the O11 sealed set + frozen baseline produce real distributions, so the draft lands WITH the baseline, not before. Until ratified, NO corpus version may be marked graduated/validated on measured grounds — inclusion-at-launch (CL-2026-07-29-manager-owns-memory §13.3) remains an observation posture, not a validation claim.
+
+## CL-2026-07-29b-knowledge-not-source — SUPERSEDES CL-2026-07-29-card-rights-licensed-sources: inclusion turns on the card's ACCURACY and VALUE and on ORIGINALITY OF EXPRESSION — not on the source's licence (Fazal 2026-07-29, Standing)
+Fazal corrected Clau's over-cautious position: *"how would license matter for the 96 unlicensed cards? We are only using their information as a knowledge, and our criteria of inclusion and exclusion must be the accuracy and value of the knowledge provided by the card and not its source."* **He is right, and the earlier ruling is superseded.** Copyright protects EXPRESSION, not facts or ideas (the idea/expression dichotomy). A card that re-expresses an extracted finding in our own words is knowledge, not a reproduction — the 118 cards are Codex-authored structure and sentences (situation / decision pressure / risk / recommended action), with none of the source's expression surviving. **The gate is therefore RESET:** (1) INCLUSION = accuracy + value + measured impact (§6), never source licence; (2) `usage_rights: unknown` no longer blocks embedding or serving — the 96 cards are eligible; (3) provenance/source-class remains, but for its legitimate purpose — **AUTHORITY WEIGHTING** in retrieval ranking and conflict resolution (T1–T4), not eligibility. **Narrow cases where source still binds, retained deliberately:** (a) **expression-originality check** — a card containing verbatim or near-verbatim source text is a reproduction and is rejected/rewritten regardless of licence (this replaces the rights gate as the real check); (b) **compilation/database rights** — wholesale extraction of a substantial portion of ONE source/dataset can attach rights even where individual facts don't; flag if a single source dominates; (c) **contractual ToS** prohibiting extraction — binds by contract, not copyright; (d) paywalled material obtained by circumventing access — excluded; (e) **raw archived source pages remain local-only and never retrieval-eligible** — those ARE reproductions (the existing rule, now correctly justified); (f) the 5 `live_link_only` cards keep their honesty convention (never claim the local synthesis is the source original). **VT-723 is RE-SCOPED** from "replace unknown-rights cards" to "grow coverage from high-authority licensed sources where O11 shows weak slices" — additive, not remedial. Clau's note for the record: this is a legal framework, not legal advice; if a specific publisher's ToS or a dominant-source concentration surfaces, that is a counsel question, not an engineering one.
+
+## CL-2026-08-03-seed-then-full-ingestion — Standing (Fazal)
+
+**Decision.** O8 fills the registry in two stages: a small seed corpus to prove the serving path
+end-to-end (**VT-726**), then the **FULL 118-file ingestion (VT-727), which must not be missed**.
+Fazal, verbatim: *"Seed a small corpus, prove the pipe, and once proved ensure all 118 files are
+ingested. The full ingestion must not be missed."*
+
+**Trigger.** CC's 2026-08-03 bounce of VT-725: every O8 table held ZERO rows. Clau had asserted
+"118 eligible cards" — those are FILES, never ingested. Decisive blocker: `knowledge_cards` has
+no `domain` column while `CardRetrievalEngine` filters on `card.domain` first.
+
+**Binding sub-rulings (Clau, within the grant):**
+- `domain` is a **first-class NOT NULL column** on `knowledge_cards` (migration 189), indexed
+  `(domain, status)` — never a per-retrieval 3-way join, never derived.
+- **Seed cards MUST enter through the VT-710 pipeline. A hand-authored direct INSERT is
+  forbidden** — it would rebuild the authored-playbook mechanism Track-D retired and R1 killed,
+  and would prove nothing about the pipe.
+- VT-727 does not close because VT-726 proved the pipe. Per-file verdict for all 118; a silent
+  drop is a row failure.
+
+**Lesson recorded (Clau).** Third premise error in this program — runtime state asserted from
+documents instead of verified against the database. CC verified; Clau did not. Bouncing a row
+with evidence is correct behaviour and is to continue.
+
+## CL-2026-08-03-green-on-fallback-is-not-green — Standing (Clau, from a CC finding)
+
+**Rule.** A green result is not evidence until you know **which code path produced it**. A pass on
+a fallback, a stub, a cached value, or a skipped branch reads identically to a pass on the
+intended path. Before banking a canary or a scenario class, confirm from logs/traces that the code
+you changed is the code that ran.
+
+**Trigger.** VT-720, 2026-08-03: `_invoke_llm` read `resp.content[0].text`, which is a
+`ThinkingBlock` when extended thinking is on — so every converted route silently fell back, and
+casebook classes 1-2 went **3/3 on the fallback line**. CC caught it only by reading logs instead
+of banking the green. **Third instance of this family after VT-662.**
+
+**Companion to** `CL-2026-08-03-seed-then-full-ingestion`'s lesson (Clau asserting runtime state
+from documents). Same disease from opposite ends: trusting the artifact instead of verifying the
+mechanism. Both landed in one week.
+
+## CL-2026-08-03-degradation-before-measurement — Standing (Clau)
+
+**Rule.** Do not run a measurement pack into a degraded environment. A pack measured on unstable
+infrastructure manufactures phantom failure classes and costs the window twice — once producing
+them, once chasing them. Settle the environment, then measure.
+
+**Trigger.** CC's 2026-08-03 refusal to run the promotion full-pack ×3 into a dev showing 90s
+timeouts and `route='none'` on still-running turns (VT-728). Third occurrence of the family after
+VT-719 deploy-contamination and VT-722 held-pushes.
+
+**Corollary.** Dev orphaned-workflow accumulation is the dev-side face of **VT-634** (prod
+failed/orphaned workflow handling, launch-blocker). Findings from a dev degradation of this class
+are input to VT-634, not throwaway fixes.
+
+## CL-2026-08-03-docs-push-is-a-deploy — Standing (CC finding; Clau error)
+
+**Fact.** Railway's native auto-deploy fires on **EVERY push to `dev`, including docs-only pushes**
+that the VT-245 CI trigger-diet deliberately skips. **A skipped CI run does not skip the deploy.**
+A `docs(sprint): …` push restarts the orchestrator.
+
+**Consequence.** A push during a measurement run splits one measurement across two services and
+manufactures phantom TIMEOUT / `terminal=running` / unobserved-route results. This is the actual
+cause of the VT-720 "dev degradation" (VT-729) and almost certainly of the VT-719 "contamination"
+that cost 7 of 11 blocks.
+
+**Origin of the error: Clau's own Rule 3** ("push docs on receipt", to stop Codex reading a stale
+tree). Optimising for Codex's freshness was paid for in unreadable measurements.
+
+**Rule 3 amended:** push docs on receipt EXCEPT while a measurement run is in flight.
+
+**Structural guard (VT-729, preferred over the discipline note):** `run_critical_x3.py` reads
+`dbos.application_versions` before and after each scenario; a change labels the run
+**CONTAMINATED**, never BLOCKED. CC's reasoning is the point — *"a discipline note would not have
+saved me; I was holding code pushes. It was the docs push I did not think of as a deploy."*
+Prefer a guard that does not depend on remembering.
+
+**Known follow-on (not fixed):** harness teardown cascades `pipeline_runs` away, so after-the-fact
+latency forensics on a finished run are impossible; this diagnosis had to be reconstructed from
+deploy timestamps.
+
+## CL-2026-08-04-report-bundles-are-append-only — Standing (CC finding; Clau error)
+
+**Fact.** `run_critical_x3 --json-report` is **APPEND-ONLY and never truncates.** A bundle reused
+across attempts silently accumulates entries from BOTH runs.
+
+**What it caused.** Clau read 186 entries ÷ 3 = "62 of 79 scenarios, ~78% done" and reported that
+to Fazal. The bundle held two attempts: 129 distinct runs across 43 scenarios, 13 of them recorded
+twice. **Real progress was ~44 of 79 (~55%).**
+
+**The worse consequence, avoided.** The same polluted bundle feeds `transcript_judge.py`, which
+would have scored 13 scenarios **twice** and inflated the aggregate. The measurement substrate
+silently merged two different runs — a corrupted conclusion, not merely a wrong progress number.
+
+**Rules.**
+1. **A fresh measurement uses a FRESH report path.** Never reuse a bundle path across attempts.
+2. **Derive progress from DISTINCT scenario names, never from entry count ÷ 3.**
+3. Before trusting any aggregate, check the bundle for duplicate scenario entries.
+
+**Class.** Third instance in one week of *"something we assumed was inert, wasn't"* — after
+`CL-2026-08-03-docs-push-is-a-deploy` (a docs push redeploys) and the DBOS `compute_app_version`
+finding (a restart re-recovers PENDING rows). Clau's own error here is the same shape as
+`CL-2026-08-03-green-on-fallback-is-not-green`: an artifact read without asking what produced it.
+
+**Resolution (VT-729 follow-on, built by CC).** `--resume` reuses a prior scenario ONLY if all three
+runs are recorded, all three clean, and all three carry the SAME `dbos.application_versions` value
+the service is running now. Version mismatch ⇒ re-driven, reason printed. A resumed pack prints
+`!! RESUMED RUN: N scenario(s) came from a PRIOR segment` — both guards are **refusals, not
+annotations**, because an annotation is what a tired reader skips.
+
+## CL-2026-08-06-pricing-structure-ratified — Standing (Fazal)
+
+**Structure (ratified verbatim 2026-08-06; LEVEL still pending VT-733-C measured costs):**
+1. **The Team Manager is FREE.** Revenue is per SPECIALIST.
+2. **Flat price per specialist per month, everything included** (AI, WhatsApp, integrations). No
+   metered billing surface — caps are internal guardrails, never invoices.
+3. **Every agent's first month free, per agent, activation-timed** — permanent rule, so each newly
+   launched specialist arrives as a free test-ride to every tenant. **UPI autopay mandate collected
+   at trial activation** (₹1 auth); trial auto-converts unless cancelled.
+Supersedes the ₹5000/agent figure (viabe-pricing-trial-model): structure stands, level is an open
+number set from measured cost-per-tenant-month. No pricing input from estimates.
+
+### ⚠️ COST-BASIS WARNING added 2026-08-10 — the free in-window assumption EXPIRES 1 Oct 2026
+
+**The pricing LEVEL is still unset and waits on VT-733-C measured cost. Whatever that measurement
+says, it is measured against a cost basis that changes in ~7 weeks.**
+
+Meta India per-message rates, effective **1 July 2026** (verified by web search 2026-08-10, and the
+kb citation was corrected from a wrong "1 January" date): **marketing ₹0.8631**, **utility ₹0.1150**,
+**authentication ₹0.1150** — marketing is **7.5× utility**. Plus **18% GST** and any BSP fee.
+
+**The expiry:** utility and service messages inside the 24h customer-service window are **free only
+until 1 October 2026**, after which they become chargeable.
+
+**Why this hits us specifically** — three live design decisions assume free in-window messaging:
+- the **template-whitelist ruling** (Fazal 2026-07-18): owner template surface is minimal and
+  *everything else rides the 24h session*. That "everything else" acquires a unit cost on 1 Oct.
+- **VT-683** queued owner-comms, idle-paced inside the session — same.
+- **VT-741 Tier A** (once/24h for engaged customers) was cheap precisely because a customer who
+  replies opens a free session window.
+
+**Action:** VT-733-C must model BOTH cost bases (pre- and post-1-Oct) or the price level will be set
+against economics that expire before the first renewal. **Verify the exact scope against Meta's own
+published pricing documentation before pricing** — the 2026-08-10 finding came from secondary
+sources (BSP blogs), which are directionally reliable on rates and looser on scope.
+
+### SUPERSESSION RECORDED (Fazal 2026-08-10: "record the supersession, and ensure no other decision conflicts with it")
+
+This ruling **supersedes two earlier standing decisions on three specific points.** Recorded here
+because CC read the contradiction in code and could not tell which side was current — which is the
+correct failure mode, and the ledger's fault, not CC's.
+
+**1. CL-433 (2026-06-09) is SUPERSEDED on the card/convert mechanics.** CL-433 ruled: *"NO card
+captured during the trial; the owner **actively subscribes** at/after day 30 (an explicit action —
+there is **NO auto-charge edge**)."* The 2026-08-06 model inverts both halves: a **UPI autopay
+mandate IS collected at activation** (₹1 auth, i.e. during the free month), and the trial
+**auto-converts unless cancelled**. Explicit-subscribe-at-day-30 is dead.
+**What SURVIVES from CL-433, unchanged:** the 30-day/one-month free period · **NO refund ever**
+(the whole refund subsystem stays deleted — do not resurrect VT-85/92/93) · `lapsed` as the
+dormant, re-subscribable phase · the GSTIN gate riding the subscribe edge (CL-442 moved the primary
+gate to signup regardless).
+**Code consequences, unbuilt — these are real work, not bookkeeping:**
+- The state machine has **no auto-convert edge**. `trial_expired → lapsed` is the only elapse path
+  (`transitions.py`; migration 121 reshaped the phase CHECK around it). Auto-convert needs a new
+  edge: mandate-charge succeeds → `paid_active`; charge fails → dunning, then `lapsed`.
+- Razorpay `payment.captured` currently maps to the `subscribe` EVENT, which presumed an explicit
+  owner action. Under auto-convert the capture arrives with no owner action at all.
+- Per-agent trial timing: the free month is **per specialist, activation-timed**, so trial state
+  can no longer be a single tenant-level phase — a tenant may hold one specialist in trial and
+  another paid. The current phase model is tenant-scoped and cannot express that.
+- `billing/trial_sweep.py:367` applies `trial_expired` today. Under this ruling that sweep must
+  attempt the mandate charge first, not transition straight to `lapsed`.
+
+**2. The 2026-06-25 activation pin is AMENDED, not overturned.** `onboarding_gate.py:9-11` records
+Fazal's pin: *"the activation bar is journey-complete, NOT paid-active. The 1-month free trial is
+DELIBERATELY UNRESTRICTED."* That still holds in its intent — **activation never requires a
+PAYMENT, and the free month stays genuinely free.** What changes: activation now additionally
+requires a **mandate on file** (₹1 auth, not a charge). So the bar is journey-complete **+ mandate**,
+never paid-active. The `paid_active` conjunct stays removed exactly as pinned.
+**The tension Fazal should see once, then it is settled:** requiring a mandate at activation IS
+friction the original pin deliberately removed, and it will cost some activations. Fazal's
+2026-08-06 ruling accepted that trade knowingly (auto-convert is worth more than frictionless
+activation). Recorded so nobody re-opens it as a bug.
+
+**3. Per-specialist pricing does not exist in code.** `config/plans.yaml` is **flat per-tenant
+tiers** (founding ₹2,499 / standard ₹4,999 / pro ₹14,999, `offered_tiers: [standard]` fail-closed).
+That is not "the level is unset" — it is a **different pricing model** from the ratified one, live
+in config today. Rebuilding it per-specialist is unrostered work.
+
+**Swept for further conflicts (2026-08-10) — none found beyond the above.** CL-442 (GSTIN hard-gate
+at signup) is orthogonal. CL-426 (VTR decaying human-on-the-loop) is orthogonal. CL-2026-08-06-budget-aware-manager
+is complementary — caps stay internal guardrails and never become invoices, which is consistent
+with flat-per-specialist. The `docstring` at `api/razorpay_subscribe.py:6` still claims the
+integration is "STUBBED; LIVE is NEEDS-FAZAL" while `:123` records the stub as replaced — a stale
+status line inside one file, rostered for correction.
+
+## CL-2026-08-11-judgment-is-commodity-execution-is-the-moat — Standing (measured)
+
+**Measured, not argued.** 25 India-SMB judgment scenarios. Fazal answered cold; Codex answered blind
+by paste. Scored on decision RULE, not option label, against a prediction pre-registered before the
+comparator ran. Full working: `.viabe/calibration/RESULT-fazal-vs-codex.md`.
+
+**Result: 22/25 directional agreement (88%). Only 3 genuine rule-level divergences.**
+
+**Ruling: do NOT build a business-judgment corpus.** A generic frontier model already reaches Fazal's
+call on 22 of 25 situations in our own domain — including the *computed* ones. Corpus authoring stays
+cancelled permanently, not pending. Two independent reasons now: the 825 were AI-generated
+(CL-2026-08-11-no-human-calibration-baseline-exists), AND the exercise they served is low-value.
+
+**REPLICATED 2026-08-11 with a SECOND independent model (ChatGPT).** Same distribution — 16 same /
+6 compatible / 3 different — but a different composition. **Q02 and Q05 diverge in BOTH arms, in the
+same direction: those replicate and are signal.** The other divergences are single-arm variance.
+**Codex and ChatGPT agree with EACH OTHER ~22/25**, so the residual is mostly model variance rather
+than a stable human-vs-machine axis.
+
+**The delta, restated after replication — this supersedes the arm-1 wording:**
+> **Fazal commits to one clean position. The models hedge, split, or preserve optionality.**
+
+Q02 (removes the low-end option and repositions premium; both models build tiers and keep a cheap
+one) · Q05 (pays in full on the relationship; both models contractualise AND qualify a backup) ·
+Q18 (hires now for direct contact; Codex defers to a threshold) · Q08 (borrows entirely personally;
+ChatGPT splits to land exactly on the floor). Relationship-weighting is a *consequence*;
+**decisiveness is the root.**
+
+**PRODUCT IMPLICATION — the most useful output of the exercise.** An LLM Manager defaults to hedged
+recommendations: two tiers, a contract plus a backup, a threshold to revisit. To an SMB owner needing
+a decision today, *"here are two options"* is what they already get from everyone, free. **Hedging is
+a product failure mode, not a safety feature.**
+> **Design principle: the Manager must COMMIT to a recommendation. Where it hedges, it must say which
+> door it would walk through and why.**
+Applies to REASONING only. The deterministic effect gates stay exactly as unbendable as they are
+(ARCHITECTURE §0.1.1) — commit in the advice, never in the rails.
+
+Q02 (refuses to keep a low-end option; repositions premium) · Q05 (pays ₹1.8L on six years of
+relationship rather than converting it to a contract + hedge) · Q18 (pays fixed cost now to own the
+customer relationship) · Q07 partial (takes the 22% money on a computed bounded bet).
+**Plausibly CORRECT for the domain** — in Indian SMB the relationship IS the supply chain and the
+retention mechanism; a contractual optimiser is applying a US-enterprise prior. **Encode as 3–4
+Manager operating principles, Fazal-reviewed. A card or two, never a knowledge base.**
+
+**Consequence — where the moat actually is:** if the Manager's judgment is commodity, everything
+defensible sits in (a) doing the work reliably and safely — V1-USABLE E1–E6 — and (b) the §12 loop
+capturing what actually happened to real tenants. Anyone can copy business advice; nobody can copy
+tenant outcomes.
+
+**Clau's prediction FAILED and that is recorded deliberately.** I predicted divergence on Q01, Q05,
+Q09, Q22, Q25 — **one clean hit in five.** My thesis was that a generic model would be weak at
+computed trade-offs; **it was not** — it did the Q01 overdraft arbitrage I had singled out as Fazal's
+"single most likely outperformance." My model of where frontier models are weak was out of date, and
+the instrument existed to catch exactly that. **Method note:** I fixed numeric thresholds but never
+specified strict-vs-directional agreement, which left post-hoc latitude a pre-registration exists to
+remove. Resolved on reasoning (3 genuine divergences), not on the arithmetic.
+
+## CL-2026-08-11-no-human-calibration-baseline-exists — Standing (Fazal disclosure; Clau retraction)
+
+**Fazal, verbatim 2026-08-11:** *"The 225 + 100 of batch1 are not manually answered, they are
+answers from a completely distant unaware AI who was asked to act as a Business expert and respond."*
+
+**Ruling: the verified human-calibrated baseline is ZERO.** Every prior count is withdrawn — 825,
+325, and 225. The fazal-kb calibration corpus is an unrelated model role-playing a business expert.
+Classified **T4 (unsourced third-party assertion)**: **not retrieval-eligible, not DPO-eligible,
+never asserted to an owner.**
+
+**Why T4 and not "validate it up":** as retrieval cards these are the commodity layer — a frontier
+model already holds this knowledge, which is very likely the mechanical explanation for the O11
+treatment NULL. As DPO preference pairs they would distil a weaker, unaudited model into ours.
+Neither is a moat; both are risk. **You cannot validate another model's opinions into proprietary
+judgment.**
+
+**What survives:** the SCENARIOS and OPTION SETS are a legitimate question bank. Only the
+SELECTIONS and RATIONALES are void.
+
+**Clau's error, recorded because the discipline is the point.** Fazal relayed these in chat; Clau
+recorded them as Fazal-authored, never asked who wrote them, and then built a 61KB artifact stamped
+*"O8 Tier 1 — Verified Human Executive Judgment, Source: Fazal (CEO)"* across all 225 — while in the
+same conversation criticising the kb creator for exactly this mislabelling. **Relayed-by is not
+authored-by.** Provenance is a question you ask, not a property you infer from who sent the file.
+
+**Standing rules this produces:**
+1. **Every card records WHO AUTHORED IT, asked explicitly — never inferred from who transmitted it.**
+2. **A size check is a provenance check.** A file claiming N records that is too small to hold N
+   records is metadata. Check bytes before citing counts. (Caught the 720-byte "225 answers" file
+   and the 1,760-byte "825 rules" file; missed on both until too late.)
+3. **AI-authored content may never enter above T4**, and T4 is not retrieval-eligible.
+   **AMENDED by CL-2026-08-13-judgment-vs-citation (Fazal) — see that entry.** The T4 ceiling binds
+   AI-authored JUDGMENT. AI-DISTILLED CITATIONS of primary sources carry the source's class, with
+   `authority=seed` recording AI authorship, IFF verifiable against the cited source. Unverifiable
+   collapses back to T4.
+4. **The moat requires a human or an outcome.** Only Fazal's own judgment, or a measured tenant
+   result, can ever be Tier 1. Nothing generated can be promoted into it.
+
+## CL-2026-08-13-judgment-vs-citation — Standing (Fazal: "Go ahead with your recommendation")
+
+**Resolves the literal collision between CL-2026-08-11 rule 3 ("nothing AI-authored above T4") and
+CL-2026-07-26 (source-class describes the SOURCE; authorship lives in `authority`).** Raised by CC
+during the PR #553 review; both rulings survive because they govern different objects.
+
+**The rule:**
+> **AI-authored JUDGMENT — opinions, recommendations, distilled "lessons", anything whose truth
+> rests on the author's reasoning — enters at T4, ceiling, permanently.**
+> **AI-DISTILLED CITATIONS — restatements of a primary source's fact — carry the SOURCE'S class
+> (t1/t1v/t2/t3), with `authority=seed` recording the AI authorship, ON THE CONDITION that the
+> citation is VERIFIABLE against the cited source: resolvable source, binding hash, reproducible
+> claim. A citation that cannot be verified against its source is not a citation — it is the AI's
+> assertion, and it collapses to T4.**
+
+**The boundary condition is enforcement, not paperwork.** CC's #553 blocking findings (source hash
+binding zero of 33 cards; all archive files unreachable) are exactly the verifiability condition
+failing — which is why #553 cannot land until they are fixed, and why fixing them is what makes
+this ruling honest rather than a relabeling. **A distillation is never evidence of itself.**
+
+**Test heuristic for future reviews:** ask "if the cited source vanished, would the claim still
+stand?" If yes (it rests on the author's reasoning) → judgment → T4. If no (it falls with the
+source) → citation → source's class, if verifiable.
+
+**Consequence for the O8 program:** with this corpus reclassified, the honest statement is that
+**Viabe holds no proprietary business-judgment corpus today.** The path to one is (a) Fazal
+answering scenarios himself — 25 of his are worth more than 325 of a model's — and (b) the §12
+living loop capturing real tenant outcomes. Both are unstarted.
+
+## CL-2026-08-10-vetoes-compose-permits-do-not — Standing (CC-originated, Clau-recorded)
+
+**Origin:** Clau audited VT-740 and found two frequency mechanisms on the same send path — VT-740's
+per-recipient suppression and `customer_send.py`'s pre-existing `RECONTACT_SUPPRESSION_DAYS` /
+`MAX_AGENT_CONTACTS_PER_90D`. Clau asked CC to pick one or declare an explicit precedence rule
+("most restrictive wins"). **CC's answer was better than the question** and is recorded as the
+standing principle.
+
+**The principle:** *gates that can only VETO compose without any precedence rule. The moment a gate
+can PERMIT, ordering becomes semantic and a tie-break rule is required.*
+
+Two conjunctive vetoes yield most-restrictive-wins **by construction** — the outcome is identical
+whichever runs first, so call order can never drift into being the decider. A written
+"most-restrictive-wins" rule (what Clau asked for) is weaker: it is a convention a future edit can
+violate silently. The structural property cannot be violated without changing the gate's *kind*.
+
+**The guard that matters:** the property stops holding the instant either layer gains a branch that
+PERMITS a send. So it is **pinned by test**, not by comment. Any gate that acquires a permit branch
+must simultaneously acquire an explicit precedence rule.
+
+**Why both mechanisms correctly survive here** (they answer different questions on different tables):
+`RECONTACT_SUPPRESSION_DAYS`/`MAX_AGENT_CONTACTS_PER_90D` read `agent_customer_contacts` and bound
+"how often may an AGENT cold-contact this customer" — narrower, stricter, agent path only. VT-740
+reads the send ledger and asks "has this customer been delivered ANY message recently" — every path,
+campaign fan-out included.
+
+**Applies generally** to this codebase's stacked correctness gates (consent · opt-out · onboarded ·
+`ownership_verified` · Pillar-7 approval · frequency · aggregate cap). They are veto-only by design,
+which is why the stack has never needed an ordering spec — and why introducing a permitting gate
+would be an architectural change, not a feature. Cf. ARCHITECTURE §0.1.1 (PLAN approval vs EFFECT
+approval) and CL-2026-06-28-cc-full-autonomy (deterministic gates remain the sole effect authority).
+
+## CL-2026-08-10-welcome-is-en-hi-only — Standing (Fazal)
+
+**Fazal, verbatim 2026-08-10:** *"I agree with CC we must only use the En / Hi as part of the
+Welcome message."*
+
+**Ruling:** the welcome template sends in **English or Devanagari Hindi ONLY**. The approved
+Hinglish welcome variant (`team_welcome4` hing, `HX7097590ccf0e901d893f78d9a9224e92`) stays
+**registered but deliberately unused**. Signup continues to offer `en` / `hi` only
+(`_LANGUAGES = {"en","hi"}` — correct as written, not a bug).
+
+**Why this needed a ruling at all:** CC found the hing welcome SID is **unreachable by any code
+path** — `template_register()` is never called by the welcome path, and signup rejects `hinglish`
+outright. Clau had dispatched a "flip the hinglish register" task built on the premise that the
+EN fallback was a stale gate; CC checked the premise, found `wakeup.py::wakeup_language` already
+implements the exact guarded resolution, and changed only the stale comment. **The premise was
+Clau's and it was wrong.** Fazal then ruled the behaviour is correct as-is.
+
+**Precise scope of this ruling — it is about the WELCOME, not about Hinglish:**
+- **`team_wakeup2` keeps its hing variant and it IS reachable.** `resolve_owner_locale` reads
+  `COALESCE(preferred_language, language_preference, 'en')`, and `record_observed_language` writes
+  `language_preference` from per-turn inference for any value in `SUPPORTED_OWNER_LANGS` — which
+  includes `hinglish`. So a tenant who signs up `en` and then converses in Roman-script Hindi
+  **becomes** hinglish, and their wake-up correctly resolves to `hing`. That path stays.
+- **Free-form conversational mirroring is untouched.** D2 is unchanged: live-turn mirroring is
+  never overridden, and a hinglish owner gets the hi-Latn register on free-form agent-initiated
+  copy. This ruling constrains ONE template, not the product's language behaviour.
+- **D1's binding half stands:** never Devanagari for a hinglish-preference tenant.
+
+**Standing consequence:** do not "fix" the unreachable hing welcome SID. It is unreachable by
+decision. Anyone auditing template coverage will find it and should find this entry.
+
+## CL-2026-08-06-budget-aware-manager — Standing (Fazal; architecture-shaping)
+
+**Fazal, verbatim:** "any consumption that is being done is triggered by the Manager, and never by
+the owner, so the capping has to be there but the Manager needs be trained about it."
+
+**Principle:** the tenant's budget is an INPUT to the Manager's reasoning, not a wall it crashes
+into. The owner must never be punished (silent degrade, unexplained dumbness) for spending decisions
+the MANAGER made. A real COO manages within a budget; ours must too:
+- The Manager KNOWS its remaining tenant budget (soft/hard distance) as context.
+- Approaching the cap, it ECONOMIZES deliberately — prioritizes high-value actions, defers
+  low-value ones, prefers cheaper tiers where quality allows — and can say so to the VTR.
+- The hard cap remains the deterministic backstop (mig 173), but reaching it silently is a
+  MANAGER PLANNING FAILURE, not normal operation.
+- Budget state feeds the rolling 7-day plan (VT-721) — plan revisions factor spend like any other
+  resource constraint.
+**Sequencing:** VT-733 records + surfaces; the budget-awareness context block + planning
+integration is post-promotion design (rides with VT-730-era Manager work). Not in the current chain.
+
+## CL-2026-08-06-pilot-proof-gate — Standing (Fazal)
+
+**The post-launch success bar is FALSIFIABLE and recorded** (launch-tracker "Pilot Proof Gate"):
+10–20 curated launch-persona tenants, 1–2 verticals, ≥8 weeks. P1 ≥60% week-8 active · P2 ≥40%
+pay willingly at trial end · P3 ≥50% realise ≥3× product cost in ATTRIBUTED gross profit ·
+P4 zero serious consent/money/contact violations · P5 onboarding repeatable without founder ·
+P6 autonomy grants increase over time. **No specialist beyond the revenue cluster ships until the
+gate reads green** (Fazal may override).
+
+**Origin honestly recorded:** an independent non-Claude assessment (2026-08-06) whose probability
+view Fazal found demotivating. Clau's reconciliation: its "corrections" restate the existing
+strategy (wedge-first, curated personas, Meta analysis, attribution-centric); its base rates are
+normal startup reality; its two genuine pressure points — pay-conversion risk and the
+service-business trap — are adopted as P2/P3 and P5. Its "Revenue Conversion & Retention Agent"
+= the roster's S1/S2/S3 cluster merged, adopted as SR's post-proof evolution path, not a new
+build. **Attributed-gross-profit-per-tenant is now first-class in VT-733-C, attribution erring
+UNDER, never over.**
+
+## CL-2026-08-06-repeated-request-is-never-approval — Standing (Fazal, verbatim "Unambiguous no, as standing policy")
+
+**Policy.** A repeated request is NEVER approval. An approval may be resolved ONLY by an inbound
+message that satisfies BOTH:
+1. **Ordering:** `created_at` strictly AFTER the approval was armed AND presented to the owner
+   (deterministic check — a stale sid can never satisfy a future approval);
+2. **Content:** an AFFIRMATION of the presented plan (deterministic-first classifier per the
+   authoritative-decision pattern) — a re-ask, however enthusiastic, means "you are being slow,"
+   never "I agree to specifics I have not seen."
+If this costs an impatient owner one extra confirmation tap, that is the correct price on a
+money path.
+
+**Trigger:** VT-734 (2026-08-06) — an approval resolved by the owner's second ASK sent 72s BEFORE
+the approval existed; Manager then claimed a send that never happened (campaigns=sent,
+campaign_messages=0). Dev-safe (send-guard); on prod = 19 unapproved sends + a false claim.
+O2 flipped MET → MET–INCIDENT OPEN until re-proven.
+
+**Scope notes:** same disease as VT-730's ask/arm race — unchecked temporal ordering at an
+ask/answer seam; fix as an ORDERING INVARIANT, not a path patch. Second root cause REQUIRED:
+why the emission choke + money-truth binding admitted "sent to 19 customers" against 0 DB rows —
+that claim should have been structurally unemittable twice over.
+
+## CL-2026-08-06-vt734-closed-wedge-deferred — Milestone + two lessons
+
+**VT-734 DEV-PROVEN** (mig 190; ordering invariant at the resolution choke + repeat-refusal ahead
+of all classifiers; breach repro ×3 → pending/proposed/0-sent, was approved/sent/19). O2 re-close
+rides the pack. **Wedge deferred BY FAZAL** ("defer", 2026-08-06) into the pack per CC's written
+case: no longer reproduces on demand post-VT-734 (0/2; bulk 1/3→2/3); pack = the bigger sample;
+call-out in the pack report either way, absence recorded not assumed.
+
+**Lesson 1 (CC retraction):** the "fabricated send claim" was CC's own broken verification query
+(joined a column the send path deliberately never writes — the wrapper's docstring says so). The
+Manager told the truth; 19 sends were real (dev-guard mocked). Incident = pure approval-bypass.
+Corollary: Clau demanded a root cause for a choke gap that did not exist — verify the defect
+exists before requiring its investigation.
+
+**Lesson 2 (standing):** "keep the tenant for evidence" does not survive the hourly harness
+reaper. **Transcribe evidence into the row IMMEDIATELY at capture** — the row is durable, the
+tenant is not.
+
+## CL-2026-08-06-model-tier-policy — Standing (Fazal-ratified)
+
+**The rule:** pay for latency exactly where a waiting human feels it — nobody waiting → FLEX (½×);
+a person waiting → STANDARD (1×); a person waiting at a decisive moment → FAST (2×, allow-listed:
+approval resolution [a VT-734 race-window SAFETY spend] · opt-out/STOP · future live-customer
+first response). Degradation moves toward Standard from BOTH directions (Flex→Standard on
+capacity; Fast→Standard on budget-exhaust + VTR flag — never across). Judge SCORING never Flex.
+Deterministic by call-class from `.viabe/model-tier-policy.md` (the ratified source; changes are
+Fazal-visible diffs). Measurement window open: spend-by-tier on the VT-733 console; Fazal
+revisits after days of measured mix. Implementation = VT-735.
+
+**Allocator note:** migrations 194 (VT-727 corpus load) + 195 (embeddings, only-if-split) issued
+to Codex 2026-08-06; 191–193 = CC's unpushed lane work. Codex's refusal to assume 191 prevented
+a real collision — the CL-424 discipline observed working.
+
+## CL-2026-08-06-migration-191-retired — Housekeeping (binding)
+
+**Migration number 191 is RETIRED — never to be used.** Consumed by an unattributed allocator
+invocation (no file exists in the working tree, origin/dev, or any codex branch — verified by
+Clau 2026-08-06); most plausibly a timed-out invocation on the slow shared FUSE mount that took
+the number and lost the output. Joins 54/109/139 as documented gaps. Current accounting:
+190=VT-734 · **191=RETIRED** · 192=VT-733A · 193=VT-733B · 194=VT-727 · 195=VT-727-reserved
+(unused, documented) · counter=196.
+
+**Guard (CC lane, next batch):** the allocator gains a one-line append-only JOURNAL
+(`.viabe/sprint/.allocation-journal`: timestamp · number · claimed-by · purpose) written in the
+same flock as the counter bump — so the NEXT abandoned allocation is attributable in one read
+instead of an investigation. CC's re-allocate-don't-race conduct on discovering 192≠191 is the
+reference behaviour and is why this surfaced as a gap, not a collision.

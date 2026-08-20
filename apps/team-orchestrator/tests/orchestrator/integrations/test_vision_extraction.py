@@ -33,35 +33,22 @@ _ALLOW = lambda _tid: True  # noqa: E731 — test consent predicate
 _DENY = lambda _tid: False  # noqa: E731
 
 
-class _FakeResp:
-    def __init__(self, text: str) -> None:
-        self.content = [SimpleNamespace(type="text", text=text)]
+class _FakeCall:
+    """VT-732 transport double: vision goes through the multi-provider seam, so the injected object
+    is a ``messages_call``-shaped callable returning a response with ``.content``."""
 
-
-class _FakeMessages:
     def __init__(self, text: str) -> None:
         self._text = text
         self.calls: list[dict] = []
 
-    def create(self, **kw):
-        self.calls.append(kw)
-        return _FakeResp(self._text)
+    def __call__(self, tier: str, **kw):
+        self.calls.append({"tier": tier, **kw})
+        return SimpleNamespace(content=self._text)
 
 
-class _FakeClient:
-    def __init__(self, text: str) -> None:
-        self.messages = _FakeMessages(text)
-
-
-class _ExplodingClient:
+def _exploding_call(tier: str, **kw):  # noqa: ARG001
     """Any transmission attempt fails the test (proves fail-closed)."""
-
-    class _M:
-        def create(self, **kw):  # noqa: ARG002
-            raise AssertionError("transmitted to Anthropic despite no consent")
-
-    def __init__(self) -> None:
-        self.messages = _ExplodingClient._M()
+    raise AssertionError("transmitted to the vision model despite no consent")
 
 
 def _png_bytes(w: int = 32, h: int = 32, color=(200, 180, 160)) -> bytes:
@@ -75,7 +62,6 @@ def _png_bytes(w: int = 32, h: int = 32, color=(200, 180, 160)) -> bytes:
 # --- consent gate (fail-closed) ------------------------------------------------
 
 def test_consent_absent_fails_closed_no_transmission():
-    client = _ExplodingClient()
     with pytest.raises(ConsentRejectedError):
         extract_from_image(
             _png_bytes(),
@@ -83,7 +69,7 @@ def test_consent_absent_fails_closed_no_transmission():
             target_fields=["customer_name"],
             acquired_via="paper_book",
             media_type="image/png",
-            client=client,  # must NOT be called
+            call=_exploding_call,  # must NOT be called
             consent_check=_DENY,
         )
 
@@ -99,24 +85,26 @@ def test_extract_returns_per_field_confidence():
             ]
         }
     )
-    client = _FakeClient(payload)
+    client = _FakeCall(payload)
     out = extract_from_image(
         _png_bytes(),
         tenant_id=_TENANT,
         target_fields=["customer_name", "phone"],
         acquired_via="paper_book",
         media_type="image/png",
-        client=client,
+        call=client,
         consent_check=_ALLOW,
     )
     assert out.acquired_via == "paper_book"
     assert [f.name for f in out.fields] == ["customer_name", "phone"]
     assert out.fields[0].confidence == 0.92
     assert out.fields[1].value == "9000000001"
-    # transmitted exactly once, with an image block + a text block.
-    assert len(client.messages.calls) == 1
-    content = client.messages.calls[0]["messages"][0]["content"]
+    # transmitted exactly once, on the env-governed vision tier, with an image + a text block.
+    assert len(client.calls) == 1
+    assert client.calls[0]["tier"] == "specialist"
+    content = client.calls[0]["messages"][0].content
     assert any(b["type"] == "image" for b in content)
+    assert any(b["type"] == "text" for b in content)
 
 
 def test_empty_value_becomes_none_never_guessed():
@@ -130,7 +118,7 @@ def test_empty_value_becomes_none_never_guessed():
         target_fields=["email"],
         acquired_via="contacts",
         media_type="image/png",
-        client=_FakeClient(payload),
+        call=_FakeCall(payload),
         consent_check=_ALLOW,
     )
     assert out.fields[0].value is None
@@ -146,7 +134,7 @@ def test_non_json_output_raises():
             target_fields=["x"],
             acquired_via="paper_book",
             media_type="image/png",
-            client=_FakeClient("sorry, I can't read that"),
+            call=_FakeCall("sorry, I can't read that"),
             consent_check=_ALLOW,
         )
 
@@ -159,7 +147,7 @@ def test_missing_fields_key_raises():
             target_fields=["x"],
             acquired_via="paper_book",
             media_type="image/png",
-            client=_FakeClient(json.dumps({"result": "nope"})),
+            call=_FakeCall(json.dumps({"result": "nope"})),
             consent_check=_ALLOW,
         )
 
@@ -174,7 +162,7 @@ def test_json_fence_is_tolerated():
         target_fields=["x"],
         acquired_via="paper_book",
         media_type="image/png",
-        client=_FakeClient(payload),
+        call=_FakeCall(payload),
         consent_check=_ALLOW,
     )
     assert out.fields[0].value == "v"
@@ -196,17 +184,22 @@ def test_route_field_uses_shared_thresholds(conf, expected):
     assert route_field(ExtractedField(name="x", value="v", confidence=conf)) == expected
 
 
-# --- model split --------------------------------------------------------------
+# --- model resolution (VT-732: the env tier, not a VIABE_ENV yaml slot) -------
 
-def test_resolve_model_production_is_sonnet(monkeypatch):
-    monkeypatch.setenv("VIABE_ENV", "production")
-    # VT-596: production vision tier bumped sonnet-4-6 → sonnet-5.
+def test_resolve_model_follows_the_specialist_tier_var(monkeypatch):
+    """The reported model id comes from TEAM_MODEL_SPECIALIST — the SAME switch that decides which
+    model actually runs. The old config/models.yaml VIABE_ENV slot no longer participates, so a
+    deployment can no longer 'change the model' in one place while the other keeps picking."""
+    monkeypatch.setenv("TEAM_MODEL_SPECIALIST", "gpt-5.6-luna")
+    assert _resolve_vision_model() == "gpt-5.6-luna"
+    monkeypatch.setenv("TEAM_MODEL_SPECIALIST", "claude-sonnet-5")
     assert _resolve_vision_model() == "claude-sonnet-5"
 
 
-def test_resolve_model_default_is_haiku(monkeypatch):
-    monkeypatch.delenv("VIABE_ENV", raising=False)
-    assert _resolve_vision_model() == "claude-haiku-4-5"
+def test_resolve_model_ignores_viabe_env(monkeypatch):
+    monkeypatch.delenv("TEAM_MODEL_SPECIALIST", raising=False)
+    monkeypatch.setenv("VIABE_ENV", "production")
+    assert _resolve_vision_model() == "claude-sonnet-5"  # the tier default, not a yaml prod slot
 
 
 # --- preprocessing ------------------------------------------------------------
@@ -246,7 +239,7 @@ def test_extract_entries_returns_one_result_per_entry():
     out = extract_entries_from_image(
         _png_bytes(), tenant_id=_TENANT, target_fields=["customer_name", "phone"],
         acquired_via="paper_book", media_type="image/png",
-        client=_FakeClient(payload), consent_check=_ALLOW,
+        call=_FakeCall(payload), consent_check=_ALLOW,
     )
     assert len(out) == 2
     assert out[0].fields[0].value == "Asha" and out[1].fields[0].value == "Ravi"
@@ -259,7 +252,7 @@ def test_extract_entries_consent_fail_closed():
         extract_entries_from_image(
             _png_bytes(), tenant_id=_TENANT, target_fields=["customer_name"],
             acquired_via="paper_book", media_type="image/png",
-            client=_ExplodingClient(), consent_check=_DENY,
+            call=_exploding_call, consent_check=_DENY,
         )
 
 
@@ -270,5 +263,5 @@ def test_extract_entries_missing_entries_key_raises():
         extract_entries_from_image(
             _png_bytes(), tenant_id=_TENANT, target_fields=["x"],
             acquired_via="paper_book", media_type="image/png",
-            client=_FakeClient(json.dumps({"fields": []})), consent_check=_ALLOW,
+            call=_FakeCall(json.dumps({"fields": []})), consent_check=_ALLOW,
         )

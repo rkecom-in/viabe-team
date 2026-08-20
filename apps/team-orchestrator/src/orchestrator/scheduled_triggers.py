@@ -752,12 +752,25 @@ def stalled_task_sweep_scheduled(
     VT-560 Defect 1) and re-sweeps tasks stranded active with no runnable step, walking
     them up the backoff ladder to dead_letter at the budget. NO LLM; the body is
     best-effort (never raises). Best-effort: a sweep failure must not crash the scheduler."""
-    from orchestrator.orphan_reaper import reap_stalled_manager_tasks
+    from orchestrator.orphan_reaper import detect_wedged_tenants, reap_stalled_manager_tasks
 
     try:
         reap_stalled_manager_tasks()
     except Exception:  # noqa: BLE001 — sweep is best-effort; next run retries
         logger.exception("VT-560 stalled-task sweep scheduled run failed")
+
+    # VT-755 — the wedge detector rides this tick because it covers the gap this very sweep leaves:
+    # `reap_stalled_manager_tasks` deliberately EXCLUDES 'waiting_owner' (so it can never burn an
+    # awaiting-approval task to dead_letter), which means a park with no wake path is invisible to it.
+    # A tenant in that state has its whole queue blocked and nothing recovers unaided, so it needs a
+    # human — this is the seam that summons one. Separate try/except: the wedge detector must not be
+    # skipped because the ladder above threw, and vice versa.
+    try:
+        wedged = detect_wedged_tenants()
+        if wedged:
+            logger.warning("VT-755: %d wedged tenant(s) detected and alerted", wedged)
+    except Exception:  # noqa: BLE001 — detector is best-effort; next tick retries
+        logger.exception("VT-755 wedged-tenant detector scheduled run failed")
 
 
 def orphan_run_reaper_scheduled(
@@ -1342,6 +1355,15 @@ def run_daily_initiative_body(now: datetime | None = None) -> list[dict[str, Any
     now = now or datetime.now(timezone.utc)
     results: list[dict[str, Any]] = []
     for tenant_id in _scan_active_paid_or_trial_tenants():
+        # VT-721 S2 — the daily 7-day-plan revision pass rides the SAME fire, BEFORE the pick
+        # (behind TEAM_WEEK_PLAN; off = byte-identical no-op, shadow = write revisions only).
+        # Fail-soft per tenant: a revision failure never blocks the initiative dispatch.
+        try:
+            from orchestrator.business_plan.week_plan_revision import revise_week_plan
+
+            revise_week_plan(tenant_id, now=now)
+        except Exception:  # noqa: BLE001
+            logger.exception("VT-721 week_plan: revision failed tenant=%s", tenant_id)
         try:
             result = dispatch_daily_initiative(tenant_id, now=now)
             if result is not None:

@@ -32,6 +32,25 @@ Classify into EXACTLY one of:
 - `task_status` — the owner is asking about the STATUS of their existing work ("how's it going",
   "did you send it yet") — a read, not a new objective.
 - `cancel_task` — the owner wants to STOP/cancel the active work.
+- `unsupported_request` — the owner wants something DONE that is **not in the capability surface
+  appended below**. Use this instead of `new_task` whenever fulfilling the ask would require a
+  capability the Manager does not have. Judge by MEANING against that surface — never by keywords,
+  and never by your own beliefs about what an AI assistant can generally do. Read the surface as the
+  complete list; if the ask is not covered by one of those lines, it is `unsupported_request`.
+
+  **Direction and audience decide it.** "Send a voice note to my customers" is unsupported (customer
+  sends are approved WhatsApp templates with text, no audio path) even though the owner sending US a
+  voice note IS supported. A capability that exists in one direction does not make the reverse true.
+
+  When you classify `unsupported_request`, ALSO set two short owner-facing phrases:
+  - `unsupported_ask` — what they asked for, in their terms ("send voice notes to your customers").
+  - `nearest_supported` — the closest thing from the surface above that actually helps, in their
+    terms ("send them a Tamil text reminder"). If genuinely nothing on the surface is close, leave it
+    empty — an honest "I can't" beats a fabricated alternative.
+
+  If you are UNSURE whether something is supported, do NOT use this outcome. A false "I can't do
+  that" is worse than a slow yes: nobody ever complains about work they were told was impossible, so
+  the error is invisible. Classify it as you otherwise would.
 
 A side question while a task is active (`has_active_task=true` but the message is NOT about that
 task) should usually classify as `direct_reply` — answer it without losing the active task; do NOT
@@ -77,5 +96,5 @@ numbers-only, a bare name), default `en`.
 Produce ONLY a JSON object, no prose, no markdown fence:
 
 ```
-{"outcome": "direct_reply"|"answer_pending"|"new_task"|"task_status"|"cancel_task", "reasoning": "<one short phrase, no chain-of-thought>", "task_kind": "campaign_recovery"|"general", "language": "en"|"hinglish"|"hi"}
+{"outcome": "direct_reply"|"answer_pending"|"new_task"|"task_status"|"cancel_task"|"unsupported_request", "reasoning": "<one short phrase, no chain-of-thought>", "task_kind": "campaign_recovery"|"general", "language": "en"|"hinglish"|"hi", "unsupported_ask": "<short phrase, or empty>", "nearest_supported": "<short phrase, or empty>"}
 ```

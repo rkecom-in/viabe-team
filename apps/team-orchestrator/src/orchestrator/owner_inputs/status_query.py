@@ -431,7 +431,15 @@ def classify_status_query(body: str) -> StatusQueryType:
         and not list_cue
     ):
         return "customer_count"
-    if {"trial", "billing", "plan", "subscription", "phase"} & tokens:
+    # VT-721 — the bare 'plan' token is no longer a billing cue: since the rolling 7-day plan
+    # exists, "what's the plan this week?" is a PLAN ask the brain answers from its week-plan
+    # block (the ACTIVE-flip canary caught this floor hijacking it into the billing template).
+    # 'plan' now counts only alongside an unambiguous billing companion; a bare 'plan' falls to
+    # the brain, which can still answer the billing sense from its own context (defer-safe, the
+    # VT-653 direction).
+    if {"trial", "billing", "subscription", "phase"} & tokens:
+        return "billing"
+    if "plan" in tokens and ({"price", "cost", "charge", "paid", "payment", "upgrade"} & tokens):
         return "billing"
     return "unknown"
 
@@ -583,6 +591,29 @@ def _recent_task_status_or_none(
     return line
 
 
+def _honest_empty_ledger(tenant_id: UUID | str) -> str:
+    """VT-756 — the two sentences an EMPTY ledger warrants, chosen by whether a source is connected.
+
+    Deliberately NOT one sentence. "I have nothing to look at" and "I looked and there is nothing"
+    are different facts about the owner's business, and an owner acts differently on each: the first
+    is a setup step they still owe, the second is a real (if unwelcome) state of their ledger.
+
+    ``customer_data_source_connected`` fails CLOSED, so an unreadable connector state produces the
+    connect-a-source answer. Over-cautious is recoverable here; a fabricated zero is not.
+    """
+    from orchestrator.integrations.connection_truth import customer_data_source_connected
+
+    if customer_data_source_connected(tenant_id):
+        return (
+            "Your customer data is connected, and it currently shows no customers — nothing has come "
+            "through yet. If that looks wrong, tell me and I'll check the sync."
+        )
+    return (
+        "I don't have your customer data yet — nothing is connected on my side, so there's no count "
+        "to give you. Connect a source (Shopify or a Google Sheet) and I'll pull your customers in."
+    )
+
+
 def answer_status_query(
     tenant_id: UUID | str, body: str, *, terminal_task_sink: dict[str, Any] | None = None
 ) -> str | None:
@@ -602,8 +633,22 @@ def answer_status_query(
     qtype = classify_status_query(body)
 
     if qtype == "customer_count":
+        # VT-756 — a count is only honest when its data source is known to be present.
+        #
+        # This branch used to be `return f"You currently have {n} customers in your ledger."` with no
+        # connection check, so a tenant with nothing connected was told "You currently have 0
+        # customers", which reads as WE LOOKED AND YOUR BUSINESS HAS NONE. Measured on deployed dev
+        # 2026-08-14 (m_conversation_hinglish_status_smalltalk, 3/3), and again in gate (d) on
+        # m_conversation_multi_request_mixed_ask.
+        #
+        # Zero has TWO causes and they are different claims — collapsing them into one sentence would
+        # replace one wrong answer with another. n > 0 needs no connection check at all: rows exist,
+        # so data exists, whatever the connector tables say (this is also what keeps a seeded or
+        # manually-loaded ledger answering exactly as it did before).
         n = CustomersWrapper().count_all(tenant_id)
-        return f"You currently have {n} customers in your ledger."
+        if n > 0:
+            return f"You currently have {n} customers in your ledger."
+        return _honest_empty_ledger(tenant_id)
 
     if qtype == "top_spend":
         # B1/j04 — a deterministic top-customers-by-spend ranking. id/₹ only: display_name is
@@ -691,6 +736,11 @@ def answer_status_query(
         # Fix-4c (live canary 2026-07-18): the success ack COMPLEMENTS the media message instead
         # of re-claiming a second send — the caption on the file already says what it is, and two
         # independent "I sent you the file" claims doubled the damage when the attach failed.
+        # VT-756 scope 3 — an EMPTY ledger must not produce a file. Delivering an empty CSV and
+        # announcing "I've sent your customer list" is the same fabrication as the zero count, with a file
+        # attached to it: the owner opens a file that says their business has no customers.
+        if CustomersWrapper().count_all(tenant_id) == 0:
+            return _honest_empty_ledger(tenant_id)
         from orchestrator.owner_surface.customer_export import send_customer_list_to_owner
 
         if send_customer_list_to_owner(tenant_id):
@@ -709,7 +759,13 @@ def answer_status_query(
 
     if qtype == "opt_out_count":
         # opted_out (consumer) + owner_excluded (owner) are both skipped by campaign sends.
-        n = CustomersWrapper().count_by_opt_out_status(tenant_id, ("opted_out", "owner_excluded"))
+        # VT-756 scope 3 — the same precondition as customer_count. "0 customers are excluded" against
+        # an EMPTY ledger is a statistic about a population that does not exist; it reads as a
+        # reassuring finding ("nobody has opted out") when the truth is that nobody is loaded.
+        cw = CustomersWrapper()
+        if cw.count_all(tenant_id) == 0:
+            return _honest_empty_ledger(tenant_id)
+        n = cw.count_by_opt_out_status(tenant_id, ("opted_out", "owner_excluded"))
         return f"{n} customers are excluded from your campaigns (opted out or owner-excluded)."
 
     if qtype == "last_campaign":

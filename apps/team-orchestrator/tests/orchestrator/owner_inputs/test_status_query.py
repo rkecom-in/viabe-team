@@ -136,7 +136,11 @@ def test_classify_bare_list_ask_routes_to_customer_list() -> None:
 
 def test_classify_finance_and_billing_unchanged() -> None:
     assert sq.classify_status_query("Sharma ji ka payment kabse pending hai") == "unknown"
-    assert sq.classify_status_query("what's my plan?") == "billing"
+    # VT-721: a bare 'plan' ask now falls to the brain (the rolling 7-day plan exists — "what's
+    # my plan?" is ambiguous between the week plan and billing; the brain holds both). Billing
+    # still fires with an unambiguous companion token.
+    assert sq.classify_status_query("what's my plan?") == "unknown"
+    assert sq.classify_status_query("what's my plan price?") == "billing"
     assert sq.classify_status_query("how many opted-out customers?") == "opt_out_count"
 
 

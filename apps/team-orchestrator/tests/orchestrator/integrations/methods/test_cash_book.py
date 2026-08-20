@@ -35,12 +35,16 @@ def _entry(**fields):
 
 
 class _FakeAnthropic:
-    """Anthropic stand-in returning a canned JSON body (owner-typed OR merge)."""
+    """Transport stand-in returning a canned JSON body (owner-typed OR merge).
+
+    VT-732: cash_book's LLM legs go through the multi-provider seam, so the injected object is a
+    ``structured_text_call``-shaped callable (tier first, kwargs after) rather than an SDK client."""
 
     def __init__(self, *entries):
         self._body = json.dumps({"entries": list(entries)})
-        self.messages = SimpleNamespace(create=lambda **_k: SimpleNamespace(
-            content=[SimpleNamespace(type="text", text=self._body)]))
+
+    def __call__(self, tier, **_k):
+        return self._body
 
 
 def _transcribe(text="Rajesh paid 500"):
@@ -146,7 +150,7 @@ def test_audio_only_narration_attributes(db_ctx):
         customer_name=("Rajesh", 0.95), phone=(phone, 0.95),
         amount=("500", 0.95), entry_date=("2026-06-01", 0.95)))
     s = ingest_cash_book(tenant, audio_bytes=b"aud", transcribe_fn=_transcribe(),
-                         anthropic_client=client, **_OK)
+                         llm_call=client, **_OK)
     assert s.committed == 1
     cust, led, _ = _counts(tenant)
     assert cust == 1 and led == 1
@@ -162,7 +166,7 @@ def test_both_merge_attributes(db_ctx):
         amount=("500", 0.95), entry_date=("2026-06-01", 0.95)))
     s = ingest_cash_book(tenant, image_bytes=b"img", audio_bytes=b"aud",
                          image_extract_fn=extract, transcribe_fn=_transcribe(),
-                         anthropic_client=merge, **_OK)
+                         llm_call=merge, **_OK)
     assert s.committed == 1
     cust, led, _ = _counts(tenant)
     assert cust == 1 and led == 1
@@ -176,7 +180,7 @@ def test_unattributed_narration_parked(db_ctx):
         customer_name=(None, 0.0), phone=(None, 0.0),
         amount=("500", 0.95), entry_date=("2026-06-01", 0.95)))
     s = ingest_cash_book(tenant, audio_bytes=b"aud", transcribe_fn=_transcribe(),
-                         anthropic_client=client, **_OK)
+                         llm_call=client, **_OK)
     assert s.committed == 0 and s.parked == 1
     cust, led, imp = _counts(tenant)
     assert cust == 0 and led == 0 and imp == 1
@@ -194,7 +198,7 @@ def test_merge_conflict_routes_to_clarification(db_ctx):
         amount=("700", 0.5), entry_date=("2026-06-01", 0.95)))
     s = ingest_cash_book(tenant, image_bytes=b"img", audio_bytes=b"aud",
                          image_extract_fn=extract, transcribe_fn=_transcribe(),
-                         anthropic_client=merge, **_OK)
+                         llm_call=merge, **_OK)
     assert s.committed == 0 and s.pending_clarification == 1
     cust, led, _ = _counts(tenant)
     assert cust == 0 and led == 0  # nothing committed on conflict

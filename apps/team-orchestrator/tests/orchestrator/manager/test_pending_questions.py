@@ -75,7 +75,10 @@ def test_ask_is_idempotent_per_task(pool):
     a = pq.ask(tid, "which cohort?", task_id=task)
     b = pq.ask(tid, "which cohort (again)?", task_id=task)
     assert a == b  # a task holds at most one open question
-    assert len(pq.get_open(tid, task_id=task)) == 1
+    # VT-755: get_open() shows DELIVERED questions by default (an unsent question must not make the
+    # owner look mid-conversation). This test is about `ask` DEDUP — the row existing exactly once —
+    # which has nothing to do with delivery, so it asks for the undelivered view explicitly.
+    assert len(pq.get_open(tid, task_id=task, include_undelivered=True)) == 1
 
 
 def test_correlate_reply_answers_and_redacts(pool):
@@ -83,6 +86,9 @@ def test_correlate_reply_answers_and_redacts(pool):
 
     tid = _seed_tenant(pool)
     qid = pq.ask(tid, "who is the target?")
+    # VT-755: an undelivered question is unanswerable — this test is about redacting the OWNER'S REPLY,
+    # which only exists once they were actually asked.
+    assert pq.mark_delivered(tid, qid) is True
     ret = pq.correlate_reply(tid, "message +919812345678 our regulars", "SM1")
     assert ret == qid
     row = _row(pool, qid)
@@ -95,6 +101,9 @@ def test_correlate_reply_redelivery_is_noop(pool):
 
     tid = _seed_tenant(pool)
     qid = pq.ask(tid, "q?")
+    # VT-755: delivery is the precondition for answering at all (see mark_delivered). This test is
+    # about SID-REDELIVERY idempotency on top of a real answer.
+    assert pq.mark_delivered(tid, qid) is True
     pq.correlate_reply(tid, "first answer", "SMdup", question_id=qid)
     # a redelivered reply (same sid) must not double-answer; question is already answered anyway
     again = pq.correlate_reply(tid, "second answer", "SMdup", question_id=qid)
@@ -107,6 +116,12 @@ def test_correlate_reply_terminal_safe_first_answer_wins(pool):
 
     tid = _seed_tenant(pool)
     qid = pq.ask(tid, "q?")
+    # VT-755: `ask` no longer implies DELIVERED. A question the owner never received is not answerable
+    # (on dev an owner's "bhej do unhe" was consumed as the answer to a question that appears nowhere in
+    # conversation_log), so correlation now requires `delivered_at`. This test is about FIRST-ANSWER-WINS,
+    # which presupposes the owner actually got the question — so the precondition is now explicit rather
+    # than accidentally true.
+    assert pq.mark_delivered(tid, qid) is True
     pq.correlate_reply(tid, "the real answer", "SMa", question_id=qid)
     # a later, different reply finds no OPEN question → no-op (None), first answer preserved
     assert pq.correlate_reply(tid, "late answer", "SMb", question_id=qid) is None
@@ -135,5 +150,11 @@ def test_tenant_isolation(pool):
 
     tid_a = _seed_tenant(pool)
     tid_b = _seed_tenant(pool)
-    pq.ask(tid_a, "A only")
-    assert pq.get_open(tid_b) == []  # RLS: B cannot see A's question
+    qid = pq.ask(tid_a, "A only")
+    # VT-755 — mark_delivered is REQUIRED here or this test becomes VACUOUS. get_open() now hides
+    # undelivered questions, so without the stamp `get_open(tid_b) == []` would hold even if RLS were
+    # completely broken: A's question would be invisible to everyone, B included, for the wrong reason.
+    # Stamping it makes A's question genuinely visible-to-A, so B seeing nothing is real isolation.
+    assert pq.mark_delivered(tid_a, qid) is True
+    assert len(pq.get_open(tid_a)) == 1, "the question must be visible to its OWN tenant..."
+    assert pq.get_open(tid_b) == []  # ...and RLS must keep it invisible to B

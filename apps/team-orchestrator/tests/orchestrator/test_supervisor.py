@@ -174,7 +174,7 @@ def test_orchestrator_spawns_sales_recovery_returns_campaign_plan(
     # ChatAnthropic (langchain) which has its own SDK plumbing — that
     # path is proven indirectly via active_agent below.
     monkeypatch.setattr(
-        "orchestrator.agent.sales_recovery.Anthropic", _CountingClient
+        "orchestrator.agent.sales_recovery._model_client", _CountingClient
     )
     monkeypatch.setenv("VIABE_ENV", "production")  # _resolve_model → Opus
 
@@ -369,7 +369,7 @@ def test_orchestrator_spawns_sales_recovery_bundle_wire_through_canary_haiku(
 
     _CountingClient.calls = []
     monkeypatch.setattr(
-        "orchestrator.agent.sales_recovery.Anthropic", _CountingClient
+        "orchestrator.agent.sales_recovery._model_client", _CountingClient
     )
     monkeypatch.setenv("VIABE_ENV", "test")  # _resolve_model → Haiku
 
@@ -880,17 +880,24 @@ def test_sales_recovery_node_passes_bundle_to_agent(
     assert plan.run_id == run_id
 
 
-def test_manager_review_node_uses_observability_context_run_id_not_state_run_id(
+def test_manager_review_node_joins_on_manager_task_id_not_state_run_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """§7D — ``_manager_review_node`` must thread the ACTIVE ObservabilityContext's run_id into
-    ``manager_review(run_id=...)``, NOT ``state['run_id']``. The two diverge for an enforce-loop
-    dispatch (``manager.workflow._dispatch_specialist_step`` enters
-    ``observability_context(run_id=UUID(task_id), ...)`` while ``state['run_id']`` carries the
-    per-attempt ``loop_run_id``) — using the wrong one would produce a ``reasoning_ref`` that never
-    joins to the turn's actual ``orchestrator_agent_turn`` reasoning row (see manager_review's own
-    docstring). This test seeds the two identities to DIFFERENT values to prove the node picks the
-    context one, not state's."""
+    """§7D — ``_manager_review_node`` must thread the manager TASK id into
+    ``manager_review(run_id=...)``, NOT ``state['run_id']`` (which carries the per-attempt
+    ``loop_run_id``). Using the wrong one produces a ``reasoning_ref`` that never joins to the
+    turn's ``orchestrator_agent_turn`` reasoning row.
+
+    VT-738: this used to be written as "use the ACTIVE ObservabilityContext's run_id", which gave
+    the right ANSWER only because ``_dispatch_specialist_step`` happened to open the context under
+    ``UUID(task_id)``. That coupling was load-bearing by accident and had to go — opening the
+    context under the task id meant every ``pipeline_steps`` write from the loop FK-violated
+    (``run_id NOT NULL REFERENCES pipeline_runs(id)``, and no such row exists for a task id), so the
+    loop's whole per-node trace was silently discarded. The context now opens under the dispatch
+    run, and this join is pinned to the task id explicitly. The value threaded in production is
+    unchanged; only where it comes from is.
+
+    The three identities are seeded to DIFFERENT values so neither of the wrong ones can pass."""
     from types import SimpleNamespace
 
     import orchestrator.manager.review as review_mod
@@ -912,7 +919,7 @@ def test_manager_review_node_uses_observability_context_run_id_not_state_run_id(
     tenant_id = uuid4()
     task_id = uuid4()
     step_id = uuid4()
-    ctx_run_id = uuid4()  # the ACTIVE ObservabilityContext's run_id
+    ctx_run_id = uuid4()  # the ACTIVE ObservabilityContext's run_id — now the DISPATCH run
     state_run_id = uuid4()  # a DIFFERENT value in state['run_id'] — the loop's per-attempt id
 
     state = {
@@ -925,8 +932,10 @@ def test_manager_review_node_uses_observability_context_run_id_not_state_run_id(
     with observability_context(run_id=ctx_run_id, tenant_id=tenant_id):
         supervisor_mod._manager_review_node(state)
 
-    assert captured["run_id"] == ctx_run_id
+    assert captured["run_id"] == task_id
     assert captured["run_id"] != state_run_id
+    # The join must NOT drift back onto the context now that the context carries the dispatch run.
+    assert captured["run_id"] != ctx_run_id
 
 
 def test_sales_recovery_node_fails_loud_on_missing_bundle(

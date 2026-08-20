@@ -327,7 +327,7 @@ def test_select_brain_model_routine_intent_picks_haiku():
     model_id, tier = select_brain_model({"classification": "approval", "confidence": 0.95})
 
     assert model_id == _BRAIN_MODEL_HAIKU == "claude-haiku-4-5"
-    assert tier == "haiku"
+    assert tier == "routine"
 
 
 @pytest.mark.parametrize(
@@ -338,7 +338,7 @@ def test_select_brain_model_all_routine_intents_pick_haiku(routine: str):
     from orchestrator.agent.dispatch import select_brain_model
 
     model_id, tier = select_brain_model({"classification": routine})
-    assert (model_id, tier) == ("claude-haiku-4-5", "haiku")
+    assert (model_id, tier) == ("claude-haiku-4-5", "routine")
 
 
 def test_select_brain_model_business_action_picks_sonnet():
@@ -355,7 +355,7 @@ def test_select_brain_model_business_action_picks_sonnet():
     )
 
     assert model_id == _BRAIN_MODEL_SONNET == "claude-sonnet-5"
-    assert tier == "sonnet"
+    assert tier == "complex"
 
 
 @pytest.mark.parametrize(
@@ -379,7 +379,7 @@ def test_select_brain_model_complex_or_ambiguous_picks_sonnet(complex_intent: st
     from orchestrator.agent.dispatch import select_brain_model
 
     model_id, tier = select_brain_model({"classification": complex_intent})
-    assert (model_id, tier) == ("claude-sonnet-5", "sonnet")
+    assert (model_id, tier) == ("claude-sonnet-5", "complex")
 
 
 def test_business_analysis_not_in_routine_intents():
@@ -398,7 +398,7 @@ def test_select_brain_model_missing_signal_fails_safe_to_sonnet():
     from orchestrator.agent.dispatch import select_brain_model
 
     model_id, tier = select_brain_model({})
-    assert (model_id, tier) == ("claude-sonnet-5", "sonnet")
+    assert (model_id, tier) == ("claude-sonnet-5", "complex")
 
 
 def test_select_brain_model_unknown_classification_fails_safe_to_sonnet():
@@ -408,7 +408,7 @@ def test_select_brain_model_unknown_classification_fails_safe_to_sonnet():
     from orchestrator.agent.dispatch import select_brain_model
 
     model_id, tier = select_brain_model({"classification": "some_new_intent"})
-    assert (model_id, tier) == ("claude-sonnet-5", "sonnet")
+    assert (model_id, tier) == ("claude-sonnet-5", "complex")
 
 
 def test_select_brain_model_non_string_classification_fails_safe_to_sonnet():
@@ -416,7 +416,7 @@ def test_select_brain_model_non_string_classification_fails_safe_to_sonnet():
     not crash the selector — it fails safe to Sonnet."""
     from orchestrator.agent.dispatch import select_brain_model
 
-    assert select_brain_model({"classification": None})[1] == "sonnet"
+    assert select_brain_model({"classification": None})[1] == "complex"
 
 
 def test_brain_model_ids_are_the_single_source_of_truth():

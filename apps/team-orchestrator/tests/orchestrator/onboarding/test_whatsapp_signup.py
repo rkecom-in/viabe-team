@@ -149,7 +149,7 @@ def test_consent_reply_creates_tenant_and_kicks_journey(monkeypatch) -> None:
     # (a WhatsApp tenant has no draft, so an unseeded journey never asks anything) …
     assert calls["journey_started"] == {
         "tenant": calls["tenant_id"],
-        "queue_fields": ["business_name", "owner_name", "business_type", "city"],
+        "queue_fields": ["business_name", "owner_name", "business_type", "owner_email", "city"],
     }
     # VT-716b — the first question is PRESENTED deterministically (no synthetic owner turn).
     assert calls["presented"] == calls["tenant_id"]

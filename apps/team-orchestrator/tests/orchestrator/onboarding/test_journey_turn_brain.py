@@ -198,7 +198,7 @@ def test_multi_field_extraction_records_and_promotes_valid_confirm(substrate, mo
     assert row["answers"].get("city") == "Pune"
     # VT-696: queue exhaustion now recomposes to the web-presence capture (draft present,
     # budget not yet spent by it) instead of completing — cursor resets onto that fresh queue.
-    assert row["cursor"] == 0 and [q["field"] for q in row["question_queue"]] == ["web_presence"], (
+    assert row["cursor"] == 0 and [q["field"] for q in row["question_queue"]] == ["web_presence", "owner_email"], (
         "exhaustion recomposes to the web-presence ask; every original field is resolved"
     )
     promoted = _canonical_profile(substrate.dsn, tenant)
@@ -284,7 +284,7 @@ def test_gate_off_is_deterministic_walker(substrate, monkeypatch, _stub_sends):
     assert row is not None
     # VT-696: the confirm-yes resolves the whole seeded queue, so exhaustion recomposes to the
     # web-presence capture (draft present) — cursor lands on that fresh single-question queue.
-    assert row["cursor"] == 0 and [q["field"] for q in row["question_queue"]] == ["web_presence"], (
+    assert row["cursor"] == 0 and [q["field"] for q in row["question_queue"]] == ["web_presence", "owner_email"], (
         "confirm-yes resolved; the walker then presents the web-presence ask"
     )
     assert row["answers"].get("business_type") == "services", "draft_value recorded (not 'yes')"

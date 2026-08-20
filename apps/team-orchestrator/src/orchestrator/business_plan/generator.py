@@ -21,13 +21,11 @@ from __future__ import annotations
 import importlib
 import json
 import logging
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 from uuid import UUID, uuid4
 
-import yaml
 from dbos import DBOS
 
 from orchestrator.business_plan import store
@@ -132,32 +130,36 @@ def _gather_grounding(tenant_id: UUID | str) -> Grounding:
 # --- model resolution + LLM call ----------------------------------------------
 
 
+# VT-732 — the SPECIALIST tier (TEAM_MODEL_SPECIALIST), replacing the
+# ``config/models.yaml[business_plan][VIABE_ENV-slot]`` pin. Grounded bilingual long-form with
+# strict per-sentence citation discipline is capable-tier work; the tier var already carries the
+# per-environment split the yaml slots encoded.
+_PLAN_TIER = "specialist"
+
+
 def _resolve_plan_model() -> str:
-    """models.yaml ``business_plan`` slot — VIABE_ENV=production → production model, else test
-    (mirrors apify_food._resolve_theme_model)."""
-    env = os.environ.get("VIABE_ENV", "test").lower()
-    slot = "production" if env == "production" else "test"
-    with open(_MODELS_YAML) as f:
-        config = yaml.safe_load(f)
-    return cast(str, config["business_plan"][slot])
+    """The concrete model the plan tier resolves to — for logs/attribution only."""
+    from orchestrator.llm import resolve_model_id
+
+    return resolve_model_id(_PLAN_TIER)
 
 
 def _call_llm(prompt: str, model: str) -> str:
-    """One non-streaming Messages call; returns the concatenated text blocks."""
-    from anthropic import Anthropic
+    """One non-streaming call through the tier seam; returns the concatenated text.
 
-    # max_retries=0: OUR retry-once-with-violations loop is the retry policy. The SDK default (2)
-    # would compound it to a ~6-minute worst case (2 attempts × 3 HTTP tries × 60s) against the DBOS
-    # 360s ceiling (adversarial-verify note).
-    client = Anthropic(max_retries=0)
-    resp = client.messages.create(
-        model=model,
+    ``model`` is accepted for call-site/log compatibility — the tier picks the model (VT-732).
+    OUR retry-once-with-violations loop remains the only retry policy: the seam adds none on the
+    anthropic path, and the explicit ``timeout_s`` keeps the worst case inside the DBOS 360s
+    ceiling (adversarial-verify note)."""
+    from orchestrator.llm.structured import structured_text_call
+
+    return structured_text_call(
+        _PLAN_TIER,
+        user=prompt,
         max_tokens=_MAX_OUTPUT_TOKENS,
-        messages=[{"role": "user", "content": prompt}],
-        timeout=_LLM_TIMEOUT_SECONDS,
-    )
-    return "".join(
-        getattr(b, "text", "") for b in resp.content if getattr(b, "type", "") == "text"
+        agent="business_plan",
+        call_site="plan_generation",
+        timeout_s=_LLM_TIMEOUT_SECONDS,
     ).strip()
 
 

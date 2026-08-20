@@ -81,20 +81,16 @@ class _FakeResp:
         self.content = content
 
 
-class _FakeClient:
-    def __init__(self, payload: dict) -> None:
-        self._payload = payload
+def _FakeClient(payload: dict):  # noqa: N802 — kept as a factory name so call sites read unchanged
+    """VT-732 transport double: verification now calls the multi-provider seam, so the injected
+    object is a text-returning callable rather than an Anthropic SDK client."""
+    text = json.dumps(payload)
 
-    @property
-    def messages(self):
-        payload = self._payload
+    def _call(tier: str, **kwargs):  # noqa: ANN003, ANN202 — test double
+        assert tier == "review", "completion verification runs on the env-governed review tier"
+        return text
 
-        class _M:
-            @staticmethod
-            def create(**kwargs):  # noqa: ANN003, ANN201
-                return _FakeResp([_FakeTextBlock(json.dumps(payload))])
-
-        return _M()
+    return _call
 
 
 def test_deterministic_floor_blocks_before_any_llm_call(pool):
@@ -105,7 +101,7 @@ def test_deterministic_floor_blocks_before_any_llm_call(pool):
     tid = _seed_tenant(pool)
     task_id = _create_and_claim_and_complete(pool, tid, criteria=["3+ recovered"], evidence_kind=None)
 
-    result = verify_completion(tid, task_id, client=None)  # would raise if it ever reached a real call
+    result = verify_completion(tid, task_id, text_call=None)  # would reach a real call if the floor ever let it through
     assert result.verdict == "not_verified"
     assert "step_seq=1" in result.reason
 
@@ -119,7 +115,7 @@ def test_verified_when_floor_passes_and_llm_agrees(pool):
     )
 
     result = verify_completion(
-        tid, task_id, client=_FakeClient({"verdict": "verified", "reason": "evidence supports it"})
+        tid, task_id, text_call=_FakeClient({"verdict": "verified", "reason": "evidence supports it"})
     )
     assert result.verdict == "verified"
 
@@ -134,7 +130,7 @@ def test_not_verified_when_llm_disagrees(pool):
 
     result = verify_completion(
         tid, task_id,
-        client=_FakeClient({"verdict": "not_verified", "reason": "evidence only shows 1 recovered"}),
+        text_call=_FakeClient({"verdict": "not_verified", "reason": "evidence only shows 1 recovered"}),
     )
     assert result.verdict == "not_verified"
 
@@ -148,13 +144,10 @@ def test_fail_closed_on_malformed_llm_response(pool):
         pool, tid, criteria=["3+ recovered"], evidence_kind="campaign_plan"
     )
 
-    class _BrokenClient:
-        class messages:  # noqa: N801
-            @staticmethod
-            def create(**kwargs):  # noqa: ANN003, ANN201
-                return _FakeResp([_FakeTextBlock("not json")])
+    def _broken_call(tier, **kwargs):  # noqa: ANN003, ANN202 — test double
+        return "not json"
 
-    result = verify_completion(tid, task_id, client=_BrokenClient())
+    result = verify_completion(tid, task_id, text_call=_broken_call)
     assert result.verdict == "not_verified"
     assert "verification_extraction_failed" in result.reason
 
@@ -169,13 +162,10 @@ def test_fail_closed_on_client_exception(pool):
         pool, tid, criteria=["3+ recovered"], evidence_kind="campaign_plan"
     )
 
-    class _RaisingClient:
-        class messages:  # noqa: N801
-            @staticmethod
-            def create(**kwargs):  # noqa: ANN003, ANN201
-                raise RuntimeError("network down")
+    def _raising_call(tier, **kwargs):  # noqa: ANN003, ANN202 — test double
+        raise RuntimeError("network down")
 
-    result = verify_completion(tid, task_id, client=_RaisingClient())
+    result = verify_completion(tid, task_id, text_call=_raising_call)
     assert result.verdict == "not_verified"
     assert "verification_extraction_failed" in result.reason
 
@@ -189,6 +179,6 @@ def test_no_criteria_declared_still_reaches_the_llm(pool):
     task_id = _create_and_claim_and_complete(pool, tid, criteria=[], evidence_kind=None)
 
     result = verify_completion(
-        tid, task_id, client=_FakeClient({"verdict": "verified", "reason": "no criteria declared"})
+        tid, task_id, text_call=_FakeClient({"verdict": "verified", "reason": "no criteria declared"})
     )
     assert result.verdict == "verified"

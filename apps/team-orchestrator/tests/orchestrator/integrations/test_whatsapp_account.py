@@ -41,6 +41,15 @@ def _provision(waba_id):
     return {"phone_number": "+919900000001", "phone_number_id": "pnid_456"}
 
 
+def _provision_unique(waba_id):
+    """VT-742: migration 207 made a LIVE WABA number unique across tenants (a duplicate would let
+    `_lookup_customer_inbound_tenant`'s LIMIT 1 hand one tenant another tenant's customer replies).
+    A test that drives a tenant all the way to `live` must therefore provision a number that no
+    PREVIOUS RUN of this suite already parked at live — the constant above would collide on the
+    second run against the same database."""
+    return {"phone_number": f"+9199{uuid4().int % 10**8:08d}", "phone_number_id": "pnid_456"}
+
+
 @pytest.fixture(scope="module")
 def substrate():  # type: ignore[no-untyped-def]
     import apply_migrations
@@ -120,7 +129,7 @@ def test_send_gate_fail_closed_until_live(substrate):
     t = _tenant(substrate.dsn)
     # no row yet → fail-closed
     assert wa_send_allowed(UUID(t)) is False
-    connect_waba(UUID(t), "c", exchange_fn=_exchange, provision_fn=_provision)
+    connect_waba(UUID(t), "c", exchange_fn=_exchange, provision_fn=_provision_unique)
     assert wa_send_allowed(UUID(t)) is False         # verifying, not live
     set_status(UUID(t), "name_approved")
     assert wa_send_allowed(UUID(t)) is False

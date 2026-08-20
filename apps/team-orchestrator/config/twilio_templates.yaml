@@ -507,6 +507,51 @@ team_winback_offer:
     en: b8ecced1091c1ecfdb7ac302ce8ca16fc5ffdaae284841bd08913aab2ec4810e
     hi: 5a31e9acb6e57fd2652a9c94fed76864c00a3b3b9acdb891360b4390ae3c6db9
 
+# --- P1.5 LEAD OUTREACH (VT-770/FIRST-PROOF) — Meta APPROVED 2026-08-20, verified via Content API ---
+# Out-of-window by definition: these address a LEAD, who is not in an open session. Both are
+# MARKETING, submitted and approved as such — not UTILITY. A send additionally requires a recorded
+# CONSENT BASIS per lead (FIRST-PROOF red line 2 / P1.2); approval is not permission.
+# `lead_winback` HI is named `lead_winback2` in Twilio — that is the real friendly_name the API
+# returns, not a typo; the registry records what the API holds.
+
+lead_winback:
+  audience: customer            # a LEAD — enquired, did not buy
+  category: customer_marketing  # Meta MARKETING (confirmed via ApprovalRequests: status=approved)
+  agent_selectable: true        # approved + SIDs wired; consent-basis gate still applies at send
+  optout_line: true             # "Reply STOP to unsubscribe." / "बंद करने के लिए STOP भेजें।" in the approved body
+  variables:
+    - lead_name        # {{1}}
+    - business_name    # {{2}}
+    - enquired_about   # {{3}} — what they asked about; grounded, never invented
+    - tracked_token    # {{4}} — URL-button suffix, https://viabe.ai/r/{{4}} (customer-scoped, VT-745)
+  languages:
+    en: HXb8d370885bb6e776db79352e81274214  # friendly_name lead_winback1
+    hi: HX656d289c0401b20dfdecbfa68db864fd  # friendly_name lead_winback2 (API-confirmed name)
+  body_sha256:  # pinned from the Twilio Content API APPROVED body
+    en: f5ef75d01041e269a03112587b55f17a0bfdd91b7ba4d528351567ee3c654444
+    hi: ebaaeb3a8248524fd6acd11eb66c7be4bee38ee2021ed5f4a71c236146bb0e69
+
+campaign_offer:
+  audience: customer
+  category: customer_marketing  # Meta MARKETING (confirmed via ApprovalRequests: status=approved)
+  agent_selectable: false       # BLOCKED: its URL button is https://viabe.ai/c/{{5}}, an AGGREGATE
+                                # campaign-scoped destination that does not exist yet — VT-773.
+                                # Approved is not sendable; flip this when /c/ resolves.
+  optout_line: true
+  money_bearing: true           # carries an offer — always-confirm floor, never L3 auto-send
+  variables:
+    - customer_name       # {{1}}
+    - business_name       # {{2}}
+    - offer_description   # {{3}} — grounded against the fact bundle, validator-enforced
+    - valid_until         # {{4}} — rendered from the campaign's stored end date, never composed
+    - campaign_token      # {{5}} — URL-button suffix, https://viabe.ai/c/{{5}} (VT-773)
+  languages:
+    en: HXdc77fa9270891ab5de2fe1e5ba8baea3
+    hi: HXb5635a99070444f6c9404ece9c6695d2
+  body_sha256:  # pinned from the Twilio Content API APPROVED body
+    en: b3fec7425f34192aeeeded8504cdfebf6bf477908431d83aa2babf70ddf2254d
+    hi: 14f8a1ce8d8f8dd71b0e985aeb89b596734207718ce4aa877f82976348956db3
+
 team_agent_draft_approval:
   audience: owner
   category: owner_notification  # L2 approval ask — system-invoked via arm_pause_request

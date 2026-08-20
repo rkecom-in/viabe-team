@@ -65,6 +65,28 @@ class TriageSeamResult:
 _NO_OP = TriageSeamResult(outcome=None, task_id=None, skip_legacy_dispatch=False)
 
 
+def _compose_unsupported_decline(result: Any) -> str:
+    """VT-757 — the honest in-turn decline, assembled DETERMINISTICALLY around two model-supplied
+    phrases.
+
+    The frame is fixed code because it carries the commitment ("that isn't something I can do") and
+    must never drift. The two slots are the classifier's because they have to be in the OWNER's
+    terms and their language, which is a judgment no template can make.
+
+    A missing alternative degrades to the bare decline rather than inventing one — the scenario's bar
+    is an honest answer, and a fabricated "I could instead…" would be a fresh promise on top of a
+    broken one.
+    """
+    ask = (getattr(result, "unsupported_ask", "") or "").strip().rstrip(".")
+    alt = (getattr(result, "nearest_supported", "") or "").strip().rstrip(".")
+    lead = f"I can't {ask} — that isn't something I can do." if ask else (
+        "That isn't something I can do."
+    )
+    return f"{lead} What I can do: {alt}. Want me to?" if alt else (
+        f"{lead} Tell me what you'd like instead and I'll take it from there."
+    )
+
+
 def _build_draft_plan(message_text: str) -> ManagerPlan:
     """The MINIMAL viable draft for a new_task classification: this row does not build a
     natural-language "plan drafting" capability (a separate, larger piece of work — see the VT-606
@@ -574,19 +596,49 @@ def triage_seam(
 
     # D3 (subsumes cluster-5b) — the deterministic CAMPAIGN first-contact net. A clear "run a
     # win-back campaign" imperative (enforce mode, no active task already owning the tenant) is
-    # routed HERE rather than left to the intermittent classifier below. Two honest, deterministic
+    # routed HERE rather than left to the intermittent classifier — whose verdict is now read FIRST
+    # (VT-757, see the ordering note inside the block). Two honest, deterministic
     # outcomes: an EMPTY customer ledger -> a grounded "no one to reach out to" reply + NO dispatch
     # (kills the "I've started a win-back" fabrication against a no-data tenant); a real cohort ->
     # mint a sales_recovery dispatch + start the durable workflow (the loop's approval/consent/
     # opt-out rails still gate every send — this changes ROUTING, never the money gates). FAIL-OPEN:
-    # any error falls through to triage_turn below, exactly as if the net weren't here.
-    if resolved_mode == "enforce" and not has_active_task:
+    # any error falls through to the classifier's own routing, exactly as if the net weren't here.
+    # VT-738 — ``None`` means the D3 net was never EVALUATED (shadow mode, or the tenant already
+    # holds an active task), which is a different fact from "evaluated and did not match". The
+    # measured split depends on telling those apart: D3-eligible turns delegated 6/6, D3-INeligible
+    # 22/27, and all 5 misses in the gate were D3-ineligible.
+    result = triage_turn(
+        message_text=message_text,
+        has_open_question=has_open_question,
+        has_active_task=has_active_task,
+    )
+
+    d3_matched: bool | None = None
+    # VT-757 — THE CAPABILITY VERDICT COMES FIRST, and the ordering is the fix.
+    #
+    # This block used to run BEFORE ``triage_turn``, so its frozen KEYWORD trigger claimed the turn
+    # and dispatched a campaign before anything asked whether the work was possible. Measured on
+    # deployed dev 3/3 (not variance): "can you record and send a voice note in tamil to my lapsed
+    # customers" matches ``is_campaign_plan_imperative`` on "send … to my lapsed customers", so the
+    # ask was routed to Sales Recovery and answered as a data gap — while the classifier, asked
+    # directly, correctly returns ``unsupported_request`` with "send them a Tamil text win-back
+    # reminder" as the alternative. A keyword net was overruling the capability check.
+    #
+    # Moving ``triage_turn`` above costs nothing: it ran unconditionally on the next line anyway, and
+    # the comment above already names the LLM route as the phrasing-agnostic PRIMARY (the no-lists
+    # law) with D3 as a fast-path underneath. A fast-path may not answer a question the primary has
+    # already answered NO to.
+    #
+    # A fail-soft ``None`` from triage leaves D3 exactly as it was — no verdict is not a veto.
+    _capability_veto = result is not None and result.outcome == "unsupported_request"
+    if resolved_mode == "enforce" and not has_active_task and not _capability_veto:
         try:
             from orchestrator.onboarding.campaign_first_contact import is_campaign_plan_imperative
 
             # The KEYWORD trigger (frozen — no phrasing growth; the LLM route below is the phrasing-
             # agnostic primary per the Fazal no-lists law). Shares one dispatch body with option C.
-            if is_campaign_plan_imperative(message_text):
+            d3_matched = is_campaign_plan_imperative(message_text)
+            if d3_matched:
                 # VT-667 fix-4: an OPEN campaign_send approval turns this into a REVISION of the
                 # pending draft, not a fresh first-contact re-mint (revise_pending_campaign).
                 camp_res = _dispatch_campaign_first_contact_or_revision(
@@ -595,17 +647,25 @@ def triage_seam(
                 if camp_res is not None:
                     return camp_res
                 # create_plan didn't admit 'planned' — fall through to triage_turn (never silent).
+                # VT-738: "never silent" was true of the TURN (it still gets answered) but not of
+                # the RECORD — nothing marked that the deterministic router matched and then failed
+                # to produce a task. That reads downstream as a Manager that never wanted to
+                # delegate, which is the opposite of what happened.
+                emit_tm_audit(
+                    event_layer="decides",
+                    event_kind="campaign_first_contact_not_admitted",
+                    actor="team_manager",
+                    tenant_id=tenant_id,
+                    summary="D3 matched but the plan was not admitted 'planned' — fell through to triage",
+                    decision={"message_sid": message_sid, "d3_matched": True},
+                    severity="warning",
+                )
         except Exception:  # noqa: BLE001 — the D3 net must never block the turn (fail-open)
             logger.warning(
                 "D3 campaign first-contact net failed tenant=%s (fail-open -> triage_turn)",
                 tenant_id, exc_info=True,
             )
 
-    result = triage_turn(
-        message_text=message_text,
-        has_open_question=has_open_question,
-        has_active_task=has_active_task,
-    )
     if result is not None:
         _persist_observed_language(tenant_id, message_text, result.language)
     if result is None:
@@ -681,6 +741,15 @@ def triage_seam(
             "message_sid": message_sid,
             # §7D — the classifier's own stated WHY, not just the WHAT.
             "reasoning": result.reasoning,
+            # VT-738 — the three facts that were in memory here and recorded nowhere. Without them
+            # a `none` route cannot be separated into "the classifier called it something other
+            # than campaign_recovery" (a model-variance miss, fixable in the LLM-primary route) vs
+            # "the tenant's slot was already held, so every triage outcome collapsed to the same
+            # legacy fall-through" (a wedge, fixable only upstream). Those need opposite fixes,
+            # which is why guessing between them was worthless.
+            "task_kind": result.task_kind,
+            "has_active_task": has_active_task,
+            "d3_matched": d3_matched,
         },
     )
 
@@ -690,10 +759,36 @@ def triage_seam(
         return TriageSeamResult(outcome=result.outcome, task_id=task_id, skip_legacy_dispatch=False)
 
     # enforce
+    if result.outcome == "unsupported_request":
+        # VT-757 — DO NOT DISPATCH. The D1 ack ("Got it — I'm on it and I'll update you shortly")
+        # fires when the in-turn wait expires with no reply composed, which is DOWNSTREAM of
+        # dispatch. So an ask for a capability we do not have was promised before anything had
+        # established the work was possible, and nothing could ever follow. Measured on deployed dev:
+        # "can you record and send a voice note in tamil to my lapsed customers" -> "Got it — I'm on
+        # it", then silence.
+        #
+        # The decline is a REPLY, not an escalation: the owner asked a reasonable question and is
+        # owed an answer this turn.
+        return TriageSeamResult(
+            outcome=result.outcome, task_id=None, skip_legacy_dispatch=True,
+            direct_reply_text=_compose_unsupported_decline(result),
+        )
+
     if result.outcome == "new_task":
         if task_id is not None and task_status == "planned":
             from orchestrator.manager.workflow import start_manager_task_workflow
+            from orchestrator.observability.stage_timing import mark_stage
 
+            # VT-752 item 1 — the two boundaries on the WEBHOOK side of the handoff. `task_minted`
+            # is the first mark for this correlation, so every later stage's total_ms is measured
+            # from the moment the owner's ask became a durable task; the interval between this and
+            # `workflow_picked_up` (written by the DBOS workflow, in another process and another
+            # run) is the queue delay that pipeline_steps structurally cannot see.
+            mark_stage(
+                tenant_id, "task_minted", task_id=task_id, message_sid=message_sid,
+                detail={"task_kind": result.task_kind, "outcome": result.outcome},
+            )
+            mark_stage(tenant_id, "workflow_start_requested", task_id=task_id)
             start_manager_task_workflow(tenant_id, task_id)
             return TriageSeamResult(outcome=result.outcome, task_id=task_id, skip_legacy_dispatch=True)
         # 'queued' (an already-active task holds the slot) or plan-validation failed (task_id is
@@ -707,10 +802,28 @@ def triage_seam(
             # correlate_reply's own implicit "most-recent-for-tenant" fallback, which could
             # resolve the wrong task's question if more than one happened to be open at once.
             target: dict[str, Any] = open_questions[0]
-            pending_questions.correlate_reply(
+            correlated = pending_questions.correlate_reply(
                 tenant_id, message_text, message_sid,
                 question_id=target["id"], task_id=target["task_id"],
             )
+            # VT-755 — HONOUR the return. This previously returned skip_legacy_dispatch=True
+            # unconditionally, so a correlation that did NOT happen still swallowed the owner's message:
+            # it was neither recorded as an answer nor dispatched as an instruction. On dev the message
+            # in question was "haan theek hai, bhej do unhe" — send it to them. If nothing correlated,
+            # fall through to normal dispatch and let the message be read as what it is.
+            #
+            # `get_open` now returns DELIVERED questions only, so this branch is unreachable while
+            # `pending_questions` has no emitter. The guard stays because unreachable-today is not
+            # closed, and this is the seam where the swallow actually happened.
+            if correlated is None:
+                logger.warning(
+                    "VT-755: triage routed answer_pending but nothing correlated (tenant=%s "
+                    "question=%s) — falling through to dispatch rather than swallowing the message",
+                    tenant_id, target["id"],
+                )
+                return TriageSeamResult(
+                    outcome=result.outcome, task_id=None, skip_legacy_dispatch=False
+                )
             return TriageSeamResult(
                 outcome=result.outcome, task_id=target["task_id"], skip_legacy_dispatch=True
             )

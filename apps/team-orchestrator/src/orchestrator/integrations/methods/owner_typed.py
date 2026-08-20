@@ -49,15 +49,12 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 from uuid import UUID
 
-import yaml
-from anthropic import Anthropic
 
 from orchestrator.integrations.methods._image_adapter import (
     IngestionSummary,
@@ -73,7 +70,6 @@ logger = logging.getLogger(__name__)
 
 # config/models.yaml — parents: [0]=methods [1]=integrations [2]=orchestrator
 # [3]=src [4]=team-orchestrator.
-_MODELS_YAML = Path(__file__).resolve().parents[4] / "config" / "models.yaml"
 _PROMPT = (
     Path(__file__).resolve().parents[2]
     / "agent"
@@ -95,13 +91,18 @@ class OwnerTypedExtractionError(Exception):
     """
 
 
+# VT-732 — the CLASSIFIER tier (TEAM_MODEL_CLASSIFIER), replacing the
+# ``config/models.yaml[owner_typed_extraction][VIABE_ENV-slot]`` pin: pulling {name, phone, amount,
+# date} out of a short owner message is structured extraction, and both yaml slots were the same
+# cheap model already.
+_OWNER_TYPED_TIER = "classifier"
+
+
 def _resolve_owner_typed_model() -> str:
-    """Model id for ``owner_typed_extraction`` per ``VIABE_ENV`` (Haiku both slots)."""
-    env = os.environ.get("VIABE_ENV", "test").lower()
-    slot = "production" if env == "production" else "test"
-    with open(_MODELS_YAML) as f:
-        config = yaml.safe_load(f)
-    return cast(str, config["owner_typed_extraction"][slot])
+    """The concrete model the extraction tier resolves to — stamped on the result + logged."""
+    from orchestrator.llm import resolve_model_id
+
+    return resolve_model_id(_OWNER_TYPED_TIER)
 
 
 def _build_prompt(now: datetime) -> str:
@@ -177,16 +178,17 @@ def extract_owner_typed(
     *,
     tenant_id: UUID | str,
     now: datetime | None = None,
-    client: Anthropic | None = None,
-    model: str | None = None,
+    text_call: Callable[..., str] | None = None,
+    tier: str | None = None,
     consent_check: Callable[[UUID], bool] | None = None,
 ) -> list[ExtractionResult]:
     """Extract customer entries from a typed owner message (consent-gated).
 
     Raises ``ConsentRejectedError`` (fail-closed, no transmission) if
     ``tenants.owner_inputs`` is disabled, ``OwnerTypedExtractionError`` on
-    empty/non-conforming model output (→ owner re-ask). ``client``/``model``/
-    ``consent_check`` are injectable for tests + canary.
+    empty/non-conforming model output (→ owner re-ask). ``text_call``/``tier``/
+    ``consent_check`` are injectable for tests + canary (VT-732: the transport is the
+    multi-provider seam, so the injectable is a callable, not an SDK client).
     """
     now = now or datetime.now(UTC)
 
@@ -206,25 +208,17 @@ def extract_owner_typed(
             "tenant.owner_inputs disabled — message NOT transmitted to Anthropic"
         )
 
-    if client is None:
-        client = Anthropic()
-    resolved_model = model or _resolve_owner_typed_model()
-    resp = client.messages.create(
-        model=resolved_model,
+    from orchestrator.llm.structured import structured_text_call
+
+    resolved_model = _resolve_owner_typed_model()
+    text = (text_call or structured_text_call)(
+        tier or _OWNER_TYPED_TIER,
+        system=_build_prompt(now),
+        user=message_body,
         max_tokens=_MAX_OUTPUT_TOKENS,
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": _build_prompt(now)},
-                    {"type": "text", "text": message_body},
-                ],
-            }
-        ],
-    )
-    text = "".join(
-        getattr(b, "text", "") for b in resp.content
-        if getattr(b, "type", "") == "text"
+        agent="owner_typed",
+        call_site="entry_extraction",
+        tenant_id=tenant_id,
     ).strip()
     results = _parse_entries(text, resolved_model)
     logger.info(
@@ -240,8 +234,8 @@ def ingest_owner_typed(
     *,
     run_id: str | None = None,
     now: datetime | None = None,
-    client: Anthropic | None = None,
-    model: str | None = None,
+    text_call: Callable[..., str] | None = None,
+    tier: str | None = None,
     consent_check: Callable[[UUID], bool] | None = None,
 ) -> IngestionSummary:
     """Parse a typed owner message → dedup + commit identity/ledger rows.
@@ -253,7 +247,7 @@ def ingest_owner_typed(
     now = now or datetime.now(UTC)
     results = extract_owner_typed(
         message_body, tenant_id=tenant_id, now=now,
-        client=client, model=model, consent_check=consent_check,
+        text_call=text_call, tier=tier, consent_check=consent_check,
     )
     return ingest_entries(tenant_id, results, acquired_via="owner_typed", now=now)
 

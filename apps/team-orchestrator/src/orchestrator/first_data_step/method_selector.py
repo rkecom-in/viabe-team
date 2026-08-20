@@ -15,13 +15,10 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
-from pathlib import Path
-from typing import Any, cast
+from collections.abc import Callable
+from typing import Any
 
-import yaml
-from anthropic import Anthropic
 from pydantic import BaseModel, ConfigDict, Field
 
 logger = logging.getLogger(__name__)
@@ -33,7 +30,6 @@ CANDIDATE_METHODS = (
 # Scrape / context-enrichment methods — NEVER a first record-keeping suggestion.
 EXCLUDED_METHODS = ("gbp", "swiggy", "zomato")
 
-_MODELS_YAML = Path(__file__).resolve().parents[3] / "config" / "models.yaml"
 _CODE_FENCE_RE = re.compile(r"^\s*```(?:json)?[ \t]*\n(?P<body>.*?)\n```\s*$", re.DOTALL | re.IGNORECASE)
 
 Method = str
@@ -58,12 +54,18 @@ class MethodSelectorOutput(BaseModel):
     alternatives: list[Method] = Field(default_factory=list)
 
 
+# VT-732 — the CLASSIFIER tier (TEAM_MODEL_CLASSIFIER), replacing the
+# ``config/models.yaml[method_selector][VIABE_ENV-slot]`` pin: picking one method from a fixed
+# candidate set is classification, and the env var already expresses the per-environment split the
+# yaml encoded.
+_SELECTOR_TIER = "classifier"
+
+
 def _resolve_method_selector_model() -> str:
-    env = os.environ.get("VIABE_ENV", "test").lower()
-    slot = "production" if env == "production" else "test"
-    with open(_MODELS_YAML) as f:
-        config = yaml.safe_load(f)
-    return cast(str, config["method_selector"][slot])
+    """The concrete model the selector tier resolves to — for logs/attribution only."""
+    from orchestrator.llm import resolve_model_id
+
+    return resolve_model_id(_SELECTOR_TIER)
 
 
 _SYSTEM_PROMPT = f"""\
@@ -99,20 +101,24 @@ JSON only. No markdown fences. No prose.
 
 
 def rank_method(
-    input: MethodSelectorInput, *, client: Anthropic | None = None
+    input: MethodSelectorInput, *, text_call: Callable[..., str] | None = None
 ) -> MethodSelectorOutput:
     """Rank the first record-keeping method to suggest. Validates the model's pick
-    against CANDIDATE_METHODS (rejects any excluded/unknown method)."""
-    if client is None:
-        client = Anthropic()
-    model = _resolve_method_selector_model()
-    resp = client.messages.create(
-        model=model,
-        max_tokens=200,
+    against CANDIDATE_METHODS (rejects any excluded/unknown method).
+
+    VT-732 — ``text_call`` replaces the injectable Anthropic ``client``; the transport is the
+    multi-provider seam."""
+    from orchestrator.llm.structured import structured_text_call
+
+    _call = text_call or structured_text_call
+    raw = _call(
+        _SELECTOR_TIER,
         system=_SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": input.business_context or "(no context provided)"}],
-    )
-    raw = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text").strip()
+        user=input.business_context or "(no context provided)",
+        max_tokens=200,
+        agent="first_data_step",
+        call_site="method_selector",
+    ).strip()
     if not raw:
         raise ValueError("method_selector: model returned empty content")
     m = _CODE_FENCE_RE.match(raw)
