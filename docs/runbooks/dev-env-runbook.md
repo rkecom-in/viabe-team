@@ -179,9 +179,23 @@ Set to `false` (per VT-223). When `true`, Vercel suppresses commit-status checks
 
 ### `vercel.json` `ignoreCommand`
 
-`git diff --quiet HEAD^ HEAD ./` — skips Vercel build when the PR diff doesn't touch `apps/team-web/`. Kept (per VT-223) for build-cost optimization.
+**REMOVED 2026-08-21.** It was `git diff --quiet HEAD^ HEAD ./` — skip the Vercel build when the
+diff doesn't touch `apps/team-web/`, kept per VT-223 for build-cost optimization.
 
-To force a deploy on a docs-only PR (e.g., to test identity propagation, rebuild env, etc.), include any 1-line edit under `apps/team-web/` — e.g., append a blank line to `apps/team-web/README.md`. VT-221 used this pattern.
+**Why it had to go.** It inspects the TIP commit only (`HEAD^ HEAD`), but a push carries many commits
+and Vercel builds the tip. Batching commits into one push is the mandated workflow
+(CL-2026-06-28-push-authority), so any `apps/team-web/` change landing in a NON-tip commit was
+skipped — and skipped permanently, because the next push compares against a new tip that also may
+not touch team-web. The failure is silent from every angle a reader normally checks: the push is
+green, `origin/dev` genuinely contains the change, and the Vercel deploy says "Canceled" rather than
+"failed". Only the served HTML disagrees.
+
+It swallowed the signup-form field removal across three consecutive pushes and caused two false
+"it is live" reports to Fazal. Build minutes are cheaper than a deploy pipeline that reports success
+while serving stale code.
+
+The old force-a-deploy trick (append a line under `apps/team-web/` to make a docs-only PR build) is
+no longer needed — every push to `dev` now builds.
 
 ### Sticky-deploy recovery
 

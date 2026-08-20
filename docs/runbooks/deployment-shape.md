@@ -97,7 +97,14 @@ main push
 `vercel.json` settings (VT-223):
 - `framework: nextjs`
 - `regions: ["bom1"]` — Mumbai edge
-- `ignoreCommand: "git diff --quiet HEAD^ HEAD ./"` — skip build when diff doesn't touch `apps/team-web/`
+- `ignoreCommand` **REMOVED 2026-08-21.** It was `git diff --quiet HEAD^ HEAD ./` — skip the build
+  when the diff doesn't touch `apps/team-web/`. It inspects **only the tip commit**, but a push
+  carries many commits and Vercel builds the tip. Batching commits into one push is the mandated
+  workflow (CL-2026-06-28-push-authority), so a team-web change sitting in a non-tip commit was
+  skipped **silently and permanently** — the deploy reported "Canceled", origin had the change, and
+  the site kept serving the old build. It swallowed the signup-form field removal for three
+  consecutive pushes and produced two false "it is live" reports. Build minutes are cheaper than a
+  deploy that lies.
 - `github.silent: false` — Vercel PR status checks render (VT-223 flipped from true; per VT-221 surfaced)
 
 PR-side preview deploys are enabled per VT-223 (Fazal dashboard toggle).
