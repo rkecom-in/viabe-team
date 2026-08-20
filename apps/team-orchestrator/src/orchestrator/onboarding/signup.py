@@ -24,12 +24,18 @@ from pathlib import Path
 from typing import Any, Callable, cast
 from uuid import UUID
 
+from orchestrator.owner_surface.owner_locale import SUPPORTED_OWNER_LANGS
+
 logger = logging.getLogger(__name__)
 
 # Structural India-mobile E.164: +91 then a 10-digit number starting 6-9. Dep-free
 # (phonenumbers is not installed; a fuller-validation upgrade is a follow-up).
 _PHONE_RE = re.compile(r"^\+91[6-9]\d{9}$")
-_LANGUAGES = frozenset({"en", "hi"})
+# 2026-08-21: the owner is now ASKED which language we communicate in, so the accepted values are
+# the owner-locale value space itself (en | hinglish | hi) rather than a private en/hi copy.
+# Aliased from owner_surface.owner_locale so there is ONE definition — a second frozenset here is
+# how the two drift and a valid choice starts getting rejected at the door.
+_LANGUAGES = SUPPORTED_OWNER_LANGS
 # VT-449: the DPDP consent/purpose string (≥20 chars, required) on the MCA company lookup at signup.
 _MCA_SIGNUP_REASON = "Owner business identity verification during Viabe signup"
 
@@ -162,25 +168,29 @@ def create_signup_tenant(
 
     pool = get_pool()
     with pool.connection() as conn, conn.transaction():
-        # VT-677 D3: the signup form's EN/HI toggle is a UI-display PROXY, not an asked question —
-        # it seeds the OBSERVED column (language_preference); preferred_language (the EXPLICIT
-        # choice) stays NULL until the owner actually chooses (verbal override / settings). The
-        # per-turn triage inference then refines the observed value from real usage.
+        # VT-677 D3 said the signup toggle was a UI-display PROXY, "not an asked question", so it
+        # seeded only the OBSERVED column and left preferred_language NULL until the owner really
+        # chose. 2026-08-21 (Fazal): the form now ASKS — "which language should we communicate in?",
+        # en | hinglish | hi — which is exactly the owner "actually choosing". So the answer lands in
+        # BOTH: preferred_language (EXPLICIT — it wins the read COALESCE from here on) and
+        # language_preference (OBSERVED — seeded with the best evidence we have; per-turn inference
+        # refines it from real usage). The UI-display toggle is no longer part of this payload.
         row = conn.execute(
             """
             INSERT INTO tenants
                 (business_name, plan_tier, phase, whatsapp_number, language_preference,
+                 preferred_language,
                  business_type, city_tier, signed_up_at, trial_started_at,
                  phase_entered_at, created_via, verification_status,
                  verified_business_name, verification_method, gstin, verified_at,
                  owner_email)
-            VALUES (%s, %s, 'onboarding', %s, %s, %s, %s, %s, %s, %s, 'web',
+            VALUES (%s, %s, 'onboarding', %s, %s, %s, %s, %s, %s, %s, %s, 'web',
                     %s, %s, %s, %s, %s, %s)
             ON CONFLICT (whatsapp_number) WHERE whatsapp_number IS NOT NULL
             DO NOTHING
             RETURNING id
             """,
-            (business_name, plan_tier, whatsapp_number, preferred_language,
+            (business_name, plan_tier, whatsapp_number, preferred_language, preferred_language,
              business_type, city_tier, now, now, now,
              verification_status, verified_business_name, verification_method,
              verified_gstin, verified_at, (owner_email or None)),
@@ -411,7 +421,7 @@ def _validate(inp: SignupInput) -> None:
     if not _PHONE_RE.match(inp.whatsapp_number):
         raise SignupError("invalid_phone", "whatsapp_number must be a +91 mobile (E.164)")
     if inp.preferred_language not in _LANGUAGES:
-        raise SignupError("invalid_language", "preferred_language must be 'en' or 'hi'")
+        raise SignupError("invalid_language", "preferred_language must be 'en', 'hi' or 'hinglish'")
     # 2026-08-21 (Fazal): city and business_type are not signup inputs at all — they are
     # auto-detected, so there is nothing to validate here and nothing the caller may send.
     blocked = _load_blocklist()

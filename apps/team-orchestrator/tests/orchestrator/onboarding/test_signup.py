@@ -69,11 +69,14 @@ def test_create_signup_tenant_atomic(pool):
         ).fetchone()
         assert t["phase"] == "onboarding"
         assert t["plan_tier"] == "founding"
-        # VT-677 D3: the form toggle is a display-language PROXY — it seeds the OBSERVED column
-        # (language_preference); preferred_language (EXPLICIT choice) stays NULL until the owner
-        # actually chooses (verbal override / settings).
+        # VT-677 D3 held while the form toggle was a display-language PROXY: it seeded only the
+        # OBSERVED column and preferred_language stayed NULL until the owner actually chose.
+        # 2026-08-21 (Fazal): the form now ASKS which language we communicate in (en|hinglish|hi),
+        # which IS the owner choosing — so the answer lands in BOTH the explicit and observed
+        # columns. Explicit wins the read COALESCE; observed is seeded with the same best evidence
+        # and refined later by per-turn inference.
         assert t["language_preference"] == "hi"
-        assert t["preferred_language"] is None
+        assert t["preferred_language"] == "hi"
         assert t["trial_started_at"] is not None
         assert t["created_via"] == "web"
         assert t["business_type"] is None  # auto-detected later, never asked for at signup
@@ -529,6 +532,32 @@ def test_create_payload_refuses_city_and_business_type(pool, monkeypatch):
         r = client.post("/api/signup", json={**base, **extra})
         assert r.status_code == 422, f"{extra} must be REFUSED, not ignored — got {r.status_code}"
         assert "extra_forbidden" in r.text
+
+
+def test_hinglish_is_an_accepted_communication_language(pool):
+    """2026-08-21 (Fazal): the owner is ASKED which language we message them in — English, Hindi or
+    Hinglish. 'hinglish' is a real register in owner_locale's value space (hi-Latn), and it used to
+    be rejected twice over: SignupBody capped preferred_language at 2 characters, and signup kept a
+    private {en, hi} frozenset separate from SUPPORTED_OWNER_LANGS. Both are fixed; this pins that a
+    Hinglish owner can actually sign up and that the choice is stored as EXPLICIT.
+    """
+    from orchestrator.db import tenant_connection
+    from orchestrator.onboarding.signup import run_signup
+
+    res = run_signup(
+        _valid_input(preferred_language="hinglish"),
+        welcome_send_fn=lambda *a, **k: True,
+        verify_search_fn=_active_search,
+    )
+    with tenant_connection(res.tenant_id) as conn:
+        row = conn.execute(
+            "SELECT preferred_language, language_preference FROM tenants WHERE id = %s",
+            (str(res.tenant_id),),
+        ).fetchone()
+    explicit = row["preferred_language"] if isinstance(row, dict) else row[0]
+    observed = row["language_preference"] if isinstance(row, dict) else row[1]
+    assert explicit == "hinglish", "the asked answer is the EXPLICIT choice"
+    assert observed == "hinglish", "and seeds the observed column with the same evidence"
 
 
 def test_run_signup_validation_negatives(pool):

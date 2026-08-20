@@ -80,11 +80,19 @@ export const COPY = {
     en: 'If you give it, your consent record is sent here.',
     hi: 'यदि आप देते हैं, तो सहमति का रिकॉर्ड यहीं भेजा जाएगा।',
   },
-  uiLang: { en: 'Interface language', hi: 'इंटरफ़ेस की भाषा' },
-  uiLangHint: {
-    en: 'Saved to your account. You can change it later.',
-    hi: 'आपके खाते में सहेजा जाएगा। बाद में बदल सकते हैं।',
+  // 2026-08-21 (Fazal): the header toggle already sets the INTERFACE language, so the form does not
+  // ask that again. What it asks instead is the language the AGENTS should message the owner in —
+  // a different decision, and the one the product actually needs. Three options, because Hinglish
+  // is a real register here (owner_locale's value space is en | hinglish | hi).
+  commsLang: { en: 'Which language should we message you in?', hi: 'हम आपसे किस भाषा में बात करें?' },
+  commsLangHint: {
+    en: 'How your agents write to you — updates, approvals and questions. You can change it any time.',
+    hi: 'आपके एजेंट आपसे कैसे बात करेंगे — अपडेट, मंज़ूरी और सवाल। आप इसे कभी भी बदल सकते हैं।',
   },
+  langEn: { en: 'English', hi: 'English' },
+  langHi: { en: 'हिन्दी (Devanagari)', hi: 'हिन्दी (देवनागरी)' },
+  langHinglish: { en: 'Hinglish (Hindi in English letters)', hi: 'Hinglish (रोमन लिपि में हिन्दी)' },
+  langHinglishEg: { en: 'e.g. "Aapke 12 customers ne 45 din se order nahi kiya"', hi: 'जैसे "Aapke 12 customers ne 45 din se order nahi kiya"' },
 
   // --- consents (two separate decisions, neither pre-ticked) ---
   consentH: { en: 'Two consents', hi: 'दो सहमतियाँ' },

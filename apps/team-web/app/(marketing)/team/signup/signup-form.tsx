@@ -50,7 +50,7 @@ const EMAIL_RE = /^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/
 
 type FieldErrors = Partial<
   Record<
-    'business_name' | 'owner_name' | 'whatsapp_number' | 'owner_email' | 'consent_dpdpa' | 'consent_residency',
+    'business_name' | 'owner_name' | 'whatsapp_number' | 'owner_email' | 'preferred_language' | 'consent_dpdpa' | 'consent_residency',
     string
   >
 >
@@ -62,6 +62,10 @@ export function SignupForm() {
     owner_name: '',
     whatsapp_number: '',
     owner_email: '',
+    // The language the AGENTS message the owner in — an ASKED question, distinct from `lang`
+    // (the header toggle, which is UI display only). Rides the create payload as
+    // preferred_language and lands in tenants.preferred_language, the EXPLICIT choice column.
+    preferred_language: '',
     consent_dpdpa: false,
     consent_residency: false,
   })
@@ -118,6 +122,7 @@ export function SignupForm() {
     if (!form.business_name) errs.business_name = t(lang, 'errRequired')
     if (!PHONE_RE.test(form.whatsapp_number)) errs.whatsapp_number = t(lang, 'errPhone')
     if (form.owner_email && !EMAIL_RE.test(form.owner_email.trim())) errs.owner_email = t(lang, 'errEmail')
+    if (!form.preferred_language) errs.preferred_language = t(lang, 'errRequired')
     if (!form.consent_dpdpa) errs.consent_dpdpa = t(lang, 'errConsent')
     if (!form.consent_residency) errs.consent_residency = t(lang, 'errConsent')
     if (Object.keys(errs).length) {
@@ -194,7 +199,6 @@ export function SignupForm() {
       const r = await verifyOtpAndCreate(
         {
           ...form,
-          preferred_language: lang,
           // VT-512: field must be `gstin` — the orchestrator's SignupBody field name.
           gstin: verifiedEntity.gstin,
           verified_name: verifiedEntity.name,
@@ -497,18 +501,42 @@ export function SignupForm() {
             </label>
           </div>
 
-          <div className={ui.fieldLabel}>
-            <span className={ui.fieldLabelText}>{t(lang, 'uiLang')}</span>
-            <div className={`${ui.langToggle} self-start`}>
-              <button type="button" onClick={() => setLang('en')} aria-pressed={lang === 'en'} className={ui.langButton(lang === 'en')}>
-                English
-              </button>
-              <button type="button" onClick={() => setLang('hi')} aria-pressed={lang === 'hi'} className={ui.langButton(lang === 'hi')}>
-                हिन्दी
-              </button>
+          <fieldset className={ui.fieldLabel}>
+            <legend className={ui.fieldLabelText}>{t(lang, 'commsLang')}</legend>
+            <div className="mt-1.5 grid gap-2 sm:grid-cols-3">
+              {([
+                { v: 'en', label: t(lang, 'langEn'), eg: null },
+                { v: 'hi', label: t(lang, 'langHi'), eg: null },
+                { v: 'hinglish', label: t(lang, 'langHinglish'), eg: t(lang, 'langHinglishEg') },
+              ] as const).map((o) => {
+                const on = form.preferred_language === o.v
+                return (
+                  <label
+                    key={o.v}
+                    className={[
+                      'flex cursor-pointer flex-col gap-1 rounded-xl border p-3 transition',
+                      on ? 'border-primary bg-accent' : 'border-border bg-background hover:bg-muted',
+                    ].join(' ')}
+                  >
+                    <span className="flex items-center gap-2">
+                      <input
+                        type="radio"
+                        name="preferred_language"
+                        value={o.v}
+                        checked={on}
+                        onChange={() => update('preferred_language', o.v)}
+                        className="h-4 w-4 accent-[hsl(var(--viabe-saffron))]"
+                      />
+                      <span className="font-display text-sm font-bold text-foreground">{o.label}</span>
+                    </span>
+                    {o.eg && <span className="pl-6 text-xs leading-[1.5] text-muted-foreground">{o.eg}</span>}
+                  </label>
+                )
+              })}
             </div>
-            <span className={ui.hint}>{t(lang, 'uiLangHint')}</span>
-          </div>
+            {fieldError('preferred_language')}
+            <span className={ui.hint}>{t(lang, 'commsLangHint')}</span>
+          </fieldset>
 
           <div className="flex flex-col gap-2.5 border-t border-border pt-4">
             <div className="flex flex-col gap-1">

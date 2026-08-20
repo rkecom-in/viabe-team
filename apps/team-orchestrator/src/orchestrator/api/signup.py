@@ -55,7 +55,10 @@ class SignupBody(BaseModel):
     business_name: str = Field(..., min_length=1, max_length=200)
     owner_name: str = Field(..., min_length=1, max_length=120)
     whatsapp_number: str = Field(..., min_length=1, max_length=20)
-    preferred_language: str = Field(..., min_length=2, max_length=2)
+    # 2026-08-21: the owner is ASKED which language we communicate in — en | hinglish | hi. The
+    # 2-char cap predated 'hinglish' and would have rejected it at the schema boundary before
+    # _validate ever saw it. Range-checked against SUPPORTED_OWNER_LANGS in run_signup.
+    preferred_language: str = Field(..., min_length=2, max_length=8)
     consent_dpdpa: bool
     consent_residency: bool
     # VT-408: the GSTIN to verify before the tenant is created (verify-then-create). The web
