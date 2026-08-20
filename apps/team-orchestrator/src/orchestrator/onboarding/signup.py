@@ -111,8 +111,6 @@ def create_signup_tenant(
     owner_name: str,
     whatsapp_number: str,
     preferred_language: str,
-    city: str,
-    business_type: str,
     consent_dpdpa: bool,
     consent_residency: bool,
     verified_gstin: str | None = None,
@@ -134,27 +132,23 @@ def create_signup_tenant(
         raise ValueError("signup requires both DPDPA and residency consent (Pillar 7)")
     if not whatsapp_number:
         raise ValueError("whatsapp_number is the mandatory tenant identity")
-    # Defence-in-depth taxonomy check. 2026-08-21: an ABSENT business_type is legal (it is
-    # auto-detected — the form no longer asks), so only a PRESENT value is range-checked here.
-    # Same rule as _validate: silence is allowed, a wrong bucket is not.
-    if business_type and business_type not in valid_business_types():
-        raise ValueError(f"business_type {business_type!r} not in the taxonomy")
 
     from orchestrator.billing.founding_counter import try_claim_founding_slot
     from orchestrator.graph import get_pool
     from orchestrator.knowledge.kg_emit import drain_kg_events, emit_kg_event
     from orchestrator.knowledge.kg_vocab import KgEventType
-    from orchestrator.privacy.coarsening import coarsen_city
 
     now = (now_fn or _utcnow)()
     # VT-94: default standard; upgraded to 'founding' IN-txn iff a counter slot is claimed.
     plan_tier = "standard"
     dpdpa_version, residency_version = _disclosure_versions()
-    # VT-317: raw city is discarded here. 2026-08-21: an ABSENT city is deferred, not coarsened —
-    # coarsen_city("") returns 'tier_3', which would assert a tier we do not know and feed it into
-    # the L3 cohort key. NULL is the honest value; _build_l3_priors already returns the structured
-    # no-prior marker when the tier is missing, and discovery/journey set it once the city is known.
-    city_tier = str(coarsen_city(city)) if (city or "").strip() else None
+    # 2026-08-21 (Fazal): city and business_type are NOT signup inputs. They are auto-detected, so
+    # this path stores NULL for both and auto_discovery + the onboarding journey fill them — the
+    # same shape create_whatsapp_signup_tenant has always had ("NO business details yet ... the
+    # no-fabricated-data rule"). Never coarsen an absent city: coarsen_city("") returns 'tier_3',
+    # which would assert a tier nobody established straight into the L3 cohort key.
+    city_tier = None
+    business_type = None
 
     # VT-408: a signup tenant is verified BY CONSTRUCTION — run_signup's verify-then-create
     # gate is the ONLY door to this INSERT, so stamp gstin_verified (+ the authoritative
@@ -378,8 +372,6 @@ class SignupInput:
     owner_name: str
     whatsapp_number: str
     preferred_language: str
-    city: str
-    business_type: str
     consent_dpdpa: bool
     consent_residency: bool
     # VT-408: the GSTIN to verify BEFORE the tenant is created (verify-then-create). The
@@ -420,12 +412,8 @@ def _validate(inp: SignupInput) -> None:
         raise SignupError("invalid_phone", "whatsapp_number must be a +91 mobile (E.164)")
     if inp.preferred_language not in _LANGUAGES:
         raise SignupError("invalid_language", "preferred_language must be 'en' or 'hi'")
-    # 2026-08-21 (Fazal): city and business_type are AUTO-DETECTED, not asked for. The web form no
-    # longer collects them, so absent is legal here — auto_discovery + the onboarding journey fill
-    # them, and the journey only ever asks for what discovery could not find. A PRESENT value is
-    # still range-checked: silence is allowed, a wrong bucket is not.
-    if inp.business_type and inp.business_type not in valid_business_types():
-        raise SignupError("invalid_business_type", "business_type not in the taxonomy")
+    # 2026-08-21 (Fazal): city and business_type are not signup inputs at all — they are
+    # auto-detected, so there is nothing to validate here and nothing the caller may send.
     blocked = _load_blocklist()
     for field in (inp.business_name, inp.owner_name):
         folded = (field or "").casefold()
@@ -583,8 +571,6 @@ def run_signup(
         owner_name=inp.owner_name,
         whatsapp_number=inp.whatsapp_number,
         preferred_language=inp.preferred_language,
-        city=inp.city,
-        business_type=inp.business_type,
         consent_dpdpa=inp.consent_dpdpa,
         consent_residency=inp.consent_residency,
         verified_gstin=verify.gstin,
@@ -684,8 +670,8 @@ def run_signup(
                 # fix) and VT-407's discover_gst keys off the verified GSTIN.
                 "business_name": verify.verified_name or inp.business_name,
                 "gstin": verify.gstin,
-                "business_type": inp.business_type,
-                "city": inp.city,
+                # No business_type/city hints: they are what discovery is FOR. Passing an
+                # owner-typed guess would anchor the reconciler on the guess it is meant to check.
                 "whatsapp_number": inp.whatsapp_number,
             },
         )

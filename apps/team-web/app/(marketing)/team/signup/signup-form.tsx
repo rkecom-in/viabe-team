@@ -1,7 +1,10 @@
 /**
  * VT-96 — owner signup form (bilingual EN/HI). Consumes VT-82 POST /api/signup
- * via the /api/team/signup proxy; business_type options from /api/team/business-types
- * (the orchestrator taxonomy — single source of truth).
+ * via the /api/team/signup proxy.
+ *
+ * 2026-08-21 (Fazal): business type and city are NOT collected — they are auto-detected by
+ * auto_discovery and confirmed in the onboarding journey. They are not in the create contract
+ * either; SignupBody forbids extras, so sending one is a 422 rather than a silently ignored key.
  *
  * CL-390: NO PII (name / phone / city) in any analytics/telemetry event.
  *
@@ -58,12 +61,7 @@ export function SignupForm() {
     business_name: '',
     owner_name: '',
     whatsapp_number: '',
-    // Auto-detected, never asked for (Fazal 2026-08-21). They ride in the create payload as ''
-    // — the orchestrator accepts absent and defers: city_tier stays NULL rather than being
-    // coarsened from an empty string, and auto_discovery + the journey fill both.
-    city: '',
     owner_email: '',
-    business_type: '',
     consent_dpdpa: false,
     consent_residency: false,
   })
@@ -277,7 +275,10 @@ export function SignupForm() {
       <SignupLayout lang={lang} onLang={setLang} step="entity">
         <EntityMatchStep
           businessName={form.business_name}
-          city={form.city}
+          // No city is collected any more — it is auto-detected. Discovery treats it as an
+          // optional search hint (EntityCandidatesBody defaults it to ""), so it narrows results
+          // when known and is simply absent when not.
+          city=""
           lang={lang}
           // Sweep #1/#6: thread the parent OTP-request error + in-flight state into the entity step so
           // a failed "Verified → Continue" OTP send is VISIBLE on the verified screen and the Continue

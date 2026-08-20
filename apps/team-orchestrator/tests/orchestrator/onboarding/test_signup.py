@@ -52,11 +52,13 @@ def test_create_signup_tenant_atomic(pool):
     wa = _wa()
     res = create_signup_tenant(
         business_name="Asha Kirana", whatsapp_number=wa,
-        preferred_language="hi", owner_name="Owner X", city="Mumbai", business_type="kirana", consent_dpdpa=True, consent_residency=True,
+        preferred_language="hi", owner_name="Owner X",  consent_dpdpa=True, consent_residency=True,
     )
     assert res.created is True
     assert res.plan_tier == "founding"
-    assert res.city_tier == "tier_1"  # Mumbai  # stub until VT-10.6
+    # 2026-08-21: city is not a signup input, so the tier is DEFERRED (NULL) rather than
+    # coarsened at create. auto_discovery + the journey set it once the city is actually known.
+    assert res.city_tier is None
 
     with pool.connection() as c:
         t = c.execute(
@@ -74,7 +76,7 @@ def test_create_signup_tenant_atomic(pool):
         assert t["preferred_language"] is None
         assert t["trial_started_at"] is not None
         assert t["created_via"] == "web"
-        assert t["business_type"] == "kirana"
+        assert t["business_type"] is None  # auto-detected later, never asked for at signup
 
         cr = c.execute(
             "SELECT consent_dpdpa, consent_residency, dpdpa_version, residency_version "
@@ -91,11 +93,11 @@ def test_duplicate_whatsapp_number_not_created(pool):
     wa = _wa()
     r1 = create_signup_tenant(
         business_name="Branch One", whatsapp_number=wa,
-        preferred_language="en", owner_name="Owner X", city="Mumbai", business_type="kirana", consent_dpdpa=True, consent_residency=True,
+        preferred_language="en", owner_name="Owner X",  consent_dpdpa=True, consent_residency=True,
     )
     r2 = create_signup_tenant(
         business_name="Branch One Again", whatsapp_number=wa,
-        preferred_language="en", owner_name="Owner X", city="Mumbai", business_type="kirana", consent_dpdpa=True, consent_residency=True,
+        preferred_language="en", owner_name="Owner X",  consent_dpdpa=True, consent_residency=True,
     )
     assert r1.created is True
     assert r2.created is False  # endpoint maps this → 409
@@ -116,17 +118,20 @@ def test_consent_false_rejected(pool):
     with pytest.raises(ValueError):
         create_signup_tenant(
             business_name="No Consent Co", whatsapp_number=_wa(),
-            preferred_language="en", owner_name="Owner X", city="Mumbai", business_type="kirana", consent_dpdpa=True, consent_residency=False,
+            preferred_language="en", owner_name="Owner X",  consent_dpdpa=True, consent_residency=False,
         )
 
 
 def test_bad_business_type_rejected(pool):
     from orchestrator.onboarding.signup import create_signup_tenant
 
-    with pytest.raises(ValueError):
+    # 2026-08-21: create_signup_tenant no longer ACCEPTS a business_type at all (auto-detected),
+    # so there is no out-of-taxonomy value to reject here. Passing one is now a TypeError — which is
+    # the stronger guarantee: the argument cannot be supplied, not merely validated.
+    with pytest.raises(TypeError):
         create_signup_tenant(
             business_name="Mystery Co", owner_name="X", whatsapp_number=_wa(),
-            preferred_language="en", city="Mumbai", business_type="not_a_real_type",
+            preferred_language="en", business_type="not_a_real_type",
             consent_dpdpa=True, consent_residency=True,
         )
 
@@ -136,7 +141,7 @@ def _valid_input(**over):
 
     base = dict(
         business_name="Asha Kirana", owner_name="Asha Devi", whatsapp_number=_wa_91(),
-        preferred_language="hi", city="Bengaluru", business_type="kirana",
+        preferred_language="hi", 
         consent_dpdpa=True, consent_residency=True,
         gstin="27AAKCR3738B1ZE",  # VT-408: a GSTIN is now mandatory at signup (verify-then-create)
     )
@@ -169,7 +174,7 @@ def test_run_signup_full(pool):
         verify_search_fn=_active_search,  # VT-408: green GSTIN verify (no live Sandbox)
     )
     assert out.plan_tier == "founding"
-    assert out.city_tier in {"tier_1", "tier_2", "tier_3"}
+    assert out.city_tier is None  # deferred until discovery finds the city
     assert out.welcome_sent is True
     assert len(calls) == 1  # welcome invoked once
 
@@ -178,8 +183,11 @@ def test_run_signup_full(pool):
             "SELECT business_type, city_tier, preferred_language FROM tenants WHERE id = %s",
             (str(out.tenant_id),),
         ).fetchone()
-        assert t["business_type"] == "kirana"
-        assert t["city_tier"] == out.city_tier  # VT-317 closed: city_tier populated
+        # Both are AUTO-DETECTED and not signup inputs, so the row starts honest-empty and the
+        # journey fills it. VT-317's point stands — the raw city is never persisted — but there is
+        # now no city at signup to coarsen in the first place.
+        assert not t["business_type"]
+        assert t["city_tier"] is None
         cr = c.execute(
             "SELECT count(*) AS n FROM consent_records WHERE tenant_id = %s",
             (str(out.tenant_id),),
@@ -478,7 +486,7 @@ def test_absent_city_defers_the_tier_instead_of_asserting_tier_3(pool):
     from orchestrator.onboarding.signup import run_signup
 
     res = run_signup(
-        _valid_input(city="", business_type=""),
+        _valid_input(),
         welcome_send_fn=lambda *a, **k: True,
         verify_search_fn=_active_search,
     )
@@ -493,17 +501,46 @@ def test_absent_city_defers_the_tier_instead_of_asserting_tier_3(pool):
     assert not btype, "an absent business_type must stay absent, not be guessed"
 
 
+def test_create_payload_refuses_city_and_business_type(pool, monkeypatch):
+    """Fazal 2026-08-21: "The create payload shouldn't be expecting or even accepting those 2 fields."
+
+    Pydantic DROPS unknown keys by default, which would make "not accepted" indistinguishable from
+    "accepted and silently discarded". SignupBody sets extra='forbid', so sending either is a 422.
+    """
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from orchestrator.api.signup import router
+
+    app = FastAPI()
+    app.include_router(router)
+    client = TestClient(app)
+
+    base = {
+        "business_name": "Asha Kirana",
+        "owner_name": "Asha Devi",
+        "whatsapp_number": _wa_91(),
+        "preferred_language": "hi",
+        "consent_dpdpa": True,
+        "consent_residency": True,
+        "gstin": "27AAKCR3738B1ZE",
+    }
+    for extra in ({"city": "Mumbai"}, {"business_type": "kirana"}):
+        r = client.post("/api/signup", json={**base, **extra})
+        assert r.status_code == 422, f"{extra} must be REFUSED, not ignored — got {r.status_code}"
+        assert "extra_forbidden" in r.text
+
+
 def test_run_signup_validation_negatives(pool):
     from orchestrator.onboarding.signup import SignupError, run_signup
 
-    # 2026-08-21: a blank city is no longer a rejection — city and business_type are AUTO-DETECTED
-    # and the web form does not collect them, so ABSENT is legal and defers (city_tier stays NULL
-    # rather than being coarsened from ""). A PRESENT business_type is still range-checked, which is
-    # the case kept below: silence is allowed, a wrong bucket is not.
+    # 2026-08-21: city and business_type are gone from this contract entirely — auto-detected, and
+    # SignupInput does not accept them, so there is no "blank city" or "wrong bucket" case to test
+    # here any more. Supplying either is a TypeError, which test_create_signup_tenant_rejects_...
+    # covers; what remains are the fields the owner really does provide.
     for over, code in [
         ({"whatsapp_number": "+1202555"}, "invalid_phone"),
         ({"preferred_language": "ta"}, "invalid_language"),
-        ({"business_type": "spaceship"}, "invalid_business_type"),
         ({"business_name": "viabe team"}, "invalid_name"),  # blocklist
     ]:
         with pytest.raises(SignupError) as e:
@@ -536,7 +573,6 @@ def test_signup_route_status_mapping(pool, monkeypatch):
     body = {
         "business_name": "Asha Kirana", "owner_name": "Asha Devi",
         "whatsapp_number": _wa_91(), "preferred_language": "en",
-        "city": "Mumbai", "business_type": "kirana",
         "consent_dpdpa": True, "consent_residency": True,
         "gstin": "27AAKCR3738B1ZE",
     }
@@ -601,7 +637,7 @@ def test_signup_kg_event_has_no_business_name_pii(pool):
 
     res = create_signup_tenant(
         business_name="Secret Biz Name", owner_name="X", whatsapp_number=_wa(),
-        preferred_language="en", city="Mumbai", business_type="kirana",
+        preferred_language="en", 
         consent_dpdpa=True, consent_residency=True,
     )
     with pool.connection() as c:
@@ -613,7 +649,9 @@ def test_signup_kg_event_has_no_business_name_pii(pool):
     for r in rows:
         p = r["payload"]
         assert "business_name" not in p, "business_name PII leaked into durable kg_events"
-        assert p.get("business_type") == "kirana"
+        # business_type is not known at signup any more (auto-detected), so the event carries the
+        # honest absence rather than a value the owner never gave.
+        assert not p.get("business_type")
 
 
 def test_consent_records_is_pii_free_schema(pool):

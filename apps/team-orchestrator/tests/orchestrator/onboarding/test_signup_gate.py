@@ -78,8 +78,6 @@ def _valid_input(**over) -> SignupInput:
         owner_name="Asha",
         whatsapp_number="+919812345678",
         preferred_language="en",
-        city="Mumbai",
-        business_type="kirana",
         consent_dpdpa=True,
         consent_residency=True,
         gstin=_ACTIVE_GSTIN,
