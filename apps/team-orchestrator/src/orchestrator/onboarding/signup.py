@@ -147,7 +147,11 @@ def create_signup_tenant(
     # VT-94: default standard; upgraded to 'founding' IN-txn iff a counter slot is claimed.
     plan_tier = "standard"
     dpdpa_version, residency_version = _disclosure_versions()
-    city_tier = str(coarsen_city(city))  # VT-317: raw city is discarded here.
+    # VT-317: raw city is discarded here. 2026-08-21: an ABSENT city is deferred, not coarsened —
+    # coarsen_city("") returns 'tier_3', which would assert a tier we do not know and feed it into
+    # the L3 cohort key. NULL is the honest value; _build_l3_priors already returns the structured
+    # no-prior marker when the tier is missing, and discovery/journey set it once the city is known.
+    city_tier = str(coarsen_city(city)) if (city or "").strip() else None
 
     # VT-408: a signup tenant is verified BY CONSTRUCTION — run_signup's verify-then-create
     # gate is the ONLY door to this INSERT, so stamp gstin_verified (+ the authoritative
@@ -413,9 +417,11 @@ def _validate(inp: SignupInput) -> None:
         raise SignupError("invalid_phone", "whatsapp_number must be a +91 mobile (E.164)")
     if inp.preferred_language not in _LANGUAGES:
         raise SignupError("invalid_language", "preferred_language must be 'en' or 'hi'")
-    if not inp.city.strip():
-        raise SignupError("invalid_city", "city is required")
-    if inp.business_type not in valid_business_types():
+    # 2026-08-21 (Fazal): city and business_type are AUTO-DETECTED, not asked for. The web form no
+    # longer collects them, so absent is legal here — auto_discovery + the onboarding journey fill
+    # them, and the journey only ever asks for what discovery could not find. A PRESENT value is
+    # still range-checked: silence is allowed, a wrong bucket is not.
+    if inp.business_type and inp.business_type not in valid_business_types():
         raise SignupError("invalid_business_type", "business_type not in the taxonomy")
     blocked = _load_blocklist()
     for field in (inp.business_name, inp.owner_name):

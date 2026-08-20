@@ -29,8 +29,6 @@ import type { Lang } from './signup-copy'
 import { t } from './signup-copy'
 import { SignupLayout, type WizardStep } from './signup-shell'
 
-type BizType = { key: string; label_en: string; label_hi: string }
-
 /**
  * The identifiers actually written to `consent_records.{dpdpa,residency}_version`.
  * Server-owned in `apps/team-orchestrator/config/disclosure_versions.yaml` — mirrored
@@ -49,18 +47,20 @@ const EMAIL_RE = /^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/
 
 type FieldErrors = Partial<
   Record<
-    'business_name' | 'owner_name' | 'whatsapp_number' | 'city' | 'owner_email' | 'business_type' | 'consent_dpdpa' | 'consent_residency',
+    'business_name' | 'owner_name' | 'whatsapp_number' | 'owner_email' | 'consent_dpdpa' | 'consent_residency',
     string
   >
 >
 
 export function SignupForm() {
   const [lang, setLang] = useState<Lang>('en')
-  const [bizTypes, setBizTypes] = useState<BizType[]>([])
   const [form, setForm] = useState({
     business_name: '',
     owner_name: '',
     whatsapp_number: '',
+    // Auto-detected, never asked for (Fazal 2026-08-21). They ride in the create payload as ''
+    // — the orchestrator accepts absent and defers: city_tier stays NULL rather than being
+    // coarsened from an empty string, and auto_discovery + the journey fill both.
     city: '',
     owner_email: '',
     business_type: '',
@@ -91,13 +91,6 @@ export function SignupForm() {
   const [resendIn, setResendIn] = useState(0)
   const resendTimer = useRef<ReturnType<typeof setInterval> | null>(null)
 
-  useEffect(() => {
-    fetch('/api/team/business-types')
-      .then((r) => r.json())
-      .then((d) => setBizTypes(d.business_types ?? []))
-      .catch(() => setBizTypes([]))
-  }, [])
-
   useEffect(() => () => { if (resendTimer.current) clearInterval(resendTimer.current) }, [])
 
   function startResendCooldown() {
@@ -125,8 +118,6 @@ export function SignupForm() {
     const errs: FieldErrors = {}
     if (!form.owner_name) errs.owner_name = t(lang, 'errRequired')
     if (!form.business_name) errs.business_name = t(lang, 'errRequired')
-    if (!form.business_type) errs.business_type = t(lang, 'errRequired')
-    if (!form.city) errs.city = t(lang, 'errRequired')
     if (!PHONE_RE.test(form.whatsapp_number)) errs.whatsapp_number = t(lang, 'errPhone')
     if (form.owner_email && !EMAIL_RE.test(form.owner_email.trim())) errs.owner_email = t(lang, 'errEmail')
     if (!form.consent_dpdpa) errs.consent_dpdpa = t(lang, 'errConsent')
@@ -469,67 +460,41 @@ export function SignupForm() {
               />
               {fieldError('business_name')}
             </label>
-
-            <label className={ui.fieldLabel}>
-              <span className={ui.fieldLabelText}>{t(lang, 'businessType')}</span>
-              <select
-                value={form.business_type}
-                onChange={(e) => update('business_type', e.target.value)}
-                className={ui.field(Boolean(fieldErrors.business_type))}
-              >
-                <option value="">{t(lang, 'selectPh')}</option>
-                {bizTypes.map((b) => (
-                  <option key={b.key} value={b.key}>
-                    {lang === 'hi' ? b.label_hi : b.label_en}
-                  </option>
-                ))}
-              </select>
-              {fieldError('business_type')}
-            </label>
-
-            <label className={ui.fieldLabel}>
-              <span className={ui.fieldLabelText}>{t(lang, 'city')}</span>
-              <input
-                value={form.city}
-                onChange={(e) => update('city', e.target.value)}
-                placeholder={t(lang, 'cityPh')}
-                autoComplete="address-level2"
-                className={ui.field(Boolean(fieldErrors.city))}
-              />
-              {fieldError('city')}
-            </label>
           </div>
 
-          <label className={ui.fieldLabel}>
-            <span className={ui.fieldLabelText}>{t(lang, 'whatsapp')}</span>
-            <span className="flex items-stretch">
-              <span className={ui.phonePrefix}>+91</span>
-              <input
-                type="tel"
-                inputMode="numeric"
-                value={form.whatsapp_number}
-                onChange={(e) => update('whatsapp_number', e.target.value.replace(/\D/g, '').slice(0, 10))}
-                placeholder="98765 43210"
-                autoComplete="tel-national"
-                className={ui.phoneField(Boolean(fieldErrors.whatsapp_number))}
-              />
-            </span>
-            {fieldError('whatsapp_number')}
-            <span className={ui.hint}>{t(lang, 'whatsappHint')}</span>
-          </label>
+          {/* WhatsApp and email share a row on desktop, per the design; they stack below sm. */}
+          <div className="grid gap-4 sm:grid-cols-2">
+            <label className={ui.fieldLabel}>
+              <span className={ui.fieldLabelText}>{t(lang, 'whatsapp')}</span>
+              <span className="flex items-stretch">
+                <span className={ui.phonePrefix}>+91</span>
+                <input
+                  type="tel"
+                  inputMode="numeric"
+                  value={form.whatsapp_number}
+                  onChange={(e) => update('whatsapp_number', e.target.value.replace(/\D/g, '').slice(0, 10))}
+                  placeholder="98765 43210"
+                  autoComplete="tel-national"
+                  className={ui.phoneField(Boolean(fieldErrors.whatsapp_number))}
+                />
+              </span>
+              {fieldError('whatsapp_number')}
+              <span className={ui.hint}>{t(lang, 'whatsappHint')}</span>
+            </label>
 
-          <label className={ui.fieldLabel}>
-            <span className={ui.fieldLabelText}>{t(lang, 'email')}</span>
-            <input
-              type="email"
-              value={form.owner_email}
-              onChange={(e) => update('owner_email', e.target.value)}
-              autoComplete="email"
-              className={ui.field(Boolean(fieldErrors.owner_email))}
-            />
-            {fieldError('owner_email')}
-            <span className={ui.hint}>{t(lang, 'emailHint')}</span>
-          </label>
+            <label className={ui.fieldLabel}>
+              <span className={ui.fieldLabelText}>{t(lang, 'email')}</span>
+              <input
+                type="email"
+                value={form.owner_email}
+                onChange={(e) => update('owner_email', e.target.value)}
+                autoComplete="email"
+                className={ui.field(Boolean(fieldErrors.owner_email))}
+              />
+              {fieldError('owner_email')}
+              <span className={ui.hint}>{t(lang, 'emailHint')}</span>
+            </label>
+          </div>
 
           <div className={ui.fieldLabel}>
             <span className={ui.fieldLabelText}>{t(lang, 'uiLang')}</span>

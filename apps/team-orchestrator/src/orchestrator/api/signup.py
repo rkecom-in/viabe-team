@@ -49,8 +49,11 @@ class SignupBody(BaseModel):
     owner_name: str = Field(..., min_length=1, max_length=120)
     whatsapp_number: str = Field(..., min_length=1, max_length=20)
     preferred_language: str = Field(..., min_length=2, max_length=2)
-    city: str = Field(..., min_length=1, max_length=120)
-    business_type: str = Field(..., min_length=1, max_length=40)
+    # 2026-08-21 (Fazal): auto-detected, not asked for — the web form no longer collects either.
+    # Absent is legal; a PRESENT business_type is still range-checked against the taxonomy in
+    # run_signup's _validate. An absent city defers city_tier to NULL rather than fabricating one.
+    city: str = Field(default="", max_length=120)
+    business_type: str = Field(default="", max_length=40)
     consent_dpdpa: bool
     consent_residency: bool
     # VT-408: the GSTIN to verify before the tenant is created (verify-then-create). The web
