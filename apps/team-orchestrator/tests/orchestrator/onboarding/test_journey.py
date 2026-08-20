@@ -772,11 +772,12 @@ def test_recompose_heals_stale_category_confirm_preserving_progress(substrate): 
     ("Telecommunications service provider") is recomposed to the RECONCILED business_type confirm,
     while the cursor / answers / skipped / last_message_sid are PRESERVED. The recompose re-derives
     the reconciled type from the draft's own signals (rkecom.in domain wins over the telecom
-    mis-category → 'services'), suppressing the raw category confirm in favour of the business_type one.
+    mis-category → 'ecommerce'), suppressing the raw category confirm in favour of the business_type one.
     """
     from orchestrator.onboarding import journey
 
-    # RKeCom-like draft: telecom mis-category + the real domain (domain wins → 'services').
+    # RKeCom-like draft: telecom mis-category + the real domain (domain wins → 'ecommerce').
+    # 2026-08-21: was 'services' only because no e-commerce bucket existed; it does now.
     tenant = _new_tenant(substrate.dsn, name="stale recompose", business_type="other")
     _seed_draft(
         substrate.dsn,
@@ -819,9 +820,9 @@ def test_recompose_heals_stale_category_confirm_preserving_progress(substrate): 
         f"the stale 'category' confirm must be replaced by the reconciled 'business_type' confirm; "
         f"got {head!r}"
     )
-    assert head["draft_value"] == "services", "the reconciled draft_value (rkecom domain → services)"
+    assert head["draft_value"] == "ecommerce", "the reconciled draft_value (rkecom domain → ecommerce)"
     assert "Telecommunications" not in head["prompt_en"], "the raw mis-category must no longer be asked"
-    assert "Local services" in head["prompt_en"], "the confirm now shows the reconciled label"
+    assert "Online store" in head["prompt_en"], "the confirm now shows the reconciled label"
     # The downstream gap (price_range) is carried forward verbatim — never re-run through the gap LLM.
     fields_after = [q["field"] for q in after["question_queue"]]
     assert "price_range" in fields_after, "the existing gap question must be carried forward"
@@ -891,7 +892,7 @@ def test_recompose_via_intercept_auto_heals_then_confirm_advances(substrate, mon
     g = journey.get_journey(tenant)
     assert g is not None
     # The reconciled business_type was confirmed — NOT the stale telecom category.
-    assert g["answers"].get("business_type") == "services", (
+    assert g["answers"].get("business_type") == "ecommerce", (
         f"the 'yes' must confirm the reconciled business_type after the lazy heal; got {g['answers']!r}"
     )
     assert "category" not in g["answers"], "the stale raw-category confirm must never be recorded"
