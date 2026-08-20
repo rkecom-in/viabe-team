@@ -1,41 +1,34 @@
 'use client'
 
 /**
- * VT-517 — the signup OWNERSHIP step, now an honest "pending Viabe team review" screen (bilingual
- * EN/HI).
+ * VT-517 — the signup OWNERSHIP step: an honest "pending Viabe team review" screen
+ * (bilingual EN/HI).
  *
- * VT-517 KILLED all self-serve ownership OTP/DIN: a GST-registered entity being real is NOT proof the
- * signer OWNS it, and an automated channel-OTP can't establish that — so ownership is now decided by a
- * Viabe human (the VTR Ops Console ownership-review surface). This screen tells the owner the truth:
- * the account is set up, but the AI agent will NOT act on their customers until Viabe verifies
- * ownership (a quick manual review). Continue advances the wizard to the dashboard; EXECUTION stays
- * gated SERVER-SIDE until a VTR marks ownership verified — we NEVER claim the owner is "verified" here.
+ * VT-517 KILLED all self-serve ownership OTP/DIN: a GST-registered entity being real is
+ * NOT proof the signer OWNS it, and an automated channel-OTP can't establish that — so
+ * ownership is decided by a Viabe human (the VTR Ops Console ownership-review surface).
+ * This screen tells the owner the truth: the account is set up, but the AI agent will
+ * NOT act on their customers until Viabe verifies ownership. Continue advances the
+ * wizard to the dashboard; EXECUTION stays gated SERVER-SIDE until a VTR marks ownership
+ * verified — we NEVER claim the owner is "verified" here.
  *
- * The call site is unchanged (tenantId, businessName, onVerified) + lang for the bilingual copy. No
- * network call — Continue just closes the wizard (onVerified). tenantId is surfaced as a data attribute
- * for the e2e harness.
+ * 2026-08-21 — redesigned to the Claude Design prototype's step 4. The screen now leads
+ * with what is still switched OFF rather than with the celebration, which is the honest
+ * ordering: the account existing is the smaller fact. No network call, and the four e2e
+ * harness hooks (`data-ownership-step`, `data-tenant-id`, `data-ownership-business`,
+ * `data-ownership-continue`) are unchanged.
  */
 
-type Lang = 'en' | 'hi'
+import type { Lang } from './signup-copy'
+import { t } from './signup-copy'
+import * as ui from '@/lib/viabe-ui'
 
-type OwMsgKey = 'heading' | 'body' | 'reassure' | 'continue'
-
-const OW_MESSAGES: Record<Lang, Record<OwMsgKey, string>> = {
-  en: {
-    heading: 'Your account is set up',
-    body: 'Before our AI agent starts working with your customers, the Viabe team does a quick manual check to confirm you own this business.',
-    reassure:
-      'You can continue to your dashboard now. Your agent starts acting for you once that review is done — we’ll let you know on WhatsApp.',
-    continue: 'Continue to dashboard',
-  },
-  hi: {
-    heading: 'आपका खाता तैयार है',
-    body: 'हमारा AI एजेंट आपके ग्राहकों के साथ काम शुरू करे, उससे पहले Viabe टीम एक त्वरित मैन्युअल जांच करती है कि यह व्यवसाय आपका है।',
-    reassure:
-      'आप अभी अपने डैशबोर्ड पर जा सकते हैं। वह जांच पूरी होते ही आपका एजेंट आपके लिए काम करना शुरू कर देगा — हम आपको WhatsApp पर बता देंगे।',
-    continue: 'डैशबोर्ड पर जाएं',
-  },
-}
+const TODOS = [
+  { title: 'td1', note: 'td1n' },
+  { title: 'td2', note: 'td2n' },
+  { title: 'td3', note: 'td3n' },
+  { title: 'td4', note: 'td4n' },
+] as const
 
 export function OwnershipStep({
   tenantId,
@@ -51,33 +44,81 @@ export function OwnershipStep({
    *  server-side until a VTR verifies ownership; this is NOT an "ownership verified" signal. */
   onVerified: () => void
 }) {
-  const t = OW_MESSAGES[lang]
-  const card = 'rounded-2xl border border-border bg-card p-6 shadow-sm sm:p-8'
-  const primaryBtn =
-    'rounded-xl bg-primary px-5 py-3 font-semibold text-primary-foreground shadow-sm transition hover:bg-primary/90'
-
   return (
-    <section data-ownership-step="pending" data-tenant-id={tenantId} className={`mt-8 ${card}`}>
-      <div className="flex items-center gap-3">
-        {/* VT-511 design language — celebratory account-ready header (NOT an ownership-verified claim). */}
-        <span
-          aria-hidden
-          className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-secondary text-xl font-bold text-secondary-foreground"
-        >
-          ✓
-        </span>
-        <h2 className="text-lg font-semibold text-foreground">{t.heading}</h2>
+    <section
+      data-ownership-step="pending"
+      data-tenant-id={tenantId}
+      className="flex flex-col gap-4"
+    >
+      {/* The gate first. An owner who reads only one block should read this one. */}
+      <div className={ui.alertWarn} role="status">
+        <span className={ui.alertTitle}>{t(lang, 'bannerTitle')}</span>
+        <p className={ui.alertBody}>{t(lang, 'bannerBody')}</p>
+        <span className="text-xs leading-[1.55] opacity-90">{t(lang, 'reviewMeta')}</span>
       </div>
-      {businessName && (
-        <p data-ownership-business className="mt-2 text-base font-semibold text-foreground">
-          {businessName}
-        </p>
-      )}
-      <p className="mt-3 text-sm leading-relaxed text-muted-foreground">{t.body}</p>
-      <p className="mt-3 text-sm leading-relaxed text-muted-foreground">{t.reassure}</p>
-      <button type="button" data-ownership-continue onClick={onVerified} className={`mt-5 w-full ${primaryBtn}`}>
-        {t.continue}
-      </button>
+
+      <div className={`${ui.panel} flex flex-col gap-5`}>
+        <div className="flex flex-col gap-2">
+          <div className="flex items-center gap-2.5">
+            <span className={ui.successDot} aria-hidden>
+              <svg
+                width="14"
+                height="14"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="3.4"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <path d="M20 6 9 17l-5-5" />
+              </svg>
+            </span>
+            <h2 className={ui.h2}>{t(lang, 's4title')}</h2>
+          </div>
+          {businessName && (
+            <p data-ownership-business className={`${ui.monoValue} text-base`}>
+              {businessName}
+            </p>
+          )}
+          <p className={ui.body}>{t(lang, 's4sub')}</p>
+        </div>
+
+        <ol className="m-0 flex list-none flex-col gap-2.5 p-0">
+          {TODOS.map((item, i) => (
+            <li
+              key={item.title}
+              className="flex items-start gap-3 rounded-xl border border-border bg-background p-3.5"
+            >
+              <span
+                className="flex h-6 w-6 flex-none items-center justify-center rounded-full border border-border bg-card font-display text-xs font-bold text-muted-foreground"
+                aria-hidden
+              >
+                {i + 1}
+              </span>
+              <span className="flex flex-col gap-0.5">
+                <span className="font-display text-sm font-bold text-foreground">
+                  {t(lang, item.title)}
+                </span>
+                <span className="text-xs leading-[1.55] text-muted-foreground">
+                  {t(lang, item.note)}
+                </span>
+              </span>
+            </li>
+          ))}
+        </ol>
+
+        <button
+          type="button"
+          data-ownership-continue
+          onClick={onVerified}
+          className={ui.primaryButton()}
+        >
+          {t(lang, 'workspaceCta')}
+        </button>
+      </div>
+
+      <p className={`${ui.hint} text-center`}>{t(lang, 'footer')}</p>
     </section>
   )
 }
