@@ -53,8 +53,15 @@ _MIN_QUERY_LEN = 5  # the site rejects <5 chars (form minlength); skip the call 
 # GSTIN: 2 state digits + PAN(5 letters + 4 digits + 1 letter) + 1 entity char + 'Z' + 1 checksum.
 _GSTIN_RE = re.compile(r"\d{2}[A-Z]{5}\d{4}[A-Z][A-Z0-9]Z[A-Z0-9]")
 # One result unit: the result anchor (h5 name) immediately followed by its black-text meta span.
+# The href matcher is SCHEME-TOLERANT on purpose. It was anchored to a leading "/gst-number-search/"
+# (relative-only) until 2026-08-21, when knowyourgst.com switched the result anchors to ABSOLUTE
+# URLs ("https://www.knowyourgst.com/gst-number-search/..."). Every row stopped matching and the leg
+# returned 0 candidates while still reporting a healthy 200 — a silent break that looked exactly
+# like "this business has no GST registration". Found by scraping a KNOWN-resolvable name (Reliance)
+# and asserting on row COUNT: the page carried 43 result units and the parser matched none of them.
+# Keep the leading [^"]* so both relative and absolute hrefs parse.
 _RESULT_RE = re.compile(
-    r'<a\b[^>]*href="/gst-number-search/[^"]*"[^>]*>\s*<h5[^>]*>(?P<name>.*?)</h5>\s*</a>'
+    r'<a\b[^>]*href="[^"]*/gst-number-search/[^"]*"[^>]*>\s*<h5[^>]*>(?P<name>.*?)</h5>\s*</a>'
     r'\s*<span\b[^>]*class="[^"]*black-text[^"]*"[^>]*>(?P<meta>.*?)</span>',
     re.IGNORECASE | re.DOTALL,
 )
