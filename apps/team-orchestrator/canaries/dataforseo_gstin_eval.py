@@ -53,12 +53,18 @@ _GENERIC = {"services", "service", "pvt", "ltd", "private", "limited", "company"
 
 
 def _auth_header() -> str:
+    """Basic auth from either form: a pre-encoded DATAFORSEO_API_BASE64 (what our secrets file
+    carries) or a raw DATAFORSEO_LOGIN / DATAFORSEO_PASSWORD pair. Never logged either way."""
+    encoded = os.environ.get("DATAFORSEO_API_BASE64", "").strip()
+    if encoded:
+        return "Basic " + encoded
     login = os.environ.get("DATAFORSEO_LOGIN", "").strip()
     password = os.environ.get("DATAFORSEO_PASSWORD", "").strip()
     if not login or not password:
         sys.exit(
-            "DATAFORSEO_LOGIN / DATAFORSEO_PASSWORD unset.\n"
-            "Add .viabe/secrets/dataforseo.env then:  set -a; . .viabe/secrets/dataforseo.env; set +a"
+            "No DataForSEO credential. Set DATAFORSEO_API_BASE64, or DATAFORSEO_LOGIN + "
+            "DATAFORSEO_PASSWORD.\n"
+            "  set -a; . .viabe/secrets/dataforseo.env; set +a"
         )
     return "Basic " + base64.b64encode(f"{login}:{password}".encode()).decode()
 
