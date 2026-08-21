@@ -27,7 +27,7 @@
 > newest CL/VT touching it is STALE and must be reconciled BEFORE any status claim is made from
 > this file. The scoreboard exists so Fazal can see the war in one page; a stale scoreboard is
 > worse than none — it launders drift as status.
-> Last updated: **2026-08-19, CC (M2 CLOSED · VT-725 gate (a) CLOSED on deployed evidence; gate (f) open)** — CURRENT STATE:
+> Last updated: **2026-08-20, CC (VT-725 ALL GATES CLOSED · PROMOTED to main c3c1dd6d · prod migrated 16/190/0)** — CURRENT STATE:
 > **M2 closed on eleven rows and a
 > measured pack number.** Full pack ×3 on the post-M2 build: **353/390 = 90.5% clean** vs gate (d)'s
 > 338/390 = 86.7%, **0 TIMEOUT and 0 INDETERMINATE across 870 steps**, all domain floors clean;
@@ -133,6 +133,19 @@
 > behind one of two routers is fragile), not as a fix for an observed miss. **The instrument lesson
 > outlives both:** a harness that deletes its tenant destroys the evidence a shadow feature exists
 > to produce, so the proof is guaranteed absent and reads exactly like failure.
+>
+> **2026-08-20 — PROMOTED. `main` = `c3c1dd6d`; prod migrations 16 applied / 190 skipped / 0 failed.**
+> Gate (f) closed at **128/130 = exactly baseline** with **zero new failure classes** (both findings
+> were non-clean in all three M2 passes; verified against the committed summaries, not memory).
+> **M2 had 20 non-clean scenarios; this build has 2** — the mechanism behind 16 of those 20 is gone,
+> so the R0=0 blast-radius composition is now CONSERVATIVE rather than current. Two things corrected
+> on the record before the button rather than after: the package framed the payload as M3 when it was
+> **217 commits over three weeks**, and two guards fired (`_SELECTABLE_SET`, `pr-title`) that were
+> fixed properly rather than bypassed. **Migration 208 took its SKIP branch on prod** — prod holds
+> zero cards — which makes the fresh-DB fix from 08-19 a **latent prod blocker**, not the local test
+> annoyance it was filed as: without it the applier would have raised at 208 and halted the promotion
+> half-applied. **Prod serving remains OFF and needs TWO Fazal calls** (the flag AND a corpus seed —
+> there are no cards to retrieve); raised, not taken.
 > a 7-day ledger query, `raise_error` on the callback) plus a correction to my own overclaim about it,
 > **VT-765** (a customer's reply to the shared number resolves to NO tenant — Critical, Fazal owns the
 > routing choice), **VT-766** (74 aborts, zero recorded reasons), and a sanctioned env SETTER closing

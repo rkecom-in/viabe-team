@@ -5,7 +5,20 @@
 # (context_builder reads `SELECT business_type FROM tenants`), L3 cohorts key on
 # (business_type, city_tier), and L4 skills tag applies_to_business_types.
 #
-# DESIGN: kept COARSE on purpose (~14 buckets). L3/k-anon cohorts are keyed on
+# 2026-08-21 (Fazal): the taxonomy could not describe a large part of the economy. It was
+# built for local retail/food/personal-services and had NO bucket for software/SaaS, B2B
+# professional services, manufacturing, wholesale, real estate, logistics, hospitality or
+# agriculture. RKeCom Services — SaaS selling business-intelligence reports — had no home
+# but `other`, and business_type_reconcile's own comment says so: "there is no dedicated
+# 'ecommerce'/'software' key — these route to local 'services'". That is the same
+# mis-classification VT-475 was opened for. Eight coarse buckets added below.
+#
+# TYPE-2 CHANGE, stated plainly: L3 cohorts key on (business_type × city_tier) and adding
+# buckets re-cohorts existing tenants. Prod holds zero tenants today so nothing re-cohorts
+# now, but any future addition needs the same care — and a WRONG bucket is worse than a
+# sparse one, because business_type drives VT-312's thresholds and L4 skill targeting.
+#
+# DESIGN: kept COARSE on purpose. L3/k-anon cohorts are keyed on
 # (business_type × city_tier); too many categories → tiny cohorts → the k=10 gate
 # (CL-28) starves and reports/cohort-matching fail. Coarse buckets keep cohorts
 # populated. A new bucket = a Type-2 change (re-cohorting), not a casual add.
@@ -36,4 +49,15 @@ business_types:
   - {key: dairy,           label_en: "Dairy / milk",                label_hi: "डेयरी / दूध"}
   - {key: auto_garage,     label_en: "Auto / garage / spares",      label_hi: "ऑटो / गैराज / पार्ट्स"}
   - {key: book_stationery, label_en: "Bookstore / stationery",      label_hi: "किताब / स्टेशनरी"}
+
+  # --- added 2026-08-21: the non-local-retail economy, which the list above could not describe ---
+  - {key: software_it,     label_en: "Software / SaaS / IT services", label_hi: "सॉफ़्टवेयर / SaaS / IT सेवाएँ"}
+  - {key: ecommerce,       label_en: "Online store / e-commerce",     label_hi: "ऑनलाइन स्टोर / ई-कॉमर्स"}
+  - {key: professional,    label_en: "Professional services (CA, legal, consulting, agency)", label_hi: "पेशेवर सेवाएँ (CA, वकील, कंसल्टिंग, एजेंसी)"}
+  - {key: manufacturing,   label_en: "Manufacturing / workshop",      label_hi: "निर्माण / वर्कशॉप"}
+  - {key: wholesale,       label_en: "Wholesale / distribution",      label_hi: "थोक / वितरण"}
+  - {key: realestate,      label_en: "Real estate / construction",    label_hi: "रियल एस्टेट / निर्माण"}
+  - {key: logistics,       label_en: "Transport / logistics",         label_hi: "परिवहन / लॉजिस्टिक्स"}
+  - {key: hospitality,     label_en: "Hotel / travel / hospitality",  label_hi: "होटल / यात्रा / आतिथ्य"}
+  - {key: agriculture,     label_en: "Agriculture / agri-business",   label_hi: "कृषि / एग्री-बिज़नेस"}
   - {key: other,           label_en: "Other",                       label_hi: "अन्य"}

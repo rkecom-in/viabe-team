@@ -109,9 +109,13 @@ def from_scratch_question_queue() -> list[dict[str, Any]]:
          "prompt_en": "And your name?",
          "prompt_hi": "और आपका नाम?"},
         {"field": "business_type", "kind": "gap", "draft_value": None,
-         "prompt_en": "What kind of business is it? (e.g. restaurant, salon, kirana/retail, "
-                      "services)",
-         "prompt_hi": "यह किस तरह का बिज़नेस है? (जैसे रेस्टोरेंट, सैलून, किराना/रिटेल, सर्विसेज़)"},
+         # 2026-08-21: the examples were all local retail, so an owner running software, an
+         # agency, a factory or a distribution business saw nothing resembling themselves and
+         # answered into the wrong bucket. They now span the taxonomy's range.
+         "prompt_en": "What kind of business is it? (e.g. kirana/retail, restaurant, salon, "
+                      "software/SaaS, consulting or agency, manufacturing, wholesale)",
+         "prompt_hi": "यह किस तरह का बिज़नेस है? (जैसे किराना/रिटेल, रेस्टोरेंट, सैलून, "
+                      "सॉफ़्टवेयर/SaaS, कंसल्टिंग या एजेंसी, मैन्युफैक्चरिंग, थोक)"},
         {"field": "owner_email", "kind": "gap", "draft_value": None,
          "prompt_en": "What's your email address? We'll send your consent record there "
                       "for your files. (Reply Skip if you'd rather not.)",

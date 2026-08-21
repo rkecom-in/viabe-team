@@ -1,118 +1,75 @@
 /**
  * VT-96 — owner signup form (bilingual EN/HI). Consumes VT-82 POST /api/signup
- * via the /api/team/signup proxy; business_type options from /api/team/business-types
- * (the orchestrator taxonomy — single source of truth).
+ * via the /api/team/signup proxy.
  *
- * NEEDS-FAZAL / public-exposure: this form must NOT be linked/deployed publicly until
- * VT-326 (OTP-before-create + per-IP throttle) lands — the backend front door is
- * un-throttled with no proof-of-control of the number (flooding + squatting). The
- * page structures a phone field that the later OTP step hooks before submit.
+ * 2026-08-21 (Fazal): business type and city are NOT collected — they are auto-detected by
+ * auto_discovery and confirmed in the onboarding journey. They are not in the create contract
+ * either; SignupBody forbids extras, so sending one is a 422 rather than a silently ignored key.
  *
  * CL-390: NO PII (name / phone / city) in any analytics/telemetry event.
  *
- * VT-378: the form shipped markup-only like the landing did (VT-372 twin — no stylesheet ever
- * existed). Styled with Tailwind utilities (the repo's system): light theme, Viabe brand tokens
- * (saffron primary / warm-cream background — see globals.css), mobile-first; copy/flow/validation
- * untouched. Semantic classes kept alongside.
+ * 2026-08-21 — REDESIGNED to the Claude Design "Viabe Reports" project
+ * (`Signup Flow.dc.html`). This changed the presentation only: every fetch, every
+ * validation rule, the four-step order, the verify-then-create gate and both consent
+ * semantics are the code that was already here. What is new is the shell (rail /
+ * strip / progress by width), the Viabe type pairing, per-field inline errors in
+ * place of one collapsed banner, and the expandable disclosure blocks.
+ *
+ * Deliberately NOT taken from the prototype: its invented disclosure body text and
+ * invented version strings, and its invented business-type list. See signup-copy.ts.
  */
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 import type { VerifiedEntity } from '@/lib/entity-match'
 import { requestSignupOtp, verifyOtpAndCreate } from '@/lib/signup-otp'
+import * as ui from '@/lib/viabe-ui'
 
 import { EntityMatchStep } from './entity-match-step'
 import { OwnershipStep } from './ownership-step'
+import type { Lang } from './signup-copy'
+import { t } from './signup-copy'
+import { SignupLayout, type WizardStep } from './signup-shell'
 
-type Lang = 'en' | 'hi'
-type BizType = { key: string; label_en: string; label_hi: string }
-type MsgKey =
-  | 'title' | 'business_name' | 'owner_name' | 'whatsapp_number' | 'city' | 'owner_email' | 'invalid_email'
-  | 'business_type' | 'language' | 'consent_dpdpa' | 'consent_residency'
-  | 'submit' | 'invalid_phone' | 'required' | 'duplicate' | 'generic' | 'success'
-  | 'send_code' | 'code_sent' | 'enter_code' | 'verify_create' | 'invalid_code'
-  | 'rate_limited' | 'change_number'
-  | 'verify_unavailable' | 'gst_reject' | 'vendor_down'
+/**
+ * The identifiers actually written to `consent_records.{dpdpa,residency}_version`.
+ * Server-owned in `apps/team-orchestrator/config/disclosure_versions.yaml` — mirrored
+ * here so the owner reads the same string we store. If that file changes, this must
+ * change with it; `signup-copy.ts` explains why the prototype's invented versions
+ * ("Disclosure v2.3 · 14 Jan 2026") are not used.
+ */
+const DISCLOSURE_VERSION = {
+  dpdpa: 'dpdpa_v1_2026-06',
+  residency: 'residency_v1_2026-06',
+} as const
 
-const MESSAGES: Record<Lang, Record<MsgKey, string>> = {
-  en: {
-    title: 'Sign up for Viabe Team',
-    business_name: 'Business name',
-    owner_name: 'Your name',
-    whatsapp_number: 'WhatsApp number (+91…)',
-    city: 'City',
-    owner_email: 'Email (optional — we’ll send your consent record here)',
-    invalid_email: 'Enter a valid email address, or leave it empty.',
-    business_type: 'Business type',
-    language: 'Language',
-    consent_dpdpa: 'I agree to the data-processing notice (DPDP).',
-    consent_residency: 'I agree to data being stored in India.',
-    submit: 'Create my account',
-    invalid_phone: 'Enter a valid +91 mobile number.',
-    required: 'Please fill all fields and accept both consents.',
-    duplicate: 'This number is already registered.',
-    generic: 'Something went wrong. Please try again.',
-    success: 'Account created — check WhatsApp for your welcome message.',
-    send_code: 'Send code',
-    code_sent: 'We sent a code to your WhatsApp. Enter it below.',
-    enter_code: 'WhatsApp code',
-    verify_create: 'Verify & create account',
-    invalid_code: 'That code is invalid or expired. Try again.',
-    rate_limited: 'Too many attempts. Please wait a few minutes.',
-    change_number: 'Change number',
-    verify_unavailable: 'Couldn’t verify right now — this is on our side. Please try again.',
-    gst_reject: 'Viabe Team is for GST-registered businesses. We couldn’t confirm one, so we can’t create an account right now.',
-    vendor_down: 'This is on our side — the verification service didn’t respond. Please try again in a moment.',
-  },
-  hi: {
-    title: 'Viabe Team के लिए साइन अप करें',
-    business_name: 'व्यवसाय का नाम',
-    owner_name: 'आपका नाम',
-    whatsapp_number: 'WhatsApp नंबर (+91…)',
-    city: 'शहर',
-    owner_email: 'Email (optional — आपका consent record यहीं भेजेंगे)',
-    invalid_email: 'सही email पता डालें, या खाली छोड़ दें।',
-    business_type: 'व्यवसाय का प्रकार',
-    language: 'भाषा',
-    consent_dpdpa: 'मैं डेटा-प्रोसेसिंग सूचना (DPDP) से सहमत हूँ।',
-    consent_residency: 'मैं डेटा भारत में संग्रहीत होने से सहमत हूँ।',
-    submit: 'मेरा खाता बनाएं',
-    invalid_phone: 'एक मान्य +91 मोबाइल नंबर दर्ज करें।',
-    required: 'कृपया सभी फ़ील्ड भरें और दोनों सहमतियाँ स्वीकार करें।',
-    duplicate: 'यह नंबर पहले से पंजीकृत है।',
-    generic: 'कुछ गलत हुआ। कृपया पुनः प्रयास करें।',
-    success: 'खाता बन गया — स्वागत संदेश के लिए WhatsApp देखें।',
-    send_code: 'कोड भेजें',
-    code_sent: 'हमने आपके WhatsApp पर एक कोड भेजा है। नीचे दर्ज करें।',
-    enter_code: 'WhatsApp कोड',
-    verify_create: 'सत्यापित करें और खाता बनाएं',
-    invalid_code: 'यह कोड अमान्य या समाप्त है। फिर से कोशिश करें।',
-    rate_limited: 'बहुत अधिक प्रयास। कृपया कुछ मिनट प्रतीक्षा करें।',
-    change_number: 'नंबर बदलें',
-    verify_unavailable: 'अभी सत्यापित नहीं कर सके — यह हमारी ओर से है। कृपया पुनः प्रयास करें।',
-    gst_reject: 'Viabe Team GST-पंजीकृत व्यवसायों के लिए है। हम इसकी पुष्टि नहीं कर सके, इसलिए अभी खाता नहीं बना सकते।',
-    vendor_down: 'यह हमारी ओर से है — सत्यापन सेवा ने जवाब नहीं दिया। कृपया थोड़ी देर में पुनः प्रयास करें।',
-  },
-}
-
-const PHONE_RE = /^\+91[6-9]\d{9}$/
+const PHONE_RE = /^[6-9]\d{9}$/
 // VT-724: optional email — validated only when non-empty (it routes the DPDP consent record).
 const EMAIL_RE = /^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/
 
+type FieldErrors = Partial<
+  Record<
+    'business_name' | 'owner_name' | 'whatsapp_number' | 'owner_email' | 'preferred_language' | 'consent_dpdpa' | 'consent_residency',
+    string
+  >
+>
+
 export function SignupForm() {
   const [lang, setLang] = useState<Lang>('en')
-  const [bizTypes, setBizTypes] = useState<BizType[]>([])
   const [form, setForm] = useState({
     business_name: '',
     owner_name: '',
     whatsapp_number: '',
-    city: '',
     owner_email: '',
-    business_type: '',
+    // The language the AGENTS message the owner in — an ASKED question, distinct from `lang`
+    // (the header toggle, which is UI display only). Rides the create payload as
+    // preferred_language and lands in tenants.preferred_language, the EXPLICIT choice column.
+    preferred_language: '',
     consent_dpdpa: false,
     consent_residency: false,
   })
+  const [fieldErrors, setFieldErrors] = useState<FieldErrors>({})
   const [error, setError] = useState<string | null>(null)
   // VT-512: track whether the current error is a terminal GST-gate reject (gst_reject from
   // the create call). Used to suppress the GST-error block on the OTP screen when verifiedEntity
@@ -123,31 +80,35 @@ export function SignupForm() {
   // VT-96 + VT-406 + VT-517: a 4-step flow — details, then entity-match (confirm the GST-registered
   // business BEFORE creating an account — VT-406/VT-408 verify-then-create gate), then OTP-verify the
   // WhatsApp number (the VT-326 proof token; a direct POST would 401) which CREATES the tenant, then
-  // OWNERSHIP — now an honest "pending Viabe team review" screen (VT-517 killed self-serve ownership
+  // OWNERSHIP — an honest "pending Viabe team review" screen (VT-517 killed self-serve ownership
   // OTP; a Viabe human decides ownership).
-  //
-  // VT-517: the ownership step runs POST-create (the tenant EXISTS) but no longer proves anything —
-  // it informs the owner that EXECUTION stays gated server-side until a Viabe human verifies
-  // ownership, then closes the wizard. GST verify still gates create (tier-1, VT-408).
-  const [step, setStep] = useState<'details' | 'entity' | 'verify' | 'ownership'>('details')
+  const [step, setStep] = useState<WizardStep>('details')
   const [otpCode, setOtpCode] = useState('')
   // VT-406: the Sandbox-verified entity (gstin + authoritative name). null until a gstin_verified
   // confirm lands; it gates create + rides into the create payload.
   const [verifiedEntity, setVerifiedEntity] = useState<VerifiedEntity | null>(null)
-  // VT-517: the REAL tenant_id returned by the create (201). Surfaced to the pending-ownership-review
-  // screen for the e2e harness; the screen makes no server call.
+  // VT-517: the REAL tenant_id returned by the create (201).
   const [tenantId, setTenantId] = useState<string | null>(null)
-  const t = MESSAGES[lang]
+  const [openDisclosure, setOpenDisclosure] = useState<'dpdpa' | 'residency' | null>(null)
+  const [resendIn, setResendIn] = useState(0)
+  const resendTimer = useRef<ReturnType<typeof setInterval> | null>(null)
 
-  useEffect(() => {
-    fetch('/api/team/business-types')
-      .then((r) => r.json())
-      .then((d) => setBizTypes(d.business_types ?? []))
-      .catch(() => setBizTypes([]))
-  }, [])
+  useEffect(() => () => { if (resendTimer.current) clearInterval(resendTimer.current) }, [])
+
+  function startResendCooldown() {
+    if (resendTimer.current) clearInterval(resendTimer.current)
+    setResendIn(30)
+    resendTimer.current = setInterval(() => {
+      setResendIn((n) => {
+        if (n <= 1 && resendTimer.current) clearInterval(resendTimer.current)
+        return n <= 1 ? 0 : n - 1
+      })
+    }, 1000)
+  }
 
   function update<K extends keyof typeof form>(k: K, v: (typeof form)[K]) {
     setForm((f) => ({ ...f, [k]: v }))
+    setFieldErrors((e) => ({ ...e, [k]: undefined }))
   }
 
   // Step 1 — validate the details, then advance to the VT-406 entity-match step. The OTP is NOT
@@ -156,32 +117,25 @@ export function SignupForm() {
   function onSubmitDetails(e: React.FormEvent) {
     e.preventDefault()
     setError(null)
-    if (
-      !form.business_name ||
-      !form.owner_name ||
-      !form.city ||
-      !form.business_type ||
-      !form.consent_dpdpa ||
-      !form.consent_residency
-    ) {
-      setError(t.required)
+    const errs: FieldErrors = {}
+    if (!form.owner_name) errs.owner_name = t(lang, 'errRequired')
+    if (!form.business_name) errs.business_name = t(lang, 'errRequired')
+    if (!PHONE_RE.test(form.whatsapp_number)) errs.whatsapp_number = t(lang, 'errPhone')
+    if (form.owner_email && !EMAIL_RE.test(form.owner_email.trim())) errs.owner_email = t(lang, 'errEmail')
+    if (!form.preferred_language) errs.preferred_language = t(lang, 'errRequired')
+    if (!form.consent_dpdpa) errs.consent_dpdpa = t(lang, 'errConsent')
+    if (!form.consent_residency) errs.consent_residency = t(lang, 'errConsent')
+    if (Object.keys(errs).length) {
+      setFieldErrors(errs)
+      setError(t(lang, 'errSummary'))
       return
     }
-    if (!PHONE_RE.test(form.whatsapp_number)) {
-      setError(t.invalid_phone)
-      return
-    }
-    if (form.owner_email && !EMAIL_RE.test(form.owner_email.trim())) {
-      setError(t.invalid_email)
-      return
-    }
+    setFieldErrors({})
     setStep('entity')
   }
 
   // VT-406 → VT-326 bridge — fired ONLY after the entity-match step server-confirms a verified
-  // entity. Record the verified entity (it gates create + rides into the create payload), then
-  // request the personal-WhatsApp OTP and advance to the verify step (which CREATES the tenant).
-  // The ownership step is the POST-create pending-review screen (VT-517) — informational only.
+  // entity. Record the verified entity, request the personal-WhatsApp OTP, advance to verify.
   async function onEntityVerified(entity: VerifiedEntity) {
     setVerifiedEntity(entity)
     if (step === 'verify' || step === 'ownership' || submitting) return // double-click guard
@@ -191,58 +145,61 @@ export function SignupForm() {
     try {
       const r = await requestSignupOtp(form.whatsapp_number)
       if (!r.ok) {
-        setError(r.error === 'rate_limited' ? t.rate_limited : t.generic)
+        setError(r.error === 'rate_limited' ? t(lang, 'rateLimited') : t(lang, 'generic'))
         return
       }
+      startResendCooldown()
       setStep('verify')
     } catch {
-      setError(t.generic)
+      setError(t(lang, 'generic'))
     } finally {
       setSubmitting(false)
     }
   }
 
-  // VT-517 — fired when the owner taps Continue on the pending-ownership-review screen. Ownership is
-  // NOT proven here (a Viabe human decides it later in the Ops Console); this just closes the wizard so
-  // the owner reaches the dashboard. EXECUTION stays gated server-side until ownership is verified.
+  async function resendCode() {
+    if (resendIn > 0 || submitting) return
+    setError(null)
+    try {
+      const r = await requestSignupOtp(form.whatsapp_number)
+      if (!r.ok) {
+        setError(r.error === 'rate_limited' ? t(lang, 'rateLimited') : t(lang, 'generic'))
+        return
+      }
+      setOtpCode('')
+      startResendCooldown()
+    } catch {
+      setError(t(lang, 'generic'))
+    }
+  }
+
+  // VT-517 — Continue on the pending-ownership-review screen. Ownership is NOT proven here.
   function onOwnershipVerified() {
     setDone(true)
   }
 
-  // Step 2 — verify the OTP → receive the pre-tenant verified-number token → CREATE the tenant
+  // Step 3 — verify the OTP → receive the pre-tenant verified-number token → CREATE the tenant
   // with `Authorization: Bearer <token>`. Invalid vs expired are NOT distinguished (generic —
-  // no enumeration). The token is threaded straight to the proxy; never logged (CL-390). On a 201
-  // the create returns the new tenant_id (VT-517) — store it + advance to the POST-create
-  // pending-ownership-review screen.
+  // no enumeration). The token is threaded straight to the proxy; never logged (CL-390).
   async function onVerifyAndCreate(e: React.FormEvent) {
     e.preventDefault()
     setError(null)
     setGstRejectError(false)
-    if (!otpCode.trim()) {
-      setError(t.invalid_code)
+    if (otpCode.trim().length < 6) {
+      setError(t(lang, 'errCodeShort'))
       return
     }
-    // VT-406 create-account gate: NEVER create without a server-confirmed verified entity. The UI
-    // can't reach this step un-verified (the entity step gates the transition), but assert it here
-    // too — defence-in-depth (the server hard-block is VT-408; this is the UI invariant).
+    // VT-406 create-account gate: NEVER create without a server-confirmed verified entity.
     if (!verifiedEntity?.gstin) {
-      setError(t.generic)
+      setError(t(lang, 'generic'))
       return
     }
     setSubmitting(true)
     try {
-      // Carry the verified entity into the create payload so the orchestrator anchors discovery to
-      // the CONFIRMED entity (gstin + authoritative name), not the owner-typed name (VT-406 fix).
-      // VT-449: thread the owner-CONFIRMED registry CIN ('' when none confirmed) — the orchestrator's
-      // SignupBody.cin drives the MCA-canonical name-match + persists tenant_mca_data; '' falls back
-      // to the typed business_name (existing behavior). CIN is a public registry id (CL-390-safe).
       const r = await verifyOtpAndCreate(
         {
           ...form,
-          preferred_language: lang,
-          // VT-512: field must be `gstin` — the orchestrator's SignupBody field name. The old
-          // `verified_gstin` key was ignored by Pydantic (default ""), causing every create to
-          // fail with 422 invalid_gstin regardless of the entity-step verify result.
+          // VT-512: field must be `gstin` — the orchestrator's SignupBody field name.
           gstin: verifiedEntity.gstin,
           verified_name: verifiedEntity.name,
           cin: verifiedEntity.cin ?? '',
@@ -250,9 +207,6 @@ export function SignupForm() {
         otpCode.trim(),
       )
       if (r.ok) {
-        // VT-517: the tenant now EXISTS. Advance to the POST-create pending-ownership-review screen with
-        // the real tenant_id. If the create returned no id (degraded), just complete the wizard — the
-        // pending-review screen is informational, so there is nothing to gate on a missing id.
         if (r.tenantId) {
           setTenantId(r.tenantId)
           setStep('ownership')
@@ -261,268 +215,347 @@ export function SignupForm() {
         }
         return
       }
-      // Sweep #8/#11: the new error variants are surfaced here too. `gst_reject` (422) is a TERMINAL
-      // GST-registered-only reject; `vendor_down` (503) and `verify_unavailable` (502) are RETRYABLE
-      // "on our side" outages — the form keeps the verify step (the owner can resubmit). We prefer
-      // the orchestrator's authored bilingual `message` (gate_copy()) when the create gate provided
-      // one, falling back to the local copy; the failure is no longer collapsed to one generic.
       const map: Record<typeof r.error, string> = {
-        rate_limited: t.rate_limited,
-        invalid_code: t.invalid_code,
-        verify_unavailable: t.verify_unavailable,
-        duplicate: t.duplicate,
-        gst_reject: t.gst_reject,
-        vendor_down: t.vendor_down,
-        generic: t.generic,
+        rate_limited: t(lang, 'rateLimited'),
+        invalid_code: t(lang, 'errCodeInvalid'),
+        verify_unavailable: t(lang, 'verifyUnavailable'),
+        duplicate: t(lang, 'dupTitle'),
+        gst_reject: t(lang, 'generic'),
+        vendor_down: t(lang, 'waDownTitle'),
+        generic: t(lang, 'generic'),
       }
-      // VT-512: flag GST-gate terminal rejects so the OTP screen can suppress the block
-      // when verifiedEntity is already set (entity verified but create re-verified freshly).
       setGstRejectError(r.error === 'gst_reject')
       setError(r.message ?? map[r.error])
     } catch {
-      setError(t.generic)
+      setError(t(lang, 'generic'))
     } finally {
       setSubmitting(false)
     }
   }
 
+  const phoneDisplay = `+91 ${form.whatsapp_number.slice(0, 5)}${form.whatsapp_number.length > 5 ? ' ' + form.whatsapp_number.slice(5) : ''}`
+
+  // ---------------------------------------------------------------- rendering
+
   if (done) {
     return (
-      <main className="signup-success flex min-h-screen flex-col items-center justify-center bg-background px-5 text-center text-foreground antialiased">
-        <div className="w-full max-w-md rounded-2xl border border-border bg-card p-8 shadow-sm">
-          {/* VT-511: celebratory icon */}
-          <div
-            aria-hidden
-            className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-secondary text-3xl font-bold text-secondary-foreground"
-          >
-            ✓
+      <SignupLayout lang={lang} onLang={setLang} step="ownership">
+        <section className={`${ui.panel} signup-success flex flex-col gap-4`}>
+          <div className="flex items-center gap-2.5">
+            <span className={ui.successDot} aria-hidden>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3.4" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M20 6 9 17l-5-5" />
+              </svg>
+            </span>
+            <h2 className={ui.h2}>{t(lang, 's4title')}</h2>
           </div>
-          <p className="mt-5 text-base font-medium leading-relaxed text-foreground">{t.success}</p>
-        </div>
-      </main>
+          <p className={ui.body}>{t(lang, 's4sub')}</p>
+          {/* Signup issues a PROOF token, not a session, and the dashboard is
+              session-gated — so send the owner to sign in rather than bounce them. */}
+          <a href="/team/login" className={ui.primaryButton()}>
+            {t(lang, 'signInCta')}
+          </a>
+          <p className={`${ui.hint} text-center`}>{t(lang, 'signInNote')}</p>
+        </section>
+        <p className={`${ui.hint} text-center`}>{t(lang, 'footer')}</p>
+      </SignupLayout>
     )
   }
 
-  const langBtn = (active: boolean) =>
-    active
-      ? 'rounded-full bg-primary px-4 py-1.5 font-semibold text-primary-foreground'
-      : 'rounded-full border border-input px-4 py-1.5 text-muted-foreground transition hover:bg-muted'
-  const fieldLabel = 'flex flex-col gap-1.5 text-sm font-medium text-foreground'
-  const fieldInput =
-    'rounded-lg border border-input bg-card px-3 py-2.5 text-base font-normal text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20'
-  const errBlock = (msg: string) => (
-    <div className="signup-error flex items-start gap-2.5 rounded-lg border border-destructive/20 bg-destructive/5 px-4 py-3" role="alert">
-      <span aria-hidden className="mt-0.5 shrink-0 text-destructive">⚠</span>
-      <p className="text-sm leading-relaxed text-destructive">{msg}</p>
+  const errorBlock = error && (
+    <div className={`${ui.alertError} signup-error`} role="alert">
+      <p className={ui.alertBody}>{error}</p>
+    </div>
+  )
+
+  const fieldError = (k: keyof FieldErrors) =>
+    fieldErrors[k] ? (
+      <span className="text-xs font-medium text-ink-destructive">{fieldErrors[k]}</span>
+    ) : null
+
+  // ---- step 2: entity match (its own component; presentation updated in place) ----
+  if (step === 'entity') {
+    return (
+      <SignupLayout lang={lang} onLang={setLang} step="entity">
+        <EntityMatchStep
+          businessName={form.business_name}
+          // No city is collected any more — it is auto-detected. Discovery treats it as an
+          // optional search hint (EntityCandidatesBody defaults it to ""), so it narrows results
+          // when known and is simply absent when not.
+          city=""
+          lang={lang}
+          // Sweep #1/#6: thread the parent OTP-request error + in-flight state into the entity step so
+          // a failed "Verified → Continue" OTP send is VISIBLE on the verified screen and the Continue
+          // button reflects the in-flight/blocked state (no silent re-fire of the OTP request).
+          error={error}
+          submitting={submitting}
+          onVerified={(entity) => void onEntityVerified(entity)}
+          onReject={() => { /* reject is recoverable IN the child step machine (re-enter GST / re-search) — no parent create path */ }}
+        />
+      </SignupLayout>
+    )
+  }
+
+  // ---- step 4: ownership review (post-create, proves nothing, says so) ----
+  if (step === 'ownership') {
+    return (
+      <SignupLayout lang={lang} onLang={setLang} step="ownership">
+        <OwnershipStep
+          tenantId={tenantId ?? ''}
+          businessName={verifiedEntity?.name ?? form.business_name}
+          lang={lang}
+          onVerified={onOwnershipVerified}
+        />
+      </SignupLayout>
+    )
+  }
+
+  // ---- step 3: WhatsApp verification — this is what creates the account ----
+  if (step === 'verify') {
+    return (
+      <SignupLayout lang={lang} onLang={setLang} step="verify">
+        <section className={`${ui.panel} flex flex-col gap-4`}>
+          <div className="flex flex-col gap-2">
+            <h2 className={ui.h2}>{t(lang, 's3title')}</h2>
+            <p className={ui.body}>{t(lang, 's3body')}</p>
+          </div>
+
+          <div className={`${ui.alertInfo} flex-row flex-wrap items-center justify-between`}>
+            <span className="flex flex-col gap-0.5">
+              <span className="text-xs text-muted-foreground">{t(lang, 'sendingTo')}</span>
+              <span className={ui.monoValue}>{phoneDisplay}</span>
+            </span>
+            <button
+              type="button"
+              onClick={() => { setStep('details'); setOtpCode(''); setError(null) }}
+              className={ui.linkButton()}
+            >
+              {t(lang, 'changeNumber')}
+            </button>
+          </div>
+
+          {gstRejectError && !verifiedEntity && (
+            <div className={ui.alertError} role="alert">
+              <span className={ui.alertTitle}>{t(lang, 'generic')}</span>
+            </div>
+          )}
+
+          <form onSubmit={onVerifyAndCreate} className="flex flex-col gap-4">
+            <label className={ui.fieldLabel}>
+              <span className={ui.fieldLabelText}>{t(lang, 'codeLabel')}</span>
+              <input
+                type="text"
+                inputMode="numeric"
+                maxLength={6}
+                autoComplete="one-time-code"
+                value={otpCode}
+                onChange={(e) => { setOtpCode(e.target.value.replace(/\D/g, '').slice(0, 6)); setError(null) }}
+                placeholder="––––––"
+                className={ui.codeField(Boolean(error))}
+              />
+            </label>
+
+            {errorBlock}
+
+            <button type="submit" disabled={submitting} className={ui.primaryButton(submitting)}>
+              {submitting ? t(lang, 'creating') : t(lang, 'createCta')}
+            </button>
+
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <button
+                type="button"
+                onClick={resendCode}
+                disabled={resendIn > 0}
+                className={ui.linkButton(resendIn > 0)}
+              >
+                {resendIn > 0 ? t(lang, 'resendIn', { s: String(resendIn) }) : t(lang, 'resend')}
+              </button>
+              <span className={ui.hint}>{t(lang, 'sentNote', { phone: phoneDisplay })}</span>
+            </div>
+          </form>
+
+          <p className={ui.hint}>{t(lang, 's3foot')}</p>
+        </section>
+      </SignupLayout>
+    )
+  }
+
+  // ---- step 1: details ----
+  const consentBlock = (
+    which: 'dpdpa' | 'residency',
+    titleKey: 'c1title' | 'c2title',
+    acceptKey: 'c1accept' | 'c2accept',
+    checked: boolean,
+    onChange: (v: boolean) => void,
+    errKey: 'consent_dpdpa' | 'consent_residency',
+  ) => (
+    <div className="flex flex-col gap-2 rounded-xl border border-border bg-background p-4">
+      <span className="font-display text-sm font-bold text-foreground">{t(lang, titleKey)}</span>
+      <label className="signup-consent flex items-start gap-2.5 text-sm leading-relaxed text-foreground">
+        <input
+          type="checkbox"
+          checked={checked}
+          onChange={(e) => onChange(e.target.checked)}
+          className="mt-0.5 h-4.5 w-4.5 shrink-0 accent-[hsl(var(--viabe-saffron))]"
+        />
+        <span>{t(lang, acceptKey)}</span>
+      </label>
+      {fieldError(errKey)}
+      <div className="flex flex-wrap items-center gap-2">
+        <span className={ui.hint}>
+          {t(lang, 'recordedAs')}{' '}
+          <span className="font-mono">{DISCLOSURE_VERSION[which]}</span>
+        </span>
+        <button
+          type="button"
+          onClick={() => setOpenDisclosure(openDisclosure === which ? null : which)}
+          className={ui.linkButton()}
+          aria-expanded={openDisclosure === which}
+        >
+          {openDisclosure === which ? t(lang, 'hideMore') : t(lang, 'readMore')}
+        </button>
+      </div>
+      {openDisclosure === which && (
+        <div className="flex flex-col gap-2 border-t border-border pt-2.5">
+          {/* A factual summary of what this consent actually covers. The BINDING text is
+              counsel's and lives on the linked page, which states its own draft status —
+              we do not author legal copy here. */}
+          <p className={ui.bodySm}>{t(lang, which === 'dpdpa' ? 'c1summary' : 'c2summary')}</p>
+          <p className={`${ui.hint} italic`}>{t(lang, 'disclosureDraft')}</p>
+          <a
+            href={which === 'dpdpa' ? '/team/privacy' : '/team/dpdp'}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-[13px] font-semibold text-ink-primary underline"
+          >
+            {t(lang, 'disclosureLink')}
+          </a>
+        </div>
+      )}
     </div>
   )
 
   return (
-    <main className="signup min-h-screen bg-background px-5 py-10 text-foreground antialiased sm:py-16">
-      <div className="mx-auto w-full max-w-md">
-        {/* VT-511: brand anchor — keeps the identity present across all sub-steps */}
-        <div className="mb-7 text-center">
-          <span className="text-xl font-bold tracking-tight text-primary">Viabe Team</span>
-        </div>
-        <div className="signup-lang flex justify-center gap-2 text-sm">
-          <button
-            type="button"
-            onClick={() => setLang('en')}
-            aria-pressed={lang === 'en'}
-            className={langBtn(lang === 'en')}
-          >
-            English
+    <SignupLayout lang={lang} onLang={setLang} step="details">
+      <section className={`${ui.panel} signup flex flex-col gap-5`}>
+        <p className={ui.body}>{t(lang, 's1sub')}</p>
+
+        <form onSubmit={onSubmitDetails} className="flex flex-col gap-4">
+          <div className="grid gap-4 sm:grid-cols-2">
+            <label className={ui.fieldLabel}>
+              <span className={ui.fieldLabelText}>{t(lang, 'ownerName')}</span>
+              <input
+                value={form.owner_name}
+                onChange={(e) => update('owner_name', e.target.value)}
+                placeholder={t(lang, 'ownerNamePh')}
+                autoComplete="name"
+                className={ui.field(Boolean(fieldErrors.owner_name))}
+              />
+              {fieldError('owner_name')}
+            </label>
+
+            <label className={ui.fieldLabel}>
+              <span className={ui.fieldLabelText}>{t(lang, 'businessName')}</span>
+              <input
+                value={form.business_name}
+                onChange={(e) => update('business_name', e.target.value)}
+                placeholder={t(lang, 'businessNamePh')}
+                autoComplete="organization"
+                className={ui.field(Boolean(fieldErrors.business_name))}
+              />
+              {fieldError('business_name')}
+            </label>
+          </div>
+
+          {/* WhatsApp and email share a row on desktop, per the design; they stack below sm. */}
+          <div className="grid gap-4 sm:grid-cols-2">
+            <label className={ui.fieldLabel}>
+              <span className={ui.fieldLabelText}>{t(lang, 'whatsapp')}</span>
+              <span className="flex items-stretch">
+                <span className={ui.phonePrefix}>+91</span>
+                <input
+                  type="tel"
+                  inputMode="numeric"
+                  value={form.whatsapp_number}
+                  onChange={(e) => update('whatsapp_number', e.target.value.replace(/\D/g, '').slice(0, 10))}
+                  placeholder="98765 43210"
+                  autoComplete="tel-national"
+                  className={ui.phoneField(Boolean(fieldErrors.whatsapp_number))}
+                />
+              </span>
+              {fieldError('whatsapp_number')}
+              <span className={ui.hint}>{t(lang, 'whatsappHint')}</span>
+            </label>
+
+            <label className={ui.fieldLabel}>
+              <span className={ui.fieldLabelText}>{t(lang, 'email')}</span>
+              <input
+                type="email"
+                value={form.owner_email}
+                onChange={(e) => update('owner_email', e.target.value)}
+                autoComplete="email"
+                className={ui.field(Boolean(fieldErrors.owner_email))}
+              />
+              {fieldError('owner_email')}
+              <span className={ui.hint}>{t(lang, 'emailHint')}</span>
+            </label>
+          </div>
+
+          <fieldset className={ui.fieldLabel}>
+            <legend className={ui.fieldLabelText}>{t(lang, 'commsLang')}</legend>
+            <div className="mt-1.5 grid gap-2 sm:grid-cols-3">
+              {([
+                { v: 'en', label: t(lang, 'langEn'), eg: null },
+                { v: 'hi', label: t(lang, 'langHi'), eg: null },
+                { v: 'hinglish', label: t(lang, 'langHinglish'), eg: t(lang, 'langHinglishEg') },
+              ] as const).map((o) => {
+                const on = form.preferred_language === o.v
+                return (
+                  <label
+                    key={o.v}
+                    className={[
+                      'flex cursor-pointer flex-col gap-1 rounded-xl border p-3 transition',
+                      on ? 'border-primary bg-accent' : 'border-border bg-background hover:bg-muted',
+                    ].join(' ')}
+                  >
+                    <span className="flex items-center gap-2">
+                      <input
+                        type="radio"
+                        name="preferred_language"
+                        value={o.v}
+                        checked={on}
+                        onChange={() => update('preferred_language', o.v)}
+                        className="h-4 w-4 accent-[hsl(var(--viabe-saffron))]"
+                      />
+                      <span className="font-display text-sm font-bold text-foreground">{o.label}</span>
+                    </span>
+                    {o.eg && <span className="pl-6 text-xs leading-[1.5] text-muted-foreground">{o.eg}</span>}
+                  </label>
+                )
+              })}
+            </div>
+            {fieldError('preferred_language')}
+            <span className={ui.hint}>{t(lang, 'commsLangHint')}</span>
+          </fieldset>
+
+          <div className="flex flex-col gap-2.5 border-t border-border pt-4">
+            <div className="flex flex-col gap-1">
+              <span className="font-display text-[15px] font-bold text-foreground">{t(lang, 'consentH')}</span>
+              <span className={ui.bodySm}>{t(lang, 'consentNote')}</span>
+            </div>
+            {consentBlock('dpdpa', 'c1title', 'c1accept', form.consent_dpdpa, (v) => update('consent_dpdpa', v), 'consent_dpdpa')}
+            {consentBlock('residency', 'c2title', 'c2accept', form.consent_residency, (v) => update('consent_residency', v), 'consent_residency')}
+          </div>
+
+          {errorBlock}
+
+          <button type="submit" disabled={submitting} className={ui.primaryButton(submitting)}>
+            {t(lang, 'step1Cta')}
           </button>
-          <button
-            type="button"
-            onClick={() => setLang('hi')}
-            aria-pressed={lang === 'hi'}
-            className={langBtn(lang === 'hi')}
-          >
-            हिंदी
-          </button>
-        </div>
-        <h1 className="mt-6 text-center text-2xl font-bold tracking-tight text-foreground">
-          {t.title}
-        </h1>
-        {step === 'details' ? (
-        <form
-          onSubmit={onSubmitDetails}
-          className="mt-8 flex flex-col gap-5 rounded-2xl border border-border bg-card p-6 shadow-sm sm:p-8"
-        >
-        <label className={fieldLabel}>
-          {t.business_name}
-          <input
-            value={form.business_name}
-            onChange={(e) => update('business_name', e.target.value)}
-            maxLength={200}
-            required
-            className={fieldInput}
-          />
-        </label>
-        <label className={fieldLabel}>
-          {t.owner_name}
-          <input
-            value={form.owner_name}
-            onChange={(e) => update('owner_name', e.target.value)}
-            maxLength={120}
-            required
-            className={fieldInput}
-          />
-        </label>
-        <label className={fieldLabel}>
-          {t.whatsapp_number}
-          <input
-            value={form.whatsapp_number}
-            onChange={(e) => update('whatsapp_number', e.target.value)}
-            placeholder="+919876543210"
-            inputMode="tel"
-            required
-            className={fieldInput}
-          />
-        </label>
-        <label className={fieldLabel}>
-          {t.city}
-          <input
-            value={form.city}
-            onChange={(e) => update('city', e.target.value)}
-            maxLength={120}
-            required
-            className={fieldInput}
-          />
-        </label>
-        <label className={fieldLabel}>
-          {t.owner_email}
-          <input
-            value={form.owner_email}
-            onChange={(e) => update('owner_email', e.target.value)}
-            maxLength={254}
-            inputMode="email"
-            placeholder="name@example.com"
-            className={fieldInput}
-          />
-        </label>
-        <label className={fieldLabel}>
-          {t.business_type}
-          <select
-            value={form.business_type}
-            onChange={(e) => update('business_type', e.target.value)}
-            required
-            className={fieldInput}
-          >
-            <option value="" disabled>
-              —
-            </option>
-            {bizTypes.map((b) => (
-              <option key={b.key} value={b.key}>
-                {lang === 'hi' ? b.label_hi : b.label_en}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="signup-consent flex items-start gap-2.5 text-sm font-normal leading-relaxed text-muted-foreground">
-          <input
-            type="checkbox"
-            checked={form.consent_dpdpa}
-            onChange={(e) => update('consent_dpdpa', e.target.checked)}
-            className="mt-0.5 h-4 w-4 shrink-0 accent-primary"
-          />
-          {t.consent_dpdpa}
-          {/* NEEDS-FAZAL: link to the DPDP disclosure copy (dpdpa_v1_2026-06). */}
-        </label>
-        <label className="signup-consent flex items-start gap-2.5 text-sm font-normal leading-relaxed text-muted-foreground">
-          <input
-            type="checkbox"
-            checked={form.consent_residency}
-            onChange={(e) => update('consent_residency', e.target.checked)}
-            className="mt-0.5 h-4 w-4 shrink-0 accent-primary"
-          />
-          {t.consent_residency}
-          {/* NEEDS-FAZAL: link to the residency disclosure copy (residency_v1_2026-06). */}
-        </label>
-        {error && errBlock(error)}
-        <button
-          type="submit"
-          disabled={submitting || !form.consent_dpdpa || !form.consent_residency}
-          className="flex w-full items-center justify-center gap-2 rounded-xl bg-primary px-5 py-3 font-semibold text-primary-foreground shadow-sm transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          {submitting && <span aria-hidden className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-primary-foreground border-t-transparent" />}
-          {t.send_code}
-        </button>
-      </form>
-      ) : step === 'entity' ? (
-      // VT-406 entity-match sub-step — confirm a GST-registered business before account-creation.
-      // onVerified records the verified entity (the create-account gate) + requests the WhatsApp OTP
-      // (→ verify step → create); onReject is the graceful "GST-registered only" terminus.
-      <EntityMatchStep
-        businessName={form.business_name}
-        city={form.city}
-        lang={lang}
-        // Sweep #1/#6: thread the parent OTP-request error + in-flight state into the entity step so a
-        // failed "Verified → Continue" OTP send is VISIBLE on the verified screen and the Continue
-        // button reflects the in-flight/blocked state (no silent re-fire of the OTP request).
-        error={error}
-        submitting={submitting}
-        onVerified={(entity) => void onEntityVerified(entity)}
-        onReject={() => { /* reject is recoverable IN the child step machine (re-enter GST / re-search) — no parent create path */ }}
-      />
-      ) : step === 'verify' ? (
-      <form
-        onSubmit={onVerifyAndCreate}
-        className="mt-8 flex flex-col gap-5 rounded-2xl border border-border bg-card p-6 shadow-sm sm:p-8"
-      >
-        <p className="text-sm leading-relaxed text-muted-foreground">{t.code_sent}</p>
-        <label className={fieldLabel}>
-          {t.enter_code}
-          <input
-            value={otpCode}
-            onChange={(e) => setOtpCode(e.target.value)}
-            inputMode="numeric"
-            autoComplete="one-time-code"
-            required
-            className={`${fieldInput} py-4 text-center text-2xl font-mono tracking-[0.4em]`}
-          />
-        </label>
-        {/* VT-512: gst_reject is gated on !verifiedEntity — when the entity IS verified,
-            the GST-gate block is suppressed so a stale/spurious gst_reject never confuses
-            an owner who passed the entity step. Other errors (invalid_code, rate_limited,
-            duplicate, generic) render regardless of verifiedEntity. */}
-        {error && !(gstRejectError && verifiedEntity) && errBlock(error)}
-        <button
-          type="submit"
-          disabled={submitting}
-          className="flex w-full items-center justify-center gap-2 rounded-xl bg-primary px-5 py-3 font-semibold text-primary-foreground shadow-sm transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          {submitting && <span aria-hidden className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-primary-foreground border-t-transparent" />}
-          {t.verify_create}
-        </button>
-        <button
-          type="button"
-          onClick={() => {
-            setStep('details')
-            setOtpCode('')
-            setError(null)
-            setGstRejectError(false)
-          }}
-          className="w-full rounded-xl border border-input px-5 py-2.5 font-medium text-foreground transition hover:bg-muted"
-        >
-          {t.change_number}
-        </button>
-      </form>
-      ) : (
-      // VT-517 ownership sub-step — runs POST-create (the tenant EXISTS now). Self-serve ownership OTP
-      // is GONE: this is now an honest "pending Viabe team review" screen. The owner reaches the
-      // dashboard, but EXECUTION stays gated server-side until a Viabe human verifies ownership. The
-      // REAL tenant_id (from the create 201) is surfaced for the e2e harness; Continue just closes the
-      // wizard via onOwnershipVerified.
-      <OwnershipStep
-        tenantId={tenantId ?? ''}
-        businessName={verifiedEntity?.name ?? form.business_name}
-        lang={lang}
-        onVerified={onOwnershipVerified}
-      />
-      )}
-      </div>
-    </main>
+          <p className={`${ui.hint} text-center`}>{t(lang, 'noAccountYet')}</p>
+        </form>
+      </section>
+      <p className={`${ui.hint} text-center`}>{t(lang, 'footer')}</p>
+    </SignupLayout>
   )
 }

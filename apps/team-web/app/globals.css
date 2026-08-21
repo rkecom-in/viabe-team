@@ -54,6 +54,26 @@
   --gold-foreground: 222 30% 12%;
   --ink: 222 30% 12%;
 
+  /* TEXT AND ICON GLYPHS ONLY (Viabe design system, tokens/colors.css).
+     Each --ink-* is its base hue at the lightness that clears WCAG AA 4.5:1 on
+     --background, --card, --muted AND on a 0.18 tint of its own colour. Fills, bars
+     and tints keep the full-strength colour. NEVER put an --ink-* and a
+     full-strength colour on the same element. */
+  --ink-primary: 25 90% 33%;
+  --ink-gold: 42 88% 30%;
+  --ink-destructive: 0 84% 41%;
+  --ink-success: 152 65% 26%;
+
+  /* brand palette, verbatim names from the design system */
+  --viabe-saffron: 25 95% 50%;
+  --viabe-gold: 42 88% 55%;
+  --viabe-deep-green: 162 55% 18%;
+  --viabe-charcoal: 222 30% 12%;
+  --viabe-warm-cream: 42 30% 97%;
+  --success: 152 65% 32%;
+  --vri-good: 142 65% 38%;
+  --vri-medium: 38 88% 50%;
+
   --radius: 0.625rem;
 
   /* primary gradient — hero / CTAs */
@@ -103,6 +123,22 @@
   --destructive: 0 70% 52%;
   --destructive-foreground: 42 20% 95%;
 
+  /* dark: the base colours already clear AA, so the inks ARE those colours —
+     except --ink-destructive, which has no headroom over its own tint. */
+  --ink-primary: 25 95% 50%;
+  --ink-gold: 42 88% 55%;
+  --ink-destructive: 0 84% 67%;
+  --ink-success: 152 60% 50%;
+  --viabe-saffron: 25 95% 50%;
+  --viabe-gold: 42 88% 55%;
+  --viabe-deep-green: 162 55% 22%;
+  --viabe-charcoal: 42 20% 92%;
+  --viabe-warm-cream: 222 30% 8%;
+  --success: 152 60% 50%;
+  --vri-good: 142 65% 45%;
+  --vri-medium: 38 88% 55%;
+
+
   /* brand-named aliases */
   --gold: 42 88% 55%;
   --gold-foreground: 222 30% 12%;
@@ -150,6 +186,21 @@
   --color-gold: hsl(var(--gold));
   --color-gold-foreground: hsl(var(--gold-foreground));
   --color-ink: hsl(var(--ink));
+
+  /* AA-safe glyph inks — text/icons only (see the note in :root) */
+  --color-ink-primary: hsl(var(--ink-primary));
+  --color-ink-gold: hsl(var(--ink-gold));
+  --color-ink-destructive: hsl(var(--ink-destructive));
+  --color-ink-success: hsl(var(--ink-success));
+
+  --color-viabe-saffron: hsl(var(--viabe-saffron));
+  --color-viabe-gold: hsl(var(--viabe-gold));
+  --color-viabe-deep-green: hsl(var(--viabe-deep-green));
+  --color-success: hsl(var(--success));
+
+  /* Viabe type pairing: Space Grotesk for display/UI-bold, DM Sans for body */
+  --font-display: var(--font-space-grotesk), 'Space Grotesk', var(--font-noto-devanagari), system-ui, sans-serif;
+  --font-sans: var(--font-dm-sans), 'DM Sans', var(--font-noto-devanagari), system-ui, sans-serif;
 
   --color-score-good: hsl(var(--score-good));
   --color-score-medium: hsl(var(--score-medium));

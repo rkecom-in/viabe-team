@@ -15,7 +15,7 @@ import time
 from typing import Any
 
 from fastapi import APIRouter, Header, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 router = APIRouter()
 
@@ -45,12 +45,20 @@ _founding_cache: dict[str, Any] = {"value": None, "expiry": 0.0}
 
 
 class SignupBody(BaseModel):
+    # 2026-08-21 (Fazal): "The create payload shouldn't be expecting or even accepting those 2
+    # fields." city and business_type are auto-detected, so they are not part of this contract —
+    # and extra='forbid' means sending one is a 422 rather than a value we quietly ignore. Pydantic
+    # drops unknown keys by default, which would have made "not accepted" indistinguishable from
+    # "accepted and discarded".
+    model_config = ConfigDict(extra="forbid")
+
     business_name: str = Field(..., min_length=1, max_length=200)
     owner_name: str = Field(..., min_length=1, max_length=120)
     whatsapp_number: str = Field(..., min_length=1, max_length=20)
-    preferred_language: str = Field(..., min_length=2, max_length=2)
-    city: str = Field(..., min_length=1, max_length=120)
-    business_type: str = Field(..., min_length=1, max_length=40)
+    # 2026-08-21: the owner is ASKED which language we communicate in — en | hinglish | hi. The
+    # 2-char cap predated 'hinglish' and would have rejected it at the schema boundary before
+    # _validate ever saw it. Range-checked against SUPPORTED_OWNER_LANGS in run_signup.
+    preferred_language: str = Field(..., min_length=2, max_length=8)
     consent_dpdpa: bool
     consent_residency: bool
     # VT-408: the GSTIN to verify before the tenant is created (verify-then-create). The web

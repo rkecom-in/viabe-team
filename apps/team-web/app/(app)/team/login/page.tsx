@@ -8,15 +8,30 @@
  *
  * Client component: the two-step flow (phone → code) is held in local state;
  * the actual auth happens server-side in the API routes.
+ *
+ * 2026-08-21 — restyled to the Viabe design scheme from the Claude Design
+ * "Viabe Reports" project (`Signin Flow.dc.html`). Presentation only: the request,
+ * the generic response handling and the query-string handoff to the code step are
+ * unchanged, as are the e2e hooks (`data-area`, `data-step`, `data-element`,
+ * `data-state`). The prototype's "no account uses this number" screen is deliberately
+ * NOT implemented — see signin-copy.ts; it would leak the tenant existence this
+ * endpoint is generic to protect.
  */
 
 'use client'
 
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
+import Image from 'next/image'
+
+import * as ui from '@/lib/viabe-ui'
+import { type Lang, ts } from './signin-copy'
+
+const PHONE_RE = /^[6-9]\d{9}$/
 
 export default function OwnerLoginPage() {
   const router = useRouter()
+  const [lang, setLang] = useState<Lang>('en')
   const [phone, setPhone] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -24,6 +39,14 @@ export default function OwnerLoginPage() {
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault()
     setError(null)
+    if (!phone) {
+      setError(ts(lang, 'errRequired'))
+      return
+    }
+    if (!PHONE_RE.test(phone)) {
+      setError(ts(lang, 'errPhone'))
+      return
+    }
     setSubmitting(true)
     try {
       const res = await fetch('/api/team/auth/request-otp', {
@@ -33,74 +56,100 @@ export default function OwnerLoginPage() {
       })
       if (!res.ok) {
         const data = (await res.json().catch(() => ({}))) as { error?: string }
-        setError(data.error ?? 'Could not send a code. Try again.')
+        setError(data.error ?? ts(lang, 'sendFailed'))
         return
       }
       // Carry the entered phone to the code step (never persisted server-side
       // between steps — re-sent on verify). Encoded in the query string.
       router.push(`/team/login/code?phone=${encodeURIComponent(phone)}`)
     } catch {
-      setError('Network error. Try again.')
+      setError(ts(lang, 'networkError'))
     } finally {
       setSubmitting(false)
     }
   }
 
   return (
-    <main
-      className="min-h-screen flex items-center justify-center bg-gray-50 p-4"
-      data-area="team-owner-login"
-    >
-      <div className="w-full max-w-md bg-white shadow-md rounded-lg p-8 space-y-6">
-        <header className="text-center">
-          <h1 className="text-2xl font-semibold text-gray-900">
-            Sign in to Viabe
-          </h1>
-          <p className="text-sm text-gray-600 mt-2">
-            Enter your mobile number — we&apos;ll send a code on WhatsApp.
-          </p>
-        </header>
-
-        <form onSubmit={onSubmit} className="space-y-4" data-step="phone">
-          <div>
-            <label
-              htmlFor="phone"
-              className="block text-sm font-medium text-gray-700 mb-1"
-            >
-              Mobile number
-            </label>
-            <input
-              id="phone"
-              name="phone"
-              type="tel"
-              inputMode="tel"
-              autoComplete="tel"
-              required
-              value={phone}
-              onChange={(e) => setPhone(e.target.value)}
-              placeholder="+91 98765 43210"
-              className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-            />
+    <div className={`${ui.page} flex flex-col`} data-area="team-owner-login">
+      <header className={ui.header}>
+        <Image
+          src="/brand/header-logo-light.webp"
+          alt="Viabe"
+          width={173}
+          height={34}
+          priority
+          className="h-[34px] w-auto"
+        />
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-muted-foreground">{ts(lang, 'langLabel')}</span>
+          <div className={ui.langToggle}>
+            <button type="button" onClick={() => setLang('en')} aria-pressed={lang === 'en'} className={ui.langButton(lang === 'en')}>
+              English
+            </button>
+            <button type="button" onClick={() => setLang('hi')} aria-pressed={lang === 'hi'} className={ui.langButton(lang === 'hi')}>
+              हिन्दी
+            </button>
           </div>
-          <button
-            type="submit"
-            disabled={submitting}
-            data-element="send-code-button"
-            className="w-full bg-blue-600 hover:bg-blue-700 disabled:opacity-60 text-white font-medium py-2 px-4 rounded-md shadow-sm transition-colors"
-          >
-            {submitting ? 'Sending…' : 'Send code'}
-          </button>
-        </form>
+        </div>
+      </header>
 
-        {error ? (
-          <p
-            data-state="error"
-            className="text-sm text-red-700 bg-red-50 border border-red-200 rounded p-3"
-          >
-            {error}
+      <main className="flex flex-1 items-start justify-center px-4 py-6 sm:items-center sm:px-8 sm:py-12">
+        <div className="flex w-full max-w-[460px] flex-col gap-5">
+          <div className="flex flex-col gap-2">
+            <h1 className={`${ui.h1} text-2xl sm:text-[28px]`}>{ts(lang, 'h1')}</h1>
+            <p className={ui.body}>{ts(lang, 'sub')}</p>
+          </div>
+
+          <section className={ui.panel}>
+            <form onSubmit={onSubmit} className="flex flex-col gap-4.5" data-step="phone">
+              <label className={ui.fieldLabel} htmlFor="phone">
+                <span className={ui.fieldLabelText}>{ts(lang, 'phoneLabel')}</span>
+                <span className="flex items-stretch">
+                  <span className={ui.phonePrefix}>+91</span>
+                  <input
+                    id="phone"
+                    name="phone"
+                    type="tel"
+                    inputMode="numeric"
+                    autoComplete="tel-national"
+                    required
+                    value={phone}
+                    onChange={(e) => { setPhone(e.target.value.replace(/\D/g, '').slice(0, 10)); setError(null) }}
+                    placeholder="98765 43210"
+                    className={ui.phoneField(Boolean(error))}
+                  />
+                </span>
+                <span className={ui.hint}>{ts(lang, 'phoneHint')}</span>
+              </label>
+
+              {error ? (
+                <div data-state="error" role="alert" className={ui.alertError}>
+                  <p className={ui.alertBody}>{error}</p>
+                </div>
+              ) : null}
+
+              <button
+                type="submit"
+                disabled={submitting}
+                data-element="send-code-button"
+                className={ui.primaryButton(submitting)}
+              >
+                {submitting ? ts(lang, 'sending') : ts(lang, 'sendCta')}
+              </button>
+
+              <p className={`${ui.hint} text-center`}>{ts(lang, 'noPassword')}</p>
+            </form>
+          </section>
+
+          <p className={`${ui.bodySm} text-center`}>
+            {ts(lang, 'newHere')}{' '}
+            <a href="/team/signup" className="font-semibold text-ink-primary underline">
+              {ts(lang, 'createAccount')}
+            </a>
           </p>
-        ) : null}
-      </div>
-    </main>
+          <p className={`${ui.hint} text-center`}>{ts(lang, 'footer')}</p>
+        </div>
+      </main>
+    </div>
   )
 }

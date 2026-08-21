@@ -140,20 +140,59 @@ def taxonomy_label(key: str) -> tuple[str, str]:
 # floor for when the LLM is unavailable, not a precision classifier. Order matters only for the
 # tie-break (first key with the most hits wins); ``other`` is the floor when nothing matches.
 _KEYWORDS: dict[str, tuple[str, ...]] = {
-    # The RKeCom class: e-commerce / software / online retail-tech → 'services' (the closest coarse
-    # bucket; there is no dedicated 'ecommerce'/'software' key — these route to local 'services').
+    # 2026-08-21: `software_it` and `ecommerce` now EXIST as taxonomy keys, so the RKeCom class no
+    # longer has to route to local `services`. That workaround was the residue of the very defect
+    # this module was opened for — RKeCom is SaaS selling business-intelligence reports, and calling
+    # it "Local services (repair etc.)" is a different wrong answer from "Telecommunications", not a
+    # right one. `services` keeps ONLY the local-repair sense.
     # DISTINCTIVE tokens only — 'service'/'services'/'store'/'online'/'retail' are deliberately
     # EXCLUDED (too generic: 'Telecommunications service provider' would spuriously match on 'service'
     # and the mis-category would falsely "agree", masking the conflict the domain is supposed to win).
-    "services": (
+    "software_it": (
+        "software",
+        "saas",
+        "technolog",
+        "infotech",
+        "it services",
+        "app development",
+        "analytics",
+        "business intelligence",
+        "dashboard",
+    ),
+    "ecommerce": (
         "ecom",
         "ecommerce",
         "commerce",
-        "software",
-        "saas",
         "shopify",
-        "repair",
+        "marketplace",
+        "d2c",
         "garment-tech",
+    ),
+    "professional": (
+        "consult",
+        "chartered accountant",
+        "advocate",
+        "legal",
+        "law firm",
+        "agency",
+        "architect",
+        "audit",
+        "recruit",
+    ),
+    "manufacturing": ("manufactur", "factory", "industries", "fabricat", "engineering works"),
+    "wholesale": ("wholesale", "distribut", "traders", "trading co", "c&f", "stockist"),
+    "realestate": ("realty", "real estate", "builder", "construction", "properties", "infra"),
+    "logistics": ("logistic", "courier", "transport", "freight", "packers", "movers"),
+    "hospitality": ("hotel", "resort", "homestay", "travel", "tours", "banquet"),
+    "agriculture": ("agri", "farm", "seeds", "fertiliser", "fertilizer", "horticultur"),
+    "services": (
+        "repair",
+        "servicing",
+        "plumb",
+        "electrician",
+        "carpenter",
+        "pest control",
+        "laundry",
     ),
     "kirana": ("kirana", "grocery", "general store", "provision", "supermarket"),
     "restaurant": ("restaurant", "dhaba", "diner", "eatery", "food"),
@@ -393,7 +432,7 @@ def _default_llm_reconcile(
         f"  gst_nature_of_business: {gst_nature or 'none'}\n\n"
         "Example: name 'RKeCom Services', domain 'rkecom.in', GBP category 'Telecommunications service "
         "provider' → the domain+name say e-commerce/software, so the GBP 'Telecommunications' is a "
-        "mis-category; pick the e-commerce/software/online-retail bucket, NOT a telecom one.\n"
+        "mis-category; pick `software_it` or `ecommerce`, NOT a telecom one and NOT local `services`.\n"
         "Reply with ONE key from the taxonomy above."
     )
     text = structured_text_call(

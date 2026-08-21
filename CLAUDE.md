@@ -37,7 +37,7 @@ If the snapshot's HEAD / IN FLIGHT / NEXT ACTION doesn't match what `git log` sh
 
 **Binding launch milestone:** Reports-Jun15 (2026-06-15). Sprints 1+2 ship for that gate; everything else is ship-thin.
 
-**Repo:** `github.com/rkecom-in/viabe-team` (**private** — auth required for fetch/clone). Local clone at `/Users/fazalkhan/development/viabe-team`. **Main protection = an account-level ruleset; "Require status checks to pass" was turned OFF 2026-05-30 (VT-245)** — CI checks no longer block merges. The **local pre-push hook** (`scripts/git-hooks/pre-push`, install via `scripts/install-hooks.sh`) is the safety gate; CI is a non-blocking backstop on PRs. Route-via-PR remains a convention, not an enforced gate.
+**Repo:** `github.com/rkecom-in/viabe-team` (**private** — auth required for fetch/clone). Local clone at `/Users/fazalkhan/development/viabe-team`. **Main protection = an account-level ruleset. CORRECTED 2026-08-20: `ci-success` IS a required status check on `main`** — the PR #559 promotion merge was blocked by it (`Required status check "ci-success" is expected`), so the older "status checks turned OFF 2026-05-30" note is wrong for `main` and has been removed. CI DOES gate a merge to `main`. (`dev` is unaffected.) A `main` PR also needs a numeric VT ref in its title — the `pr-title` gate rejects titles without one. The **local pre-push hook** (`scripts/git-hooks/pre-push`, install via `scripts/install-hooks.sh`) is the safety gate; CI is a non-blocking backstop on PRs. Route-via-PR remains a convention, not an enforced gate.
 
 ---
 
@@ -156,7 +156,7 @@ Fazal grants scope at **batch level** ("ship batch 9," "complete the queued task
 - **`main` is Fazal-authorized ONLY.** CC NEVER merges to `main` without an explicit Fazal `type: task` promotion instruction (the new Pillar-7 gate). A `dev`→`main` promotion PR opens only on Fazal's word; Cowork relays it. A PR targeting `main` is forbidden unless it's that authorized promotion.
 - Flow: feature branch → PR into `dev` → CC self-merge on green → Dev deploy → phase E2E → **Fazal authorizes dev→main promotion** → Prod.
 
-Main protection is an account-level ruleset, but **"Require status checks to pass" is OFF** (Fazal, 2026-05-30) — CI no longer gates merges. The **local pre-push hook is the safety gate**; run `scripts/install-hooks.sh` once after cloning. CI is a non-blocking backstop on PRs.
+Main protection is an account-level ruleset. **CORRECTED 2026-08-20: `ci-success` is REQUIRED on `main`** and blocked the #559 promotion merge until CI went green; the older "OFF" note held for `dev` and was wrong for `main`. The **local pre-push hook is the safety gate**; run `scripts/install-hooks.sh` once after cloning. CI is a non-blocking backstop on PRs.
 
 - **Before every push:** the `pre-push` hook runs the fast CI-equivalent suite (ruff + dep-less smoke + team-web tsc/vitest/lint + a conditional orchestrator docker build). It aborts the push on failure. Bypass with `git push --no-verify` (sparingly). Never push code the hook (or the equivalent local commands) hasn't passed — failing CI burns Actions minutes.
 - **Trigger-diet (VT-245):** ci.yml + deploy-dev.yml `paths-ignore` docs/sprint/session/cross-workflow changes, so those PRs/merges run 0 jobs.
