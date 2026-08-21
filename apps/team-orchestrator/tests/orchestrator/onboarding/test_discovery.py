@@ -393,3 +393,71 @@ def test_knowyourgst_l1_cache_hit_skips_everything(monkeypatch):
     assert db_calls["n"] == 0, "DB must not be queried on L1 hit"
     assert scrape_calls["n"] == 0
     assert len(result) == 1
+
+
+# ---------------------------------------------------------------------------
+# VT-776 — the discovery CASCADE.
+# These two sources used to be kicked off concurrently, so every signup paid for a Gemini
+# call even when the scrape had already found the GSTIN. knowyourgst runs first now; the
+# LLM leg is billed only when the scrape came up empty.
+# ---------------------------------------------------------------------------
+def _kyg_row(gstin: str = "27AAKCR3738B1ZE") -> dict[str, Any]:
+    return {"candidate_gstin": gstin, "trade_name": "RKECOM SERVICES (OPC) PRIVATE LIMITED"}
+
+
+def test_cascade_skips_llm_when_scrape_found_a_gstin(monkeypatch):
+    """Primary hit -> the LLM source must never run, and its row must still reach a TERMINAL
+    state (a 'running' row would hang the poller for its whole window)."""
+    from orchestrator.api import discovery
+
+    ran: list[str] = []
+    updates: list[tuple] = []
+
+    async def _fake_run_source(discovery_id, source, name, city):
+        ran.append(source)
+        return [_kyg_row()] if source == "knowyourgst" else []
+
+    monkeypatch.setattr(discovery, "_run_source", _fake_run_source)
+    monkeypatch.setattr(discovery, "_update_source_row",
+                        lambda *a: updates.append(a))
+
+    asyncio.run(discovery._run_discovery_cascade(uuid.uuid4(), "RKeCom Services", "Mumbai"))
+
+    assert ran == ["knowyourgst"], f"LLM leg was billed anyway: {ran}"
+    assert len(updates) == 1
+    _did, source, status, reason, cands, _ms = updates[0]
+    assert (source, status, reason, cands) == ("llm", "complete", "skipped_primary_hit", [])
+
+
+def test_cascade_runs_llm_when_scrape_found_nothing(monkeypatch):
+    from orchestrator.api import discovery
+
+    """Scrape empty (site down / no row) -> the secondary runs."""
+    ran: list[str] = []
+
+    async def _fake_run_source(discovery_id, source, name, city):
+        ran.append(source)
+        return []
+
+    monkeypatch.setattr(discovery, "_run_source", _fake_run_source)
+    monkeypatch.setattr(discovery, "_update_source_row", lambda *a: None)
+
+    asyncio.run(discovery._run_discovery_cascade(uuid.uuid4(), "Nope Pvt", "Mumbai"))
+    assert ran == ["knowyourgst", "llm"]
+
+
+def test_cascade_runs_llm_when_scrape_rows_carry_no_gstin(monkeypatch):
+    from orchestrator.api import discovery
+
+    """A name-only candidate is NOT a GSTIN — the secondary must still run."""
+    ran: list[str] = []
+
+    async def _fake_run_source(discovery_id, source, name, city):
+        ran.append(source)
+        return [{"candidate_gstin": "", "trade_name": "SOME CO"}] if source == "knowyourgst" else []
+
+    monkeypatch.setattr(discovery, "_run_source", _fake_run_source)
+    monkeypatch.setattr(discovery, "_update_source_row", lambda *a: None)
+
+    asyncio.run(discovery._run_discovery_cascade(uuid.uuid4(), "Some Co", "Mumbai"))
+    assert ran == ["knowyourgst", "llm"]

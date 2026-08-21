@@ -1,4 +1,5 @@
-"""VT-507 — async parallel entity discovery (start / poll).  Internal-secret gated
+"""VT-507 — async entity discovery (start / poll). VT-776: the two sources CASCADE
+(knowyourgst first, LLM only on an empty scrape) rather than running in parallel. Internal-secret gated
 (team-web proxies; all vendor calls happen orchestrator-side).
 
 POST /api/orchestrator/onboard/discovery/start  {business_name, city}
@@ -61,8 +62,9 @@ async def discovery_start(
     body: DiscoveryStartBody,
     x_internal_secret: str | None = Header(default=None, alias="X-Internal-Secret"),
 ) -> dict[str, Any]:
-    """Kick BOTH sources (LLM + knowyourgst) concurrently in the background, return a
-    discovery_id immediately (~50ms). Never blocks on the scrape or LLM call.
+    """Kick the discovery CASCADE in the background and return a discovery_id immediately
+    (~50ms). Never blocks on the scrape or LLM call. knowyourgst runs first; the LLM leg runs
+    only if the scrape produced no GSTIN (VT-776).
 
     A cache hit at kick time means the source completes before the first poll."""
     if not _verify_internal_secret(x_internal_secret):
@@ -77,8 +79,8 @@ async def discovery_start(
     _insert_running_rows(discovery_id, list(_SOURCES))
 
     loop = asyncio.get_running_loop()
-    loop.create_task(_run_source(discovery_id, "knowyourgst", name, city))
-    loop.create_task(_run_source(discovery_id, "llm", name, city))
+    # VT-776: CASCADE, not two parallel kicks — the LLM leg is billed only if the scrape is empty.
+    loop.create_task(_run_discovery_cascade(discovery_id, name, city))
 
     return {"discovery_id": str(discovery_id)}
 
@@ -175,9 +177,11 @@ def discovery_poll(
 
 async def _run_source(
     discovery_id: uuid.UUID, source: str, name: str, city: str
-) -> None:
+) -> list[dict[str, Any]]:
     """Background coroutine: run one discovery source in a thread (blocking I/O), write
-    to entity_discovery_requests when done. Never raises out — fail-soft per source."""
+    to entity_discovery_requests when done. Never raises out — fail-soft per source.
+
+    Returns the candidates it found so a caller can CASCADE on the result (VT-776)."""
     t0 = time.monotonic()
     caught_exc: Exception | None = None
     try:
@@ -209,6 +213,31 @@ async def _run_source(
         latency_ms=latency_ms,
         exc=caught_exc,
     )
+    return candidates
+
+
+async def _run_discovery_cascade(
+    discovery_id: uuid.UUID, name: str, city: str
+) -> None:
+    """VT-776 — run knowyourgst FIRST and spend the billed LLM call only if it came up empty.
+
+    These two sources used to be kicked off concurrently, so every signup paid for a Gemini call
+    even when the scrape had already found the GSTIN. knowyourgst is the cheaper and
+    higher-precision source; the LLM is the fallback for when it is down or has no row.
+
+    The skipped LLM row is still written as a TERMINAL state. ``overall_complete`` requires every
+    source to be in ("complete", "error") — leaving it "running" would hang the poller for its
+    full window. ``failure_reason='skipped_primary_hit'`` records WHY it never ran, so the debug
+    surface does not show a phantom zero-result LLM call that no one made.
+
+    Worst case is now serial (~10s scrape + ~8s LLM) against a 150s poll window, so the added
+    latency is well inside budget.
+    """
+    kyg_candidates = await _run_source(discovery_id, "knowyourgst", name, city)
+    if any((c.get("candidate_gstin") or "").strip() for c in kyg_candidates):
+        _update_source_row(discovery_id, "llm", "complete", "skipped_primary_hit", [], 0)
+        return
+    await _run_source(discovery_id, "llm", name, city)
 
 
 # ---------------------------------------------------------------------------
