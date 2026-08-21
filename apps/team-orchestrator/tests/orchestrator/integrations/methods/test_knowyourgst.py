@@ -123,7 +123,7 @@ def test_search_short_query_skips_fetch() -> None:
 
 
 def test_search_no_key_no_fetch_fn_fails_open(monkeypatch) -> None:
-    monkeypatch.delenv("SCRAPINGBEE_API_KEY", raising=False)
+    monkeypatch.delenv("FIRECRAWL_API_KEY", raising=False)
     assert k.KnowYourGSTScraper().search("rkecom") == []
 
 
@@ -153,9 +153,9 @@ def test_search_caches_successful_result() -> None:
 
 
 def test_scraper_configured_reflects_key(monkeypatch) -> None:
-    monkeypatch.delenv("SCRAPINGBEE_API_KEY", raising=False)
+    monkeypatch.delenv("FIRECRAWL_API_KEY", raising=False)
     assert k.scraper_configured() is False
-    monkeypatch.setenv("SCRAPINGBEE_API_KEY", "x")
+    monkeypatch.setenv("FIRECRAWL_API_KEY", "x")
     assert k.scraper_configured() is True
 
 
@@ -210,12 +210,12 @@ def test_bounded_retry_fires_on_empty_live_scrape(monkeypatch) -> None:
     call_count = {"n": 0}
     real_html = _RESULT_HTML
 
-    def fake_scrapingbee(self, query: str) -> str:  # noqa: ANN001
+    def fake_firecrawl(self, query: str) -> str:  # noqa: ANN001
         call_count["n"] += 1
         return "<html>no results</html>" if call_count["n"] == 1 else real_html
 
-    monkeypatch.setattr(k.KnowYourGSTScraper, "_scrapingbee_fetch", fake_scrapingbee)
-    monkeypatch.setenv("SCRAPINGBEE_API_KEY", "fakekey")
+    monkeypatch.setattr(k.KnowYourGSTScraper, "_firecrawl_fetch", fake_firecrawl)
+    monkeypatch.setenv("FIRECRAWL_API_KEY", "fakekey")
 
     scraper = k.KnowYourGSTScraper()
     result = scraper.search("rkecom")

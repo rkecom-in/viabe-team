@@ -57,7 +57,8 @@ LlmFn = Callable[[str, str], str]
 # VT-732: the COMPLEX reasoning tier for the LLM-discovery leg (was a hardcoded claude-opus-4-8).
 # Server-side web_search is bound by the seam in the resolved provider's own native form and is gated
 # by the TEAM_ENABLE_WEB_SEARCH master flag; the strict-JSON contract below is provider-independent.
-_LLM_DISCOVERY_TIER = "complex"
+# VT-776: the discovery tier (Gemini + google_search grounding), not the Manager's "complex".
+_LLM_DISCOVERY_TIER = "discovery"
 
 
 @dataclass(frozen=True)
@@ -95,14 +96,23 @@ def fetch_candidates(
     if not name:
         return []
     candidates: list[EntityCandidate] = []
-    candidates.extend(_knowyourgst_candidates(name, kyg_scraper))  # VT-495 — name→GSTIN, runs first
+    kyg = _knowyourgst_candidates(name, kyg_scraper)  # VT-495 — name→GSTIN, the PRIMARY leg
+    candidates.extend(kyg)
     candidates.extend(_web_candidates(name, city, search_fn))
     candidates.extend(_cin_candidates(name, city, search_fn))  # VT-449 registry leg → CIN → MCA
     candidates.extend(_gbp_candidates(name, city, gbp_fetch_fn))
-    # VT-452 LLM web-search leg — gated OFF by default; an injected llm_fn forces it on for tests.
+    # VT-452 LLM web-search leg — the SECONDARY. VT-776 makes it a CASCADE rather than an
+    # always-on parallel leg: knowyourgst.com is the cheaper and higher-precision source but is
+    # not reliably up, so the billed LLM call is spent ONLY when the scrape produced no GSTIN.
+    # Both failing is a normal outcome, not an error — the owner is then asked to type the GSTIN,
+    # which reaches the same Sandbox verify gate (VT-406/408) that every discovered candidate does.
+    # An injected llm_fn still opts the leg IN without the flag (tests exercise it with no key),
+    # but it does NOT bypass the cascade — the skip-when-primary-succeeded rule holds on every path,
+    # so the behaviour under test is the behaviour in production.
     from orchestrator.feature_flags import llm_discovery_enabled
 
-    if llm_fn is not None or llm_discovery_enabled():
+    primary_found_gstin = any(c.candidate_gstin for c in kyg)
+    if (llm_fn is not None or llm_discovery_enabled()) and not primary_found_gstin:
         candidates.extend(_llm_candidates(name, city, llm_fn))
     # De-dup by (gstin or cin or trade_name); keep the first seen.
     seen: set[str] = set()

@@ -30,7 +30,6 @@ in-process TTL cache (repeat queries don't re-bill) + a sliding-window rate-limi
 from __future__ import annotations
 
 import html as _html
-import json
 import logging
 import os
 import re
@@ -40,14 +39,19 @@ from collections import deque
 
 logger = logging.getLogger(__name__)
 
-_KEY_ENV = "SCRAPINGBEE_API_KEY"
-_SCRAPINGBEE_URL = "https://app.scrapingbee.com/api/v1/"
+# VT-776 (Fazal 2026-08-21): Firecrawl replaces ScrapingBee as the headless fetcher. ScrapingBee's
+# floor is $20 / 75k credits, which we do not want at this stage; Firecrawl gives 1000 requests a
+# month on the entry plan — the right order of magnitude for launch volumes. The scrape JOB is
+# unchanged (drive the by-name form, return rendered HTML) and `_parse_results` is untouched, so
+# this is a fetcher swap, not a discovery-logic change.
+_KEY_ENV = "FIRECRAWL_API_KEY"
+_FIRECRAWL_URL = "https://api.firecrawl.dev/v2/scrape"
 _FORM_URL = "https://www.knowyourgst.com/gst-number-search/by-name-pan/"
 # The search form's field + submit (reverse-engineered). The CSS selectors drive the headless fill.
 _QUERY_FIELD_SELECTOR = "#gstnumber"  # <input name="gstnum" id="gstnumber" minlength=5 maxlength=50>
 _SUBMIT_SELECTOR = 'input[value="Search GST number"]'
 _RENDER_WAIT_MS = 6000  # let the POST submit + server-rendered results settle before capture
-_TIMEOUT_S = 120.0  # render_js + js_scenario is slow; generous so a slow-but-eventual 200 isn't lost
+_TIMEOUT_S = 120.0  # headless render + actions is slow (~10s observed); generous so a slow 200 is not lost
 _MIN_QUERY_LEN = 5  # the site rejects <5 chars (form minlength); skip the call entirely
 
 # GSTIN: 2 state digits + PAN(5 letters + 4 digits + 1 letter) + 1 entity char + 'Z' + 1 checksum.
@@ -195,7 +199,7 @@ def _rate_allow() -> bool:
 
 
 class KnowYourGSTScraper:
-    """ScrapingBee-backed ``GSTSearcher``. ``fetch_fn`` is injectable for unit tests (no network /
+    """Firecrawl-backed ``GSTSearcher``. ``fetch_fn`` is injectable for unit tests (no network /
     credits): ``(query) -> rendered_html``. With no ``fetch_fn`` and no key, ``search`` fail-opens
     to ``[]``."""
 
@@ -224,7 +228,7 @@ class KnowYourGSTScraper:
             logger.warning("knowyourgst: rate-limit window saturated — skipping search (fail-open)")
             return []
         try:
-            html_text = (self._fetch_fn or self._scrapingbee_fetch)(query)
+            html_text = (self._fetch_fn or self._firecrawl_fetch)(query)
         except Exception:  # noqa: BLE001 — fragile network/vendor; degrade, never raise into signup
             logger.warning("knowyourgst: fetch failed for query (degrade to none)", exc_info=True)
             return []
@@ -240,7 +244,7 @@ class KnowYourGSTScraper:
             logger.debug("knowyourgst: first scrape returned empty — retrying once")
             if _rate_allow():  # consume a second rate slot for the retry
                 try:
-                    html_text = self._scrapingbee_fetch(query)
+                    html_text = self._firecrawl_fetch(query)
                     rows = _parse_results(html_text)
                 except Exception:  # noqa: BLE001 — retry is best-effort; original empty result stands
                     rows = []
@@ -252,34 +256,37 @@ class KnowYourGSTScraper:
             _db_cache_put(cache_key, rows)
         return rows
 
-    def _scrapingbee_fetch(self, query: str) -> str:
-        """Drive the Django by-name POST form through ScrapingBee's headless browser (fill + submit +
-        wait), returning the rendered results HTML. Raises on transport/HTTP error → ``search`` degrades."""
+    def _firecrawl_fetch(self, query: str) -> str:
+        """Drive the Django by-name POST form through Firecrawl's headless browser (focus + type +
+        submit + wait), returning the rendered results HTML. Raises on transport/HTTP error →
+        ``search`` degrades to []."""
         import httpx
 
-        scenario = {
-            "instructions": [
-                {"fill": [_QUERY_FIELD_SELECTOR, query]},
-                {"click": _SUBMIT_SELECTOR},
-                {"wait": _RENDER_WAIT_MS},
-            ]
-        }
-        params = {
-            "api_key": self._api_key,
+        body = {
             "url": _FORM_URL,
-            "render_js": "true",
-            "js_scenario": json.dumps(scenario),
+            "formats": ["html"],
+            # Mirrors the ScrapingBee js_scenario this replaced. The click on the input FIRST is
+            # required: Firecrawl's `write` types into the FOCUSED element and takes no selector.
+            "actions": [
+                {"type": "click", "selector": _QUERY_FIELD_SELECTOR},
+                {"type": "write", "text": query},
+                {"type": "click", "selector": _SUBMIT_SELECTOR},
+                {"type": "wait", "milliseconds": _RENDER_WAIT_MS},
+            ],
         }
-        resp = httpx.get(_SCRAPINGBEE_URL, params=params, timeout=_TIMEOUT_S)
+        resp = httpx.post(
+            _FIRECRAWL_URL,
+            headers={"Authorization": f"Bearer {self._api_key}"},
+            json=body,
+            timeout=_TIMEOUT_S,
+        )
         if resp.is_error:
-            # NEVER raise_for_status() here. httpx puts the FULL request URL in the exception
-            # message, and the api_key is a query PARAMETER — so a 401 produced an exception whose
-            # text carried the live key, and `search` logs that with exc_info=True. Every failed
-            # scrape was therefore writing the ScrapingBee key into the Railway logs (found
-            # 2026-08-21 while diagnosing a "couldn't find the company" report; the key was live at
-            # the time and had to be rotated). Raise a value-free error instead: status only.
+            # Status only — never raise_for_status(), never interpolate the response body. The key
+            # rides in the Authorization HEADER here (not the URL as it did with ScrapingBee), so it
+            # is not in the request line; we keep the value-free discipline regardless because
+            # `search` logs this with exc_info=True. See the 2026-08-21 ScrapingBee key leak.
             raise RuntimeError(
-                f"knowyourgst: ScrapingBee returned HTTP {resp.status_code} "
+                f"knowyourgst: Firecrawl returned HTTP {resp.status_code} "
                 f"(key {'present' if self._api_key else 'absent'}; url and key withheld)"
             )
-        return resp.text
+        return ((resp.json() or {}).get("data") or {}).get("html") or ""

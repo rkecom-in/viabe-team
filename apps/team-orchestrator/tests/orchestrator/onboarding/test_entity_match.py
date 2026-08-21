@@ -566,3 +566,57 @@ def test_vt495_knowyourgst_leg_dedups_gstin_against_web_leg() -> None:
     )
     matching = [c for c in cands if c.candidate_gstin == _RKECOM_GSTIN]
     assert len(matching) == 1 and matching[0].source == "knowyourgst"  # first-seen wins
+
+
+# ---------------------------------------------------------------------------
+# VT-776 — the discovery CASCADE: the billed LLM leg runs only when the scrape came up empty.
+# knowyourgst.com is cheaper and higher-precision but is not reliably up; Gemini + web search is
+# the secondary. Both failing is a normal outcome — the owner then types the GSTIN and reaches the
+# same Sandbox verify gate.
+# ---------------------------------------------------------------------------
+class _StubScraper:
+    def __init__(self, rows): self._rows = rows
+    def search(self, query): return self._rows
+
+
+_KYG_HIT = [{"company_name": "RKECOM SERVICES (OPC) PRIVATE LIMITED",
+             "state": "Maharashtra", "gst_number": "27AAKCR3738B1ZE"}]
+
+
+def test_cascade_skips_llm_when_scrape_found_a_gstin(monkeypatch) -> None:
+    """Primary succeeded -> the LLM leg must NOT be billed."""
+    monkeypatch.setenv("ENABLE_LLM_DISCOVERY", "yes")
+    called: list[str] = []
+
+    def _llm(name, city):
+        called.append(name)
+        return '{"companies": []}'
+
+    out = entity_match.fetch_candidates("RKeCom Services", "Mumbai",
+                              kyg_scraper=_StubScraper(_KYG_HIT), llm_fn=_llm)
+    assert called == [], "LLM leg was billed even though the scrape found a GSTIN"
+    assert [c.candidate_gstin for c in out] == ["27AAKCR3738B1ZE"]
+
+
+def test_cascade_runs_llm_when_scrape_found_nothing(monkeypatch) -> None:
+    """Primary empty (site down / no match) -> the secondary runs and its candidate surfaces."""
+    monkeypatch.setenv("ENABLE_LLM_DISCOVERY", "yes")
+    called: list[str] = []
+
+    def _llm(name, city):
+        called.append(name)
+        return ('{"companies": [{"name": "RKECOM SERVICES (OPC) PRIVATE LIMITED",'
+                ' "gstin": "27AAKCR3738B1ZE", "cin": ""}]}')
+
+    out = entity_match.fetch_candidates("RKeCom Services", "Mumbai",
+                              kyg_scraper=_StubScraper([]), llm_fn=_llm)
+    assert called == ["RKeCom Services"], "secondary did not run after an empty scrape"
+    assert "27AAKCR3738B1ZE" in [c.candidate_gstin for c in out]
+
+
+def test_cascade_both_legs_empty_yields_no_candidates(monkeypatch) -> None:
+    """Both sources failing is a NORMAL outcome, not an exception — the owner is asked to type it."""
+    monkeypatch.setenv("ENABLE_LLM_DISCOVERY", "yes")
+    out = entity_match.fetch_candidates("Zzqxwv Nonexistent Pvt", "Mumbai",
+                              kyg_scraper=_StubScraper([]), llm_fn=lambda n, c: '{"companies": []}')
+    assert out == []

@@ -155,6 +155,12 @@ _TIER_DEFAULTS: dict[str, tuple[str, str]] = {
     "classifier": ("TEAM_MODEL_CLASSIFIER", "claude-haiku-4-5"),
     "specialist": ("TEAM_MODEL_SPECIALIST", "claude-sonnet-5"),
     "review": ("TEAM_MODEL_REVIEW", "claude-opus-4-8"),
+    # VT-776 (Fazal 2026-08-21): entity-discovery gets its OWN tier so the model that hunts a GSTIN
+    # by name can be chosen independently of "complex" (which serves the Manager's reasoning path).
+    # Gemini because this leg is search-grounded extraction, not reasoning: google_search grounding
+    # is native, flash is cheap enough to run per signup, and the output is strict JSON the caller
+    # parses. Repoint with TEAM_MODEL_DISCOVERY without touching any other tier.
+    "discovery": ("TEAM_MODEL_DISCOVERY", "gemini-3.5-flash"),
 }
 
 _DEFAULT_MAX_TOKENS = 4096
