@@ -484,3 +484,22 @@ def test_cascade_name_only_candidate_does_not_stop_the_ladder(monkeypatch):
 
     asyncio.run(discovery._run_discovery_cascade(uuid.uuid4(), "Some Co", "Mumbai"))
     assert ran == ["knowyourgst", "dataforseo", "llm"]
+
+
+def test_dataforseo_empty_result_is_a_clean_completion_not_an_error(monkeypatch):
+    """An honest zero must NOT be a failure_reason.
+
+    `_run_source` maps any reason to status='error', and `both_complete_zero` requires every
+    source to be 'complete'. Reporting zero as a reason made that flag permanently False, and
+    team-web uses it as the ONLY trigger for the honest "we couldn't find it" empty state —
+    so every genuine miss would have rendered as a degraded/error path instead."""
+    from orchestrator.api import discovery
+
+    monkeypatch.setenv("DATAFORSEO_API_BASE64", "x")
+    monkeypatch.setattr(
+        "orchestrator.integrations.methods.dataforseo.search_gstins",
+        lambda name, city, **kw: [],
+    )
+    candidates, reason = discovery._fetch_dataforseo("Nope Pvt", "Mumbai")
+    assert candidates == []
+    assert reason is None, "an honest zero was reported as a failure"

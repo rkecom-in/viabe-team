@@ -326,7 +326,13 @@ def _fetch_dataforseo(name: str, city: str) -> tuple[list[dict[str, Any]], str |
             candidate_gstin=gstin,
             detail=None,
         )))
-    return out, (None if out else "zero_results")
+    # None on an empty result, NOT "zero_results". `_run_source` maps ANY failure_reason to
+    # status="error", and `both_complete_zero` requires every source to be "complete" — so
+    # reporting an honest zero as a reason made that flag permanently False, and team-web uses it
+    # as the ONLY trigger for the "we couldn't find it" empty state. Finding nothing is a clean
+    # completion, exactly as it is for the knowyourgst and LLM fetchers. The VT-515 debug event
+    # still records the zero separately, so the silent-degrade signal is not lost.
+    return out, None
 
 
 def _fetch_llm(name: str, city: str) -> tuple[list[dict[str, Any]], str | None]:
