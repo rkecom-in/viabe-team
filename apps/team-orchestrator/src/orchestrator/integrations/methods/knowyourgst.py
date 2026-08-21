@@ -264,5 +264,15 @@ class KnowYourGSTScraper:
             "js_scenario": json.dumps(scenario),
         }
         resp = httpx.get(_SCRAPINGBEE_URL, params=params, timeout=_TIMEOUT_S)
-        resp.raise_for_status()
+        if resp.is_error:
+            # NEVER raise_for_status() here. httpx puts the FULL request URL in the exception
+            # message, and the api_key is a query PARAMETER — so a 401 produced an exception whose
+            # text carried the live key, and `search` logs that with exc_info=True. Every failed
+            # scrape was therefore writing the ScrapingBee key into the Railway logs (found
+            # 2026-08-21 while diagnosing a "couldn't find the company" report; the key was live at
+            # the time and had to be rotated). Raise a value-free error instead: status only.
+            raise RuntimeError(
+                f"knowyourgst: ScrapingBee returned HTTP {resp.status_code} "
+                f"(key {'present' if self._api_key else 'absent'}; url and key withheld)"
+            )
         return resp.text
