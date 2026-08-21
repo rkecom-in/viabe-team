@@ -98,7 +98,7 @@ def test_start_missing_business_name_returns_422(client, monkeypatch):
     assert r.status_code == 422
 
 
-def test_start_inserts_running_rows_for_both_sources(client, monkeypatch):
+def test_start_inserts_running_rows_for_every_source(client, monkeypatch):
     calls_log: list[Any] = []
 
     def fake_insert(did, sources):
@@ -114,7 +114,7 @@ def test_start_inserts_running_rows_for_both_sources(client, monkeypatch):
     )
     assert r.status_code == 200
     assert len(calls_log) == 1
-    assert calls_log[0] == ["knowyourgst", "llm"]
+    assert calls_log[0] == ["dataforseo", "knowyourgst", "llm"]  # VT-778 third rung
 
 
 # ---------------------------------------------------------------------------
@@ -161,6 +161,8 @@ def test_poll_both_complete_with_candidates(monkeypatch):
     gstin_a = "29ABCDE1234F1Z5"
     gstin_b = "27ZZZZZ9999Z1Z3"
     rows = {
+        "dataforseo": {"source": "dataforseo", "status": "complete",
+                       "failure_reason": "skipped_primary_hit", "candidates": []},
         "llm": {
             "source": "llm", "status": "complete", "failure_reason": None,
             "candidates": [{"trade_name": "Biz A", "source": "llm", "candidate_gstin": gstin_a,
@@ -194,6 +196,7 @@ def test_poll_both_complete_zero_candidates(monkeypatch):
     """BOTH complete with zero candidates → both_complete_zero=True."""
     rows = {
         "llm": {"source": "llm", "status": "complete", "failure_reason": None, "candidates": []},
+        "dataforseo": {"source": "dataforseo", "status": "complete", "failure_reason": None, "candidates": []},
         "knowyourgst": {"source": "knowyourgst", "status": "complete", "failure_reason": None, "candidates": []},
     }
     client = _make_poll_client(monkeypatch, rows)
@@ -207,6 +210,7 @@ def test_poll_one_error_one_zero_not_both_complete_zero(monkeypatch):
     """One source errors, one completes with zero → both_complete_zero must be False (error ≠ zero)."""
     rows = {
         "llm": {"source": "llm", "status": "error", "failure_reason": "no_key", "candidates": []},
+        "dataforseo": {"source": "dataforseo", "status": "complete", "failure_reason": None, "candidates": []},
         "knowyourgst": {"source": "knowyourgst", "status": "complete", "failure_reason": None, "candidates": []},
     }
     client = _make_poll_client(monkeypatch, rows)
@@ -405,9 +409,9 @@ def _kyg_row(gstin: str = "27AAKCR3738B1ZE") -> dict[str, Any]:
     return {"candidate_gstin": gstin, "trade_name": "RKECOM SERVICES (OPC) PRIVATE LIMITED"}
 
 
-def test_cascade_skips_llm_when_scrape_found_a_gstin(monkeypatch):
-    """Primary hit -> the LLM source must never run, and its row must still reach a TERMINAL
-    state (a 'running' row would hang the poller for its whole window)."""
+def test_cascade_stops_at_the_first_rung_that_finds_a_gstin(monkeypatch):
+    """knowyourgst hit => NEITHER paid rung runs, and both get TERMINAL rows (a 'running' row
+    would hang the poller for its whole window)."""
     from orchestrator.api import discovery
 
     ran: list[str] = []
@@ -418,21 +422,40 @@ def test_cascade_skips_llm_when_scrape_found_a_gstin(monkeypatch):
         return [_kyg_row()] if source == "knowyourgst" else []
 
     monkeypatch.setattr(discovery, "_run_source", _fake_run_source)
-    monkeypatch.setattr(discovery, "_update_source_row",
-                        lambda *a: updates.append(a))
+    monkeypatch.setattr(discovery, "_update_source_row", lambda *a: updates.append(a))
 
     asyncio.run(discovery._run_discovery_cascade(uuid.uuid4(), "RKeCom Services", "Mumbai"))
 
-    assert ran == ["knowyourgst"], f"LLM leg was billed anyway: {ran}"
-    assert len(updates) == 1
-    _did, source, status, reason, cands, _ms = updates[0]
-    assert (source, status, reason, cands) == ("llm", "complete", "skipped_primary_hit", [])
+    assert ran == ["knowyourgst"], f"a paid rung ran anyway: {ran}"
+    skipped = {(u[1], u[2], u[3]) for u in updates}
+    assert skipped == {("dataforseo", "complete", "skipped_primary_hit"),
+                       ("llm", "complete", "skipped_primary_hit")}
 
 
-def test_cascade_runs_llm_when_scrape_found_nothing(monkeypatch):
+def test_cascade_falls_to_dataforseo_then_stops(monkeypatch):
+    """Scrape empty, DataForSEO finds one => the LLM rung is never paid for."""
     from orchestrator.api import discovery
 
-    """Scrape empty (site down / no row) -> the secondary runs."""
+    ran: list[str] = []
+    updates: list[tuple] = []
+
+    async def _fake_run_source(discovery_id, source, name, city):
+        ran.append(source)
+        return [_kyg_row()] if source == "dataforseo" else []
+
+    monkeypatch.setattr(discovery, "_run_source", _fake_run_source)
+    monkeypatch.setattr(discovery, "_update_source_row", lambda *a: updates.append(a))
+
+    asyncio.run(discovery._run_discovery_cascade(uuid.uuid4(), "Balaji Wafers", "Rajkot"))
+
+    assert ran == ["knowyourgst", "dataforseo"]
+    assert {(u[1], u[3]) for u in updates} == {("llm", "skipped_primary_hit")}
+
+
+def test_cascade_runs_every_rung_when_none_finds_a_gstin(monkeypatch):
+    """All empty is a NORMAL outcome — every rung runs, then the owner is asked to type it."""
+    from orchestrator.api import discovery
+
     ran: list[str] = []
 
     async def _fake_run_source(discovery_id, source, name, city):
@@ -443,13 +466,13 @@ def test_cascade_runs_llm_when_scrape_found_nothing(monkeypatch):
     monkeypatch.setattr(discovery, "_update_source_row", lambda *a: None)
 
     asyncio.run(discovery._run_discovery_cascade(uuid.uuid4(), "Nope Pvt", "Mumbai"))
-    assert ran == ["knowyourgst", "llm"]
+    assert ran == ["knowyourgst", "dataforseo", "llm"]
 
 
-def test_cascade_runs_llm_when_scrape_rows_carry_no_gstin(monkeypatch):
+def test_cascade_name_only_candidate_does_not_stop_the_ladder(monkeypatch):
+    """A candidate with no GSTIN is not an answer — the next rung must still run."""
     from orchestrator.api import discovery
 
-    """A name-only candidate is NOT a GSTIN — the secondary must still run."""
     ran: list[str] = []
 
     async def _fake_run_source(discovery_id, source, name, city):
@@ -460,4 +483,4 @@ def test_cascade_runs_llm_when_scrape_rows_carry_no_gstin(monkeypatch):
     monkeypatch.setattr(discovery, "_update_source_row", lambda *a: None)
 
     asyncio.run(discovery._run_discovery_cascade(uuid.uuid4(), "Some Co", "Mumbai"))
-    assert ran == ["knowyourgst", "llm"]
+    assert ran == ["knowyourgst", "dataforseo", "llm"]

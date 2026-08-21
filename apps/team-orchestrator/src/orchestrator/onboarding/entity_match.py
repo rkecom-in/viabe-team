@@ -83,6 +83,7 @@ def fetch_candidates(
     gbp_fetch_fn: Callable[[dict[str, Any], str], list[dict[str, Any]]] | None = None,
     llm_fn: LlmFn | None = None,
     kyg_scraper: Any = None,
+    d4s_fetch_fn: Any = None,
 ) -> list[EntityCandidate]:
     """Surface 0..N candidates. VT-495: the knowyourgst.com name→GSTIN leg runs FIRST (highest-
     precision public-registry match — the durable fix for "couldn't auto-find the GSTIN" before the
@@ -101,18 +102,26 @@ def fetch_candidates(
     candidates.extend(_web_candidates(name, city, search_fn))
     candidates.extend(_cin_candidates(name, city, search_fn))  # VT-449 registry leg → CIN → MCA
     candidates.extend(_gbp_candidates(name, city, gbp_fetch_fn))
-    # VT-452 LLM web-search leg — the SECONDARY. VT-776 makes it a CASCADE rather than an
-    # always-on parallel leg: knowyourgst.com is the cheaper and higher-precision source but is
-    # not reliably up, so the billed LLM call is spent ONLY when the scrape produced no GSTIN.
-    # Both failing is a normal outcome, not an error — the owner is then asked to type the GSTIN,
-    # which reaches the same Sandbox verify gate (VT-406/408) that every discovered candidate does.
-    # An injected llm_fn still opts the leg IN without the flag (tests exercise it with no key),
-    # but it does NOT bypass the cascade — the skip-when-primary-succeeded rule holds on every path,
-    # so the behaviour under test is the behaviour in production.
+    # VT-776/VT-778 — the discovery CASCADE. Each rung is spent only when the one above found no
+    # GSTIN, because the cheaper and more precise source should not be paid past:
+    #   1. knowyourgst form scrape  — finds what Google has never indexed (Fazal's own company)
+    #   2. DataForSEO AI Mode       — cited references only (VT-778)
+    #   3. Gemini + grounding       — verbatim-in-grounded-text only (VT-777)
+    #   4. the owner types the GSTIN
+    # All four reach the SAME Sandbox verify gate (VT-406/408). Every rung coming up empty is a
+    # NORMAL outcome, not an error. Injected fns opt a leg IN without its flag (tests run with no
+    # credential) but do NOT bypass the cascade, so tested behaviour is production behaviour.
     from orchestrator.feature_flags import llm_discovery_enabled
 
-    primary_found_gstin = any(c.candidate_gstin for c in kyg)
-    if (llm_fn is not None or llm_discovery_enabled()) and not primary_found_gstin:
+    def _has_gstin(rows: list[EntityCandidate]) -> bool:
+        return any(c.candidate_gstin for c in rows)
+
+    found = _has_gstin(kyg)
+    if not found:
+        d4s = _dataforseo_candidates(name, city, d4s_fetch_fn)
+        candidates.extend(d4s)
+        found = _has_gstin(d4s)
+    if (llm_fn is not None or llm_discovery_enabled()) and not found:
         candidates.extend(_llm_candidates(name, city, llm_fn))
     # De-dup by (gstin or cin or trade_name); keep the first seen.
     seen: set[str] = set()
@@ -247,6 +256,44 @@ def _knowyourgst_candidates(name: str, scraper: Any) -> list[EntityCandidate]:
                 source="knowyourgst",
                 candidate_gstin=gstin,
                 detail=_clean(r.get("state")),
+            )
+        )
+    return out
+
+
+def _dataforseo_candidates(name: str, city: str, fetch_fn: Any = None) -> list[EntityCandidate]:
+    """VT-778 — DataForSEO Google AI Mode, the SECOND leg (runs only when the scrape came up empty).
+
+    Chosen over DataForSEO's organic search on measured PRECISION: organic returned the right GSTINs
+    but dragged 3-4 OTHER companies' registrations along every time, and for "RKeCom Services" it
+    returned ten GSTINs, none of them RKeCom's. Noise is disqualifying here, not untidy — a valid
+    GSTIN for the wrong company passes the Sandbox gate (it belongs to somebody) and anchors the
+    tenant to a stranger.
+
+    The method reads AI Mode's CITED REFERENCES only, never its synthesised prose, which was caught
+    inventing a well-formed Maharashtra GSTIN for RKeCom on one run and returning nothing on the
+    next. See `integrations/methods/dataforseo.py`.
+
+    FAIL-OPEN: no credential / error / 0 results → [] and the cascade falls through to the LLM leg
+    and then to the owner typing the GSTIN. HINTS-ONLY; Sandbox stays the sole gate."""
+    from orchestrator.integrations.methods.dataforseo import search_gstins
+
+    try:
+        rows = search_gstins(name, city, fetch_fn=fetch_fn)
+    except Exception:  # noqa: BLE001 — best-effort; never raise into signup
+        logger.warning("entity_match: dataforseo discovery failed (degrade to none)", exc_info=True)
+        return []
+    out: list[EntityCandidate] = []
+    for r in rows or []:
+        gstin = (r.get("gst_number") or "").strip().upper()
+        if not _GSTIN_RE.fullmatch(gstin):
+            continue
+        out.append(
+            EntityCandidate(
+                trade_name=_clean(r.get("company_name")) or name,
+                source="dataforseo",
+                candidate_gstin=gstin,
+                detail=None,
             )
         )
     return out

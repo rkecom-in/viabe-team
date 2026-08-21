@@ -1,12 +1,12 @@
 """VT-507 — async entity discovery (start / poll). VT-776: the two sources CASCADE
-(knowyourgst first, LLM only on an empty scrape) rather than running in parallel. Internal-secret gated
+(knowyourgst -> DataForSEO AI Mode -> LLM, stopping at the first GSTIN) rather than running in parallel. Internal-secret gated
 (team-web proxies; all vendor calls happen orchestrator-side).
 
 POST /api/orchestrator/onboard/discovery/start  {business_name, city}
   → {discovery_id}  (~50ms, never blocks on scrape/LLM)
 
 GET  /api/orchestrator/onboard/discovery/{discovery_id}
-  → {overall_status, sources: {llm: {...}, knowyourgst: {...}},
+  → {overall_status, sources: {knowyourgst: {...}, dataforseo: {...}, llm: {...}},
      candidates: [merged de-duped by GSTIN], both_complete_zero: bool}
 
 Auth mirrors entity_match.py / drive_push.py (X-Internal-Secret / INTERNAL_API_SECRET).
@@ -30,7 +30,7 @@ from pydantic import BaseModel
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-_SOURCES = ("llm", "knowyourgst")
+_SOURCES = ("knowyourgst", "dataforseo", "llm")  # VT-778 — cascade order
 
 
 # ---------------------------------------------------------------------------
@@ -63,8 +63,8 @@ async def discovery_start(
     x_internal_secret: str | None = Header(default=None, alias="X-Internal-Secret"),
 ) -> dict[str, Any]:
     """Kick the discovery CASCADE in the background and return a discovery_id immediately
-    (~50ms). Never blocks on the scrape or LLM call. knowyourgst runs first; the LLM leg runs
-    only if the scrape produced no GSTIN (VT-776).
+    (~50ms). Never blocks on the scrape or LLM call. sources run in precision order and
+    stop at the first GSTIN found (VT-776 / VT-778).
 
     A cache hit at kick time means the source completes before the first poll."""
     if not _verify_internal_secret(x_internal_secret):
@@ -139,13 +139,15 @@ def discovery_poll(
     )
     overall_status = "complete" if overall_complete else "searching"
 
-    llm_status = sources.get("llm", {}).get("status")
-    kyg_status = sources.get("knowyourgst", {}).get("status")
-    both_complete_zero = (
-        llm_status == "complete"
-        and kyg_status == "complete"
-        and len(sources.get("llm", {}).get("candidates") or []) == 0
-        and len(sources.get("knowyourgst", {}).get("candidates") or []) == 0
+    # VT-778: generalised over _SOURCES (was hardcoded to llm + knowyourgst). The FIELD NAME is
+    # part of the contract team-web already consumes, so it keeps its name; the meaning is
+    # unchanged — "every source finished cleanly and none of them found anything", i.e. the signup
+    # has no GSTIN to verify and the owner must type one. An ERRORED source still blocks this from
+    # being True: a failed leg is not evidence of a genuine zero.
+    both_complete_zero = all(
+        sources.get(src, {}).get("status") == "complete"
+        and len(sources.get(src, {}).get("candidates") or []) == 0
+        for src in _SOURCES
     )
 
     # VT-515: when both sources complete with zero candidates the signup is stuck
@@ -190,6 +192,10 @@ async def _run_source(
             candidates, failure_reason = await loop.run_in_executor(
                 None, _fetch_knowyourgst, name, city
             )
+        elif source == "dataforseo":
+            candidates, failure_reason = await loop.run_in_executor(
+                None, _fetch_dataforseo, name, city
+            )
         else:
             candidates, failure_reason = await loop.run_in_executor(
                 None, _fetch_llm, name, city
@@ -219,25 +225,33 @@ async def _run_source(
 async def _run_discovery_cascade(
     discovery_id: uuid.UUID, name: str, city: str
 ) -> None:
-    """VT-776 — run knowyourgst FIRST and spend the billed LLM call only if it came up empty.
+    """VT-776/VT-778 — run the discovery sources in PRECISION order and stop at the first GSTIN.
 
-    These two sources used to be kicked off concurrently, so every signup paid for a Gemini call
-    even when the scrape had already found the GSTIN. knowyourgst is the cheaper and
-    higher-precision source; the LLM is the fallback for when it is down or has no row.
+    These sources used to be kicked off concurrently, so every signup paid for every leg even when
+    the cheapest had already answered. Order is deliberate:
 
-    The skipped LLM row is still written as a TERMINAL state. ``overall_complete`` requires every
-    source to be in ("complete", "error") — leaving it "running" would hang the poller for its
+      1. knowyourgst form scrape — finds registrations Google has never indexed (it is the only
+         source that finds Fazal's own company);
+      2. DataForSEO AI Mode — cited references only (VT-778);
+      3. the LLM leg — grounded, verbatim-only (VT-777).
+
+    Every skipped source is still written as a TERMINAL row. ``overall_complete`` requires each
+    source to be in ("complete", "error"), so leaving one "running" would hang the poller for its
     full window. ``failure_reason='skipped_primary_hit'`` records WHY it never ran, so the debug
-    surface does not show a phantom zero-result LLM call that no one made.
+    surface shows a deliberate skip rather than a phantom zero-result call nobody made.
+    ``both_complete_zero`` stays correct: a hit means the candidate count is non-zero regardless.
 
-    Worst case is now serial (~10s scrape + ~8s LLM) against a 150s poll window, so the added
-    latency is well inside budget.
+    All rungs coming up empty is a NORMAL outcome — the owner is then asked to type the GSTIN,
+    which reaches the same Sandbox verify gate every discovered candidate reaches.
     """
-    kyg_candidates = await _run_source(discovery_id, "knowyourgst", name, city)
-    if any((c.get("candidate_gstin") or "").strip() for c in kyg_candidates):
-        _update_source_row(discovery_id, "llm", "complete", "skipped_primary_hit", [], 0)
-        return
-    await _run_source(discovery_id, "llm", name, city)
+    remaining = list(_SOURCES)
+    for source in _SOURCES:
+        remaining.remove(source)
+        candidates = await _run_source(discovery_id, source, name, city)
+        if any((c.get("candidate_gstin") or "").strip() for c in candidates):
+            for skipped in remaining:
+                _update_source_row(discovery_id, skipped, "complete", "skipped_primary_hit", [], 0)
+            return
 
 
 # ---------------------------------------------------------------------------
@@ -281,6 +295,38 @@ def _fetch_knowyourgst(name: str, city: str) -> tuple[list[dict[str, Any]], str 
         )
         out.append(asdict(c))
     return out, None
+
+
+def _fetch_dataforseo(name: str, city: str) -> tuple[list[dict[str, Any]], str | None]:
+    """VT-778 — DataForSEO AI Mode candidates. Returns (candidates, failure_reason|None).
+
+    Reads AI Mode's CITED REFERENCES only, never its synthesised prose (the prose was measured
+    inventing a well-formed GSTIN for a business it had no source for). Organic search was
+    evaluated and REJECTED: it returned 3-4 other companies' registrations alongside every correct
+    hit, and a valid GSTIN for the wrong company survives the Sandbox gate."""
+    from orchestrator.integrations.methods.dataforseo import configured, search_gstins
+    from orchestrator.onboarding.entity_match import _GSTIN_RE, EntityCandidate, _clean
+
+    if not configured():
+        return [], "no_key"
+    try:
+        rows = search_gstins(name, city)
+    except Exception:  # noqa: BLE001
+        logger.warning("discovery: dataforseo lookup failed for %r", name, exc_info=True)
+        return [], "scrape_error"
+
+    out: list[dict[str, Any]] = []
+    for r in rows or []:
+        gstin = (r.get("gst_number") or "").strip().upper()
+        if not _GSTIN_RE.fullmatch(gstin):
+            continue
+        out.append(asdict(EntityCandidate(
+            trade_name=_clean(r.get("company_name")) or name,
+            source="dataforseo",
+            candidate_gstin=gstin,
+            detail=None,
+        )))
+    return out, (None if out else "zero_results")
 
 
 def _fetch_llm(name: str, city: str) -> tuple[list[dict[str, Any]], str | None]:
