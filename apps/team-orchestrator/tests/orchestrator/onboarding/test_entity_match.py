@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import json
+
 import pytest
 
 # entity_match transitively imports orchestrator.integrations → pydantic, which is absent
@@ -620,3 +622,83 @@ def test_cascade_both_legs_empty_yields_no_candidates(monkeypatch) -> None:
     out = entity_match.fetch_candidates("Zzqxwv Nonexistent Pvt", "Mumbai",
                               kyg_scraper=_StubScraper([]), llm_fn=lambda n, c: '{"companies": []}')
     assert out == []
+
+
+# ---------------------------------------------------------------------------
+# VT-777 — the GROUNDING GUARD on the LLM discovery leg.
+#
+# A single search+JSON call never searched at all (5/5 dev calls, search_count=0): the
+# JSON-only instruction suppresses Gemini's discretionary grounding. The ungrounded call
+# then answered from memory — for "RKeCom Services" it returned 07AAGCR4831R1ZB (Delhi)
+# when the real registration is 27AAKCR3738B1ZE (Maharashtra). A well-formed GSTIN for the
+# WRONG entity is the VT-406 Sundaram bug, and Sandbox cannot catch it: the GSTIN is real
+# and ACTIVE, it just belongs to someone else. Hence: no grounding -> no candidates, and
+# no GSTIN survives unless it appears verbatim in the grounded text.
+# ---------------------------------------------------------------------------
+class _FakeResp:
+    def __init__(self, meta): self.response_metadata = meta
+
+
+def _install_llm_stub(monkeypatch, *, queries, grounded_text, extracted_json):
+    """Stub the two-call seam. Call 1 = grounded search, call 2 = extraction."""
+    import orchestrator.llm.structured as st
+
+    calls: list[str] = []
+
+    def _messages_call(tier, **kw):
+        calls.append(kw.get("call_site", "?"))
+        return _FakeResp({"grounding_metadata": {"web_search_queries": list(queries)}})
+
+    def _response_text(resp, *, mode="join"):
+        return grounded_text if len(calls) == 1 else extracted_json
+
+    monkeypatch.setattr(st, "messages_call", _messages_call)
+    monkeypatch.setattr(st, "response_text", _response_text)
+    return calls
+
+
+_REAL = "27AAKCR3738B1ZE"
+_FABRICATED = "07AAGCR4831R1ZB"   # what the ungrounded model actually produced
+
+
+def test_ungrounded_search_yields_zero_candidates(monkeypatch):
+    """No search query issued => the answer came from memory => fail CLOSED."""
+    calls = _install_llm_stub(
+        monkeypatch, queries=[], grounded_text=f"The GSTIN is {_FABRICATED}.",
+        extracted_json='{"companies":[{"name":"X","gstin":"%s","cin":""}]}' % _FABRICATED)
+    out = entity_match._default_llm_search("RKeCom Services", "Mumbai")
+    assert json.loads(out) == {"companies": []}
+    assert calls == ["llm_discovery_search"], "extraction ran despite no grounding"
+
+
+def test_gstin_absent_from_grounded_text_is_dropped(monkeypatch):
+    """The extractor invented a GSTIN the search text never carried — it must not survive."""
+    _install_llm_stub(
+        monkeypatch, queries=["RKeCom Services GST"],
+        grounded_text=f"Registered as {_REAL} in Maharashtra.",
+        extracted_json=('{"companies":[{"name":"REAL CO","gstin":"%s","cin":""},'
+                        '{"name":"GHOST CO","gstin":"%s","cin":""}]}' % (_REAL, _FABRICATED)))
+    out = json.loads(entity_match._default_llm_search("RKeCom Services", "Mumbai"))
+    assert [c["gstin"] for c in out["companies"]] == [_REAL]
+
+
+def test_grounded_gstin_survives(monkeypatch):
+    """The happy path still works — a GSTIN present in the grounded text is kept."""
+    _install_llm_stub(
+        monkeypatch, queries=["Balaji Wafers Rajkot GSTIN"],
+        grounded_text="Balaji Wafers Private Limited, GSTIN 24AAACB8755A1Z1, Gujarat.",
+        extracted_json='{"companies":[{"name":"BALAJI WAFERS PRIVATE LIMITED",'
+                       '"gstin":"24AAACB8755A1Z1","cin":""}]}')
+    out = json.loads(entity_match._default_llm_search("Balaji Wafers", "Rajkot"))
+    assert out["companies"] == [{"name": "BALAJI WAFERS PRIVATE LIMITED",
+                                "gstin": "24AAACB8755A1Z1", "cin": ""}]
+
+
+def test_search_found_no_gstin_is_an_honest_miss(monkeypatch):
+    """Grounding fired but the pages carried no GSTIN — zero candidates, no second call."""
+    calls = _install_llm_stub(
+        monkeypatch, queries=["Obscure Shop GST"],
+        grounded_text="No GST registration could be found for this business.",
+        extracted_json='{"companies":[]}')
+    assert json.loads(entity_match._default_llm_search("Obscure Shop", ""))["companies"] == []
+    assert calls == ["llm_discovery_search"], "spent an extraction call on a GSTIN-free page"
