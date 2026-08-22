@@ -1,0 +1,46 @@
+# REVIEW PROPOSAL ONLY. CC lands registry/template entries after rail and template review.
+agent:
+  name: abandoned_checkout_recovery
+  routing_default: off
+  activation:
+    journey_complete: true
+    verification_at_least: gstin_verified
+    ownership_verified: true
+    enabled_checkout_source: true
+    purpose_consent_capture_configured: true
+    eligible_checkout_minimum: 1
+  sources:
+    - shopify
+    - reports_funnel
+  consent_policy:
+    ledger: commerce_consent_grants
+    channel: whatsapp
+    purpose: checkout_recovery
+    approved_notice_versions: []
+  contact_budget_policy: unset
+  abandonment_delay: unset
+  attribution_window: unset
+
+templates:
+  - name: team_checkout_recovery_simple_en
+    locale: en
+    category: marketing
+    sid: null
+    params: [customer_name, business_name, recovery_link]
+    body: >-
+      Hi {{1}}, you left items in your checkout at {{2}}. Complete it here: {{3}}.
+      Reply STOP to opt out.
+  - name: team_checkout_recovery_simple_hi
+    locale: hi
+    category: marketing
+    sid: null
+    params: [customer_name, business_name, recovery_link]
+    body: >-
+      नमस्ते {{1}}, {{2}} पर आपका चेकआउट अधूरा रह गया है। इसे यहाँ पूरा करें: {{3}}।
+      संदेश बंद करने के लिए STOP लिखें।
+
+effect_boundary:
+  composes_draft: true
+  persists_awaiting_approval: true
+  sends: false
+  eventual_send_seam: agents.customer_send.agent_send_draft
