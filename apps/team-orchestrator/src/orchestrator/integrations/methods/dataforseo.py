@@ -59,7 +59,10 @@ logger = logging.getLogger(__name__)
 
 _KEY_ENV = "DATAFORSEO_API_BASE64"
 _AI_MODE_URL = "https://api.dataforseo.com/v3/serp/google/ai_mode/live/advanced"
-_LOCATION_CODE = 2356  # India
+_LOCATION_CODE = 2356  # India — the fallback when a tenant city does not resolve
+_TASK_OK = 20000       # DataForSEO task-level success
+_LOCATIONS_URL = "https://api.dataforseo.com/v3/serp/google/locations/in"
+_locations: dict[str, int] | None = None  # lazy, per-process: city -> location_code
 _LANGUAGE_CODE = "en"
 _TIMEOUT_S = 60.0
 _MIN_QUERY_LEN = 5
@@ -168,10 +171,25 @@ def search_gstins(name: str, city: str = "", *, fetch_fn: Any = None) -> list[di
     if fetch_fn is None and not configured():
         return []  # fail-open: no credential → leg skipped, cascade falls through
 
-    location = f" in {city}" if (city or "").strip() else ""
-    query = f"What is the GSTIN (GST registration number) of {name}{location}?"
+    # KEYWORD form, not a natural-language question, and the CITY DOES NOT GO IN THE KEYWORD.
+    # This is a SERP engine: phrasing decides what Google retrieves, and a city term in the query
+    # RESTRICTS the result set instead of merely preferring local ones. Measured on
+    # "Sundaram Book Store" (truth: 27AADCS7829K1ZT, Sundaram Multi Pap Ltd — "Sundaram" is that
+    # company's brand, so the shop name and the registered name differ):
+    #
+    #   keyword                                geo                       result
+    #   "... GSTIN"                            Mumbai                    HIT, 7 refs
+    #   "... GSTIN"                            India                     HIT, 6 refs
+    #   "... GSTN"                             Mumbai                    miss
+    #   "... GSTIN GST number"                 either                    miss
+    #   "What is the GSTIN ... of ...?"        India                     miss, 2 refs
+    #
+    # So: business name first, ONE qualifier, nothing else. "GSTIN" beats "GSTN" (GSTN is the tax
+    # network, GSTIN the number) and survives geo-targeting where GSTN did not. Extra qualifier
+    # words starve retrieval — "GSTIN GST number" lost the answer entirely.
+    query = f"{name} GSTIN"
     try:
-        payload = fetch_fn(query) if fetch_fn is not None else _ai_mode_fetch(query)
+        payload = fetch_fn(query) if fetch_fn is not None else _ai_mode_fetch(query, city)
     except Exception:  # noqa: BLE001 — discovery must never block onboarding
         logger.warning("dataforseo: AI Mode fetch failed (degrade to none)", exc_info=True)
         return []
@@ -184,26 +202,82 @@ def search_gstins(name: str, city: str = "", *, fetch_fn: Any = None) -> list[di
     return rows
 
 
-def _ai_mode_fetch(query: str) -> dict[str, Any]:
-    """POST one live AI Mode task. Raises on transport/HTTP error → ``search_gstins`` degrades."""
+def _location_code_for(city: str) -> int | None:
+    """Resolve a bare city name to DataForSEO's ``location_code``. ``None`` when unknown.
+
+    Geo-targeting is NOT a nicety on this leg, it decides the answer. Measured on
+    "Sundaram Book Store" (truth 27AADCS7829K1ZT), 4 runs each:
+
+        location_code 2356 (India-wide)   ->  0/4 hits
+        Mumbai                            ->  4/4 hits
+
+    So the tenant's city must reach the request. It cannot go in the KEYWORD (that restricts the
+    result set instead of preferring local ones — Fazal 2026-08-22), and ``location_name`` needs a
+    full "City,Region,Country" string that an IP-derived city name does not give us: "Mumbai,India"
+    is rejected outright with `Invalid Field: 'location_name'`. So we resolve the city against
+    DataForSEO's own location list and pass the numeric code.
+
+    The list is ~24k rows / 3.7MB but answers in ~1s and is cached for the process lifetime. Any
+    failure returns None and the caller falls back to India-wide — a slow or broken lookup must
+    never cost us the discovery."""
+    global _locations
+    city = (city or "").strip().lower()
+    if not city:
+        return None
+    if _locations is None:
+        try:
+            import httpx
+
+            resp = httpx.get(
+                _LOCATIONS_URL,
+                headers={"Authorization": f"Basic {os.environ.get(_KEY_ENV, '').strip()}"},
+                timeout=_TIMEOUT_S,
+            )
+            if resp.is_error:
+                raise RuntimeError(f"dataforseo: locations returned HTTP {resp.status_code}")
+            rows = ((resp.json() or {}).get("tasks") or [{}])[0].get("result") or []
+            table: dict[str, int] = {}
+            for row in rows:
+                name = str(row.get("location_name") or "")
+                code = row.get("location_code")
+                if not name or not isinstance(code, int):
+                    continue
+                key = name.split(",")[0].strip().lower()
+                # Prefer a City row; never let a broader region overwrite one already claimed.
+                if key and (key not in table or row.get("location_type") == "City"):
+                    table.setdefault(key, code)
+            _locations = table
+        except Exception:  # noqa: BLE001 — geo resolution is best-effort
+            logger.warning("dataforseo: location lookup failed (falling back to India-wide)", exc_info=True)
+            _locations = {}
+    return _locations.get(city)
+
+
+def _ai_mode_fetch(query: str, city: str = "") -> dict[str, Any]:
+    """POST one live AI Mode task. Raises on transport/HTTP error → ``search_gstins`` degrades.
+
+    ``city`` is the tenant's locale (expected to come from their IP, not from anything they type).
+    It rides DataForSEO's geo targeting so Google WEIGHTS local results — a preference, not a
+    filter. It is deliberately kept OUT of the keyword, where it would restrict instead."""
     import httpx
 
+    payload: dict[str, Any] = {
+        "keyword": query,
+        "language_code": _LANGUAGE_CODE,
+        "location_code": _location_code_for(city) or _LOCATION_CODE,
+    }
     resp = httpx.post(
         _AI_MODE_URL,
         headers={
             "Authorization": f"Basic {os.environ.get(_KEY_ENV, '').strip()}",
             "Content-Type": "application/json",
         },
-        json=[{
-            "keyword": query,
-            "language_code": _LANGUAGE_CODE,
-            "location_code": _LOCATION_CODE,
-        }],
+        json=[payload],
         timeout=_TIMEOUT_S,
     )
     if resp.is_error:
-        # Status only. Never raise_for_status() and never interpolate the body: the credential
-        # rides in the Authorization header and `search_gstins` logs this with exc_info=True.
+        # Status only. Never raise_for_status(), never interpolate the body: the credential rides
+        # in the Authorization header and `search_gstins` logs this with exc_info=True.
         raise RuntimeError(
             f"dataforseo: AI Mode returned HTTP {resp.status_code} "
             f"(credential {'present' if configured() else 'absent'}; body withheld)"
