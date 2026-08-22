@@ -11,7 +11,13 @@ from typing import Any
 
 import pytest
 
-from orchestrator.integrations.methods import dataforseo as d4s
+# The dep-less smoke gate runs this suite WITHOUT the heavy deps. Importing the module pulls
+# orchestrator.integrations.__init__ -> registry -> schemas -> pydantic, so guard the import or
+# collection dies for the whole file (not just these tests). Verify with:
+#   uv run --no-project --isolated --with pytest --with pyyaml pytest <this file>
+pytest.importorskip("pydantic")
+
+from orchestrator.integrations.methods import dataforseo as d4s  # noqa: E402
 
 _REAL = "27AADCS7829K1ZT"          # Sundaram Multi Pap Ltd — "Sundaram" is that company's brand
 _OTHER = "33ADPPA8636E1ZN"         # a genuinely different company
