@@ -1,0 +1,13 @@
+# VT-769 proposal only. CC performs explicit registry wiring after review.
+name: ad_composer
+category: Marketing
+roles: [proposer]
+capabilities: [propose_campaign]
+tags: [ads, campaigns, creative, planning]
+activation:
+  default: off
+  requires_journey_complete: true
+  requires_ownership_verified: true
+effect_authority: none
+publication: manual_owner_only
+destination_resolution: unresolved_until_aggregate_seam_lands
