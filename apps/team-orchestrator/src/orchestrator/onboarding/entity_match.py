@@ -57,7 +57,8 @@ LlmFn = Callable[[str, str], str]
 # VT-732: the COMPLEX reasoning tier for the LLM-discovery leg (was a hardcoded claude-opus-4-8).
 # Server-side web_search is bound by the seam in the resolved provider's own native form and is gated
 # by the TEAM_ENABLE_WEB_SEARCH master flag; the strict-JSON contract below is provider-independent.
-_LLM_DISCOVERY_TIER = "complex"
+# VT-776: the discovery tier (Gemini + google_search grounding), not the Manager's "complex".
+_LLM_DISCOVERY_TIER = "discovery"
 
 
 @dataclass(frozen=True)
@@ -82,6 +83,7 @@ def fetch_candidates(
     gbp_fetch_fn: Callable[[dict[str, Any], str], list[dict[str, Any]]] | None = None,
     llm_fn: LlmFn | None = None,
     kyg_scraper: Any = None,
+    d4s_fetch_fn: Any = None,
 ) -> list[EntityCandidate]:
     """Surface 0..N candidates. VT-495: the knowyourgst.com name→GSTIN leg runs FIRST (highest-
     precision public-registry match — the durable fix for "couldn't auto-find the GSTIN" before the
@@ -95,14 +97,31 @@ def fetch_candidates(
     if not name:
         return []
     candidates: list[EntityCandidate] = []
-    candidates.extend(_knowyourgst_candidates(name, kyg_scraper))  # VT-495 — name→GSTIN, runs first
+    kyg = _knowyourgst_candidates(name, kyg_scraper)  # VT-495 — name→GSTIN, the PRIMARY leg
+    candidates.extend(kyg)
     candidates.extend(_web_candidates(name, city, search_fn))
     candidates.extend(_cin_candidates(name, city, search_fn))  # VT-449 registry leg → CIN → MCA
     candidates.extend(_gbp_candidates(name, city, gbp_fetch_fn))
-    # VT-452 LLM web-search leg — gated OFF by default; an injected llm_fn forces it on for tests.
+    # VT-776/VT-778 — the discovery CASCADE. Each rung is spent only when the one above found no
+    # GSTIN, because the cheaper and more precise source should not be paid past:
+    #   1. knowyourgst form scrape  — finds what Google has never indexed (Fazal's own company)
+    #   2. DataForSEO AI Mode       — cited references only (VT-778)
+    #   3. Gemini + grounding       — verbatim-in-grounded-text only (VT-777)
+    #   4. the owner types the GSTIN
+    # All four reach the SAME Sandbox verify gate (VT-406/408). Every rung coming up empty is a
+    # NORMAL outcome, not an error. Injected fns opt a leg IN without its flag (tests run with no
+    # credential) but do NOT bypass the cascade, so tested behaviour is production behaviour.
     from orchestrator.feature_flags import llm_discovery_enabled
 
-    if llm_fn is not None or llm_discovery_enabled():
+    def _has_gstin(rows: list[EntityCandidate]) -> bool:
+        return any(c.candidate_gstin for c in rows)
+
+    found = _has_gstin(kyg)
+    if not found:
+        d4s = _dataforseo_candidates(name, city, d4s_fetch_fn)
+        candidates.extend(d4s)
+        found = _has_gstin(d4s)
+    if (llm_fn is not None or llm_discovery_enabled()) and not found:
         candidates.extend(_llm_candidates(name, city, llm_fn))
     # De-dup by (gstin or cin or trade_name); keep the first seen.
     seen: set[str] = set()
@@ -237,6 +256,44 @@ def _knowyourgst_candidates(name: str, scraper: Any) -> list[EntityCandidate]:
                 source="knowyourgst",
                 candidate_gstin=gstin,
                 detail=_clean(r.get("state")),
+            )
+        )
+    return out
+
+
+def _dataforseo_candidates(name: str, city: str, fetch_fn: Any = None) -> list[EntityCandidate]:
+    """VT-778 — DataForSEO Google AI Mode, the SECOND leg (runs only when the scrape came up empty).
+
+    Chosen over DataForSEO's organic search on measured PRECISION: organic returned the right GSTINs
+    but dragged 3-4 OTHER companies' registrations along every time, and for "RKeCom Services" it
+    returned ten GSTINs, none of them RKeCom's. Noise is disqualifying here, not untidy — a valid
+    GSTIN for the wrong company passes the Sandbox gate (it belongs to somebody) and anchors the
+    tenant to a stranger.
+
+    The method reads AI Mode's CITED REFERENCES only, never its synthesised prose, which was caught
+    inventing a well-formed Maharashtra GSTIN for RKeCom on one run and returning nothing on the
+    next. See `integrations/methods/dataforseo.py`.
+
+    FAIL-OPEN: no credential / error / 0 results → [] and the cascade falls through to the LLM leg
+    and then to the owner typing the GSTIN. HINTS-ONLY; Sandbox stays the sole gate."""
+    from orchestrator.integrations.methods.dataforseo import search_gstins
+
+    try:
+        rows = search_gstins(name, city, fetch_fn=fetch_fn)
+    except Exception:  # noqa: BLE001 — best-effort; never raise into signup
+        logger.warning("entity_match: dataforseo discovery failed (degrade to none)", exc_info=True)
+        return []
+    out: list[EntityCandidate] = []
+    for r in rows or []:
+        gstin = (r.get("gst_number") or "").strip().upper()
+        if not _GSTIN_RE.fullmatch(gstin):
+            continue
+        out.append(
+            EntityCandidate(
+                trade_name=_clean(r.get("company_name")) or name,
+                source="dataforseo",
+                candidate_gstin=gstin,
+                detail=None,
             )
         )
     return out
@@ -692,44 +749,116 @@ def _default_search(query: str) -> list[dict[str, Any]]:
     return out
 
 
-def _default_llm_search(name: str, city: str) -> str:
-    """VT-452/VT-509 default LLM-discovery call: the COMPLEX tier + server-side web_search.
-    Returns strict JSON {"companies":[{"name","gstin","cin"}]} or {"companies":[]} if not found.
-    The caller (_llm_candidates) parses this JSON strictly; a non-JSON response -> zero candidates.
+def _grounded_gstins(text: str) -> set[str]:
+    """The GSTINs that literally appear in a block of grounded search text."""
+    return set(_GSTIN_RE.findall((text or "").upper()))
 
-    VT-732 — routed through the tier seam: the model is the env's choice, the credential is the
-    resolved provider's, and the call is cost-metered. Server-side search runs on the provider's side;
-    we consume only the model's final text block.
-    Raises on call failure -> the leg's try/except degrades it to [] (fail-soft)."""
-    from orchestrator.llm.structured import structured_text_call
+
+def _default_llm_search(name: str, city: str) -> str:
+    """VT-452/VT-509/VT-777 LLM-discovery: a GROUNDED web search, then extraction, then a hard
+    grounding guard. Returns strict JSON {"companies":[{"name","gstin","cin"}]}.
+
+    VT-777 — why this is TWO calls instead of one.
+    A single call that both searched and returned strict JSON did not search AT ALL. Measured on
+    deployed dev: 5/5 gemini calls recorded search_count=0, and
+    ``SELECT COUNT(*), SUM(search_count) ... WHERE provider='google'`` returned (5, 0). Grounding is
+    model-DISCRETIONARY, and the "respond with ONLY valid JSON, no prose" instruction suppressed it.
+    Isolated locally: the same prompt WITH grounding enabled produced 0 search queries, while a prose
+    prompt produced grounding queries on the same model and key.
+
+    The ungrounded call did not fail loudly — it answered from parametric memory. Asked for
+    "RKeCom Services" it returned 07AAGCR4831R1ZB (a Delhi GSTIN) when the real registration is
+    27AAKCR3738B1ZE (Maharashtra). That is the VT-406 Sundaram failure exactly: a well-formed,
+    plausible GSTIN for the WRONG legal entity. Sandbox cannot save us there — it confirms the
+    GSTIN is real and ACTIVE, because it belongs to somebody. It cannot know the owner picked the
+    wrong somebody.
+
+    So the guard is structural, not advisory:
+      * call 1 searches with a PROSE prompt (grounding actually fires);
+      * if no search query was issued, we return ZERO candidates — an ungrounded answer is a
+        memory answer, and we would rather find nothing than anchor a tenant to a stranger;
+      * call 2 extracts JSON from call 1's text ONLY, with no search of its own;
+      * every returned GSTIN must appear VERBATIM in call 1's grounded text, or it is dropped.
+
+    Fabrication is therefore not discouraged, it is impossible: a GSTIN the search text never
+    contained cannot survive the filter.
+
+    Raises on call failure -> the leg's try/except degrades it to [] (fail-soft).
+    """
+    import json as _json
+
+    from orchestrator.llm.structured import messages_call, response_text
 
     location = f" in {city}" if (city or "").strip() else ""
-    prompt = (
-        f'Find the GSTIN (Indian GST registration number), CIN (Corporate Identification Number), '
-        f'and registered company name for "{name}"{location} from public records. '
-        f'Search the web if needed. '
-        f'Return ONLY this exact JSON format - no prose, no markdown, no explanation: '
-        f'{{"companies": [{{"name": "Registered Company Name", "gstin": "15-char-GSTIN", "cin": "CIN-or-empty-string"}}]}} '
-        f'or {{"companies": []}} if not found. '
-        f'Include ONLY companies with a confirmed 15-character GSTIN. '
-        f'Your ENTIRE response must be parseable by json.loads().'
-    )
-    # text_mode="last" takes the model's final answer AFTER the web_search completes — earlier text
-    # blocks may be "I'll search…" preamble, and joining them would feed prose into json.loads().
-    return structured_text_call(
+    search_resp = messages_call(
         _LLM_DISCOVERY_TIER,
-        system=(
-            "You are a structured data extraction agent. "
-            "You MUST respond with ONLY valid JSON -- no prose, no markdown, no explanation. "
-            "Your entire response must be parseable by json.loads()."
-        ),
-        user=prompt,
-        max_tokens=512,
+        messages=[(
+            "human",
+            f'Search the web for the GST registration number (GSTIN) of the Indian business '
+            f'"{name}"{location}. Quote the exact GSTIN(s) and the registered company name(s) you '
+            f'find, and name the source pages. If you cannot find a GSTIN, say so plainly.'
+        )],
+        system="You research Indian company registration data using web search.",
+        max_tokens=2048,
         agent="onboarding_entity_match",
-        call_site="llm_discovery",
+        call_site="llm_discovery_search",
         enable_web_search=True,
-        text_mode="last",
+    )
+    grounded = response_text(search_resp, mode="join")
+    meta = getattr(search_resp, "response_metadata", None) or {}
+    grounding = meta.get("grounding_metadata") or {}
+    queries = grounding.get("web_search_queries") or []
+    if not queries:
+        # Ungrounded => the model answered from memory. Fail CLOSED (see the docstring).
+        logger.warning("llm_discovery: no grounded search issued for %r — returning zero candidates", name)
+        return '{"companies": []}'
+    allowed = _grounded_gstins(grounded)
+    if not allowed:
+        return '{"companies": []}'  # searched, found no GSTIN — a normal, honest miss
+
+    # max_tokens matters here: at 512 the JSON was truncated mid-object and every candidate was
+    # silently lost to the parse. The extraction reads a whole search result, so give it room.
+    raw = response_text(
+        messages_call(
+            _LLM_DISCOVERY_TIER,
+            messages=[(
+                "human",
+                'From the TEXT below, extract every company that has a 15-character GSTIN.\n'
+                'Return ONLY {"companies":[{"name":"Registered Company Name","gstin":"...","cin":""}]} '
+                'or {"companies":[]}. Use ONLY GSTINs that appear verbatim in the TEXT.\n\n'
+                f"TEXT:\n{grounded}"
+            )],
+            system=("You extract structured data from provided text. You MUST respond with ONLY "
+                    "valid JSON parseable by json.loads() -- no prose, no markdown."),
+            max_tokens=2048,
+            agent="onboarding_entity_match",
+            call_site="llm_discovery_extract",
+            enable_web_search=False,
+        ),
+        mode="last",
     ).strip()
+
+    m = re.search(r"\{.*\}", raw, re.DOTALL)
+    if not m:
+        return '{"companies": []}'
+    try:
+        data = _json.loads(m.group(0))
+    except (ValueError, TypeError):
+        return '{"companies": []}'
+
+    kept: list[dict[str, str]] = []
+    for c in data.get("companies") or []:
+        if not isinstance(c, dict):
+            continue
+        gstin = str(c.get("gstin") or "").upper().replace(" ", "")
+        if not _GSTIN_RE.fullmatch(gstin):
+            continue
+        if gstin not in allowed:
+            # The extractor invented (or mis-transcribed) a GSTIN the search text never carried.
+            logger.warning("llm_discovery: dropped a GSTIN absent from the grounded text for %r", name)
+            continue
+        kept.append({"name": str(c.get("name") or ""), "gstin": gstin, "cin": str(c.get("cin") or "")})
+    return _json.dumps({"companies": kept})
 
 
 def _clean(v: Any) -> str | None:

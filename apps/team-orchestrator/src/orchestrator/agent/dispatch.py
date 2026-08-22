@@ -447,7 +447,6 @@ _CAPABILITY_DISPLAY: dict[str, str] = {
     "integration.google_sheet_ingest": "Google Sheet connect + sales ingest",
     "integration.shopify_connect": "Shopify store connect",
     "integration.gst_verify": "GST verification",
-    "integration.knowyourgst_discovery": "GSTIN business discovery",
     "manager.customer_list_export": "customer-list export (CSV sent to the owner)",
     "marketing.campaign_prepare": "marketing campaign + content drafts",
     "finance.advice": "cash-flow / receivables / pricing analysis",

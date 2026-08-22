@@ -224,18 +224,6 @@ CAPABILITY_REGISTRY: dict[str, CapabilitySpec] = {
         prerequisites=None,
         environments=KNOWN_ENVS,
     ),
-    "integration.knowyourgst_discovery": CapabilitySpec(
-        key="integration.knowyourgst_discovery",
-        lane="integration",
-        effect_class="advisory",                 # read-only business discovery
-        mode="live",
-        policy_rail=False,
-        summary="Discover business facts from a GSTIN (knowyourgst) to pre-fill the profile draft.",
-        verifier=None,
-        rollback=None,
-        prerequisites=None,
-        environments=KNOWN_ENVS,
-    ),
     # ── Manager-held owner service (LIVE; VT-676) ──
     "manager.customer_list_export": CapabilitySpec(
         key="manager.customer_list_export",

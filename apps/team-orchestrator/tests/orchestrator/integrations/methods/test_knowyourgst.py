@@ -123,7 +123,7 @@ def test_search_short_query_skips_fetch() -> None:
 
 
 def test_search_no_key_no_fetch_fn_fails_open(monkeypatch) -> None:
-    monkeypatch.delenv("SCRAPINGBEE_API_KEY", raising=False)
+    monkeypatch.delenv("FIRECRAWL_API_KEY", raising=False)
     assert k.KnowYourGSTScraper().search("rkecom") == []
 
 
@@ -153,9 +153,9 @@ def test_search_caches_successful_result() -> None:
 
 
 def test_scraper_configured_reflects_key(monkeypatch) -> None:
-    monkeypatch.delenv("SCRAPINGBEE_API_KEY", raising=False)
+    monkeypatch.delenv("FIRECRAWL_API_KEY", raising=False)
     assert k.scraper_configured() is False
-    monkeypatch.setenv("SCRAPINGBEE_API_KEY", "x")
+    monkeypatch.setenv("FIRECRAWL_API_KEY", "x")
     assert k.scraper_configured() is True
 
 
@@ -210,12 +210,12 @@ def test_bounded_retry_fires_on_empty_live_scrape(monkeypatch) -> None:
     call_count = {"n": 0}
     real_html = _RESULT_HTML
 
-    def fake_scrapingbee(self, query: str) -> str:  # noqa: ANN001
+    def fake_firecrawl(self, query: str) -> str:  # noqa: ANN001
         call_count["n"] += 1
         return "<html>no results</html>" if call_count["n"] == 1 else real_html
 
-    monkeypatch.setattr(k.KnowYourGSTScraper, "_scrapingbee_fetch", fake_scrapingbee)
-    monkeypatch.setenv("SCRAPINGBEE_API_KEY", "fakekey")
+    monkeypatch.setattr(k.KnowYourGSTScraper, "_firecrawl_fetch", fake_firecrawl)
+    monkeypatch.setenv("FIRECRAWL_API_KEY", "fakekey")
 
     scraper = k.KnowYourGSTScraper()
     result = scraper.search("rkecom")
@@ -236,3 +236,42 @@ def test_bounded_retry_does_not_fire_for_injected_fixture(monkeypatch) -> None:
     result = scraper.search("rkecom")
     assert result == []
     assert call_count["n"] == 1  # exactly one call — no retry for injected fixtures
+
+
+# The 2026-08-21 markup shift: knowyourgst.com moved the result anchors from relative to ABSOLUTE
+# hrefs. _RESULT_RE was anchored to a leading "/gst-number-search/", so every row stopped matching
+# while the scrape still returned a healthy 200 — the leg reported 0 candidates, which is
+# indistinguishable from "this business is not GST-registered". Pin the absolute form.
+_ABSOLUTE_HREF_HTML = (
+    '<div class="col l12 s12 rightbox z-depth-1" id="searchresult">'
+    '\n    <a href="https://www.knowyourgst.com/gst-number-search/'
+    'rkecom-services-opc-private-limited-27AAKCR3738B1ZE/"'
+    ' title="GST number of RKECOM SERVICES (OPC) PRIVATE LIMITED" target="blank">'
+    '\n        \n        <h5>RKECOM SERVICES (OPC) PRIVATE LIMITED</h5>'
+    '\n        </a>'
+    '\n          <span class="black-text">'
+    '\n          <strong class="center-align">Maharashtra</strong>,'
+    ' <strong class="center-align">27AAKCR3738B1ZE</strong>'
+    '\n          </span>'
+    '\n    </div>'
+)
+
+
+def test_parse_absolute_href_result_row() -> None:
+    """2026-08-21 regression: absolute result hrefs must parse. Captured from a live Firecrawl
+    scrape of a known-resolvable name — the page carried 43 result units and the relative-only
+    pattern matched none of them."""
+    rows = k._parse_results(_ABSOLUTE_HREF_HTML)
+    assert rows == [{
+        "company_name": "RKECOM SERVICES (OPC) PRIVATE LIMITED",
+        "state": "Maharashtra",
+        "gst_number": _RKECOM_GSTIN,
+    }]
+
+
+def test_parse_handles_relative_and_absolute_hrefs_together() -> None:
+    """Both anchor forms must parse in one page — the site may serve a mix during a rollout."""
+    rows = k._parse_results(_LIVE_RESULT_HTML + _ABSOLUTE_HREF_HTML.replace(
+        "27AAKCR3738B1ZE", "29AAACD1234A1Z5").replace(
+        "RKECOM SERVICES (OPC) PRIVATE LIMITED", "PRODIGY DIGITAL"))
+    assert [r["gst_number"] for r in rows] == [_RKECOM_GSTIN, "29AAACD1234A1Z5"]
